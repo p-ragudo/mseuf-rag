@@ -31,6 +31,9 @@ then restart your terminal after running the installer
 ## first run
 uv venv
 
+## activate the venv
+.venv\Scripts\activate
+
 ## then run
 uv pip sync requirements.txt
 ```
