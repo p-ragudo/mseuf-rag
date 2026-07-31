@@ -1,10 +1,12 @@
 # Setup
 
+## Backend Setup
+
 Use **uv** instead of pip
 
 ---
 
-## Prerequisites
+### Prerequisites
 
 * **Python 3.12+**
 * **`uv`** (Package installer and environment manager)
@@ -21,13 +23,26 @@ pip install uv
 
 then restart your terminal after running the installer
 
-## Create a virtual environment and syncing packages
+### Create a virtual environment and syncing packages
 
-- Make sure your terminal is at backend/ directory
+- Make sure your terminal is at **``backend/``** directory
 - Create a virtual environment and sync packages
 ```powershell
-    uv venv
+## first run
+uv venv
 
-    ## then run
-    uv pip sync requirements.txt
+## then run
+uv pip sync requirements.txt
+```
+## Svelte Setup
+
+### Prerequisites
+
+Have **`npm`** installed
+
+### Install packages
+
+- Make sure your terminal is at **``frontend/``** directory
+```powershell
+npm install
 ```
