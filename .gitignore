@@ -32,3 +32,15 @@ pnpm-debug.log*
 .idea/
 .DS_Store
 Thumbs.db
+
+# Excludes all raw downloads, scraped pages, parsed JSON, and discovery logs
+data/
+backend/data/
+
+# Specific data formats just in case they land outside the data/ folder
+*.html
+*.csv
+*.json
+*.xml
+*.sqlite3
+*.db

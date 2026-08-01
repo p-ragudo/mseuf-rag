@@ -89,6 +89,7 @@ pygments==2.20.0
     # via rich
 python-dotenv==1.2.2
     # via
+    #   -r requirements.in
     #   pydantic-settings
     #   uvicorn
 python-multipart==0.0.32
