@@ -37,10 +37,24 @@ Thumbs.db
 data/
 backend/data/
 
-# Specific data formats just in case they land outside the data/ folder
-*.html
-*.csv
-*.json
-*.xml
-*.sqlite3
-*.db
+# Scraped/generated data formats - scoped to data dirs only, not global
+data/**/*.html
+data/**/*.csv
+data/**/*.json
+data/**/*.xml
+data/**/*.sqlite3
+data/**/*.db
+
+# Python packaging / build artifacts
+*.egg-info/
+build/
+*.egg
+
+# Coverage reports (if you ever run pytest --cov)
+.coverage
+htmlcov/
+coverage.xml
+
+# mypy / ruff / other tool caches
+.mypy_cache/
+.ruff_cache/
