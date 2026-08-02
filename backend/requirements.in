@@ -1,3 +1,5 @@
 fastapi[standard]
 beautifulsoup4
 requests
+python-dotenv
+pytest  

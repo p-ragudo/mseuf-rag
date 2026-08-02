@@ -49,3 +49,19 @@ Have **`npm`** installed
 ```powershell
 npm install
 ```
+
+## Installing Packages for Python
+
+Whenever your project's dependencies change, follow these three steps:
+
+1. Edit requirements.in (by hand)
+
+2. Update the lockfile
+```
+uv pip compile requirements.in -o requirements.txt
+```
+
+3. Apply changes to your local .venv
+```
+uv pip sync requirements.txt
+```
