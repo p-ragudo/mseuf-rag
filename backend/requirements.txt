@@ -28,6 +28,7 @@ click==8.4.2
 colorama==0.4.6
     # via
     #   click
+    #   pytest
     #   typer
 detect-installer==0.1.0
     # via fastapi-cloud-cli
@@ -65,6 +66,8 @@ idna==3.18
     #   email-validator
     #   httpx
     #   requests
+iniconfig==2.3.0
+    # via pytest
 jinja2==3.1.6
     # via fastapi
 markdown-it-py==4.2.0
@@ -73,6 +76,10 @@ markupsafe==3.0.3
     # via jinja2
 mdurl==0.1.2
     # via markdown-it-py
+packaging==26.2
+    # via pytest
+pluggy==1.6.0
+    # via pytest
 pydantic==2.13.4
     # via
     #   fastapi
@@ -86,7 +93,11 @@ pydantic-extra-types==2.11.1
 pydantic-settings==2.14.2
     # via fastapi
 pygments==2.20.0
-    # via rich
+    # via
+    #   pytest
+    #   rich
+pytest==9.1.1
+    # via -r requirements.in
 python-dotenv==1.2.2
     # via
     #   -r requirements.in
