@@ -48,10 +48,16 @@ fastar==0.11.0
     # via
     #   fastapi
     #   fastapi-cloud-cli
+grpcio==1.83.0
+    # via qdrant-client
 h11==0.16.0
     # via
     #   httpcore
     #   uvicorn
+h2==4.4.1
+    # via httpx
+hpack==4.2.0
+    # via h2
 httpcore==1.0.9
     # via httpx
 httptools==0.8.0
@@ -60,6 +66,9 @@ httpx==0.28.1
     # via
     #   fastapi
     #   fastapi-cloud-cli
+    #   qdrant-client
+hyperframe==6.1.0
+    # via h2
 idna==3.18
     # via
     #   anyio
@@ -76,16 +85,23 @@ markupsafe==3.0.3
     # via jinja2
 mdurl==0.1.2
     # via markdown-it-py
+numpy==2.5.2
+    # via qdrant-client
 packaging==26.2
     # via pytest
 pluggy==1.6.0
     # via pytest
+portalocker==3.2.0
+    # via qdrant-client
+protobuf==7.35.1
+    # via qdrant-client
 pydantic==2.13.4
     # via
     #   fastapi
     #   fastapi-cloud-cli
     #   pydantic-extra-types
     #   pydantic-settings
+    #   qdrant-client
 pydantic-core==2.46.4
     # via pydantic
 pydantic-extra-types==2.11.1
@@ -105,8 +121,12 @@ python-dotenv==1.2.2
     #   uvicorn
 python-multipart==0.0.32
     # via fastapi
+pywin32==312
+    # via portalocker
 pyyaml==6.0.3
     # via uvicorn
+qdrant-client==1.19.0
+    # via -r requirements.in
 requests==2.34.2
     # via -r requirements.in
 rich==15.0.0
@@ -136,6 +156,7 @@ typing-extensions==4.16.0
     #   anyio
     #   beautifulsoup4
     #   fastapi
+    #   grpcio
     #   pydantic
     #   pydantic-core
     #   pydantic-extra-types
@@ -149,6 +170,7 @@ typing-inspection==0.4.2
     #   pydantic-settings
 urllib3==2.7.0
     # via
+    #   qdrant-client
     #   requests
     #   sentry-sdk
 uvicorn==0.52.0
