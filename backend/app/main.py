@@ -1,10 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
-from dotenv import load_dotenv
-import os
-
-load_dotenv()
+from app.core.config import settings
 
 app = FastAPI()
 
@@ -25,8 +22,10 @@ app.add_middleware(
 def read_root():
     return {"status": "connected to backend"}
 
-HOST = os.getenv("HOST")
-PORT = int(os.getenv("PORT"))
-
 if __name__ == "__main__":
-    uvicorn.run("main:app", host=HOST, port=PORT, reload=True)
+    uvicorn.run(
+        "app.main:app", 
+        host=settings.SERVER_BIND_HOST, 
+        port=settings.PORT, 
+        reload=True
+    )

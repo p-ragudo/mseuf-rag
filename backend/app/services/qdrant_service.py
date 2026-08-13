@@ -14,17 +14,21 @@ class QDrantService:
 
     self.client = QdrantClient(url=cluster_endpoint, api_key=api_key)
 
+  
+
   def search_vectors(
       self, 
       collection_name: str, 
       query_vector: List[float], 
-      limit: int = 5
+      limit: int = 5,
+      with_payload = True
   ) -> List[Dict[str, Any]]:
     """Searches top-k similar documents by vector embedding."""
     response = self.client.query_points(
         collection_name=collection_name, 
         query=query_vector, 
-        limit=limit
+        limit=limit,
+        with_payload = with_payload
     )
     return [
         {"id": hit.id, "score": hit.score, "payload": hit.payload}
