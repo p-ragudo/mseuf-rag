@@ -6,6 +6,9 @@ from app.services.ingestion.llm_qgen.qgen import RawChunk, EnrichedChunk
 from app.services.ingestion.llm_qgen.factory import get_question_generator
 from app.services.ingestion.llm_qgen.base import BaseQuestionGenerator
 
+# Import the chunk loader from your scraper ingestion module
+from app.scraper.ingest import load_and_chunk_knowledge_base
+
 async def generate_questions_for_chunk(
     chunk: RawChunk,
     generator: BaseQuestionGenerator,
@@ -56,27 +59,13 @@ async def process_all_chunks(
             f.flush()
 
 if __name__ == "__main__":
-    # Test batch using Pydantic instances
-    sample_data = [
-        RawChunk(
-            chunk_id="chunk_001",
-            document_id="doc_001",  # Added required field
-            source_url="https://example.edu/registrar/shifting",
-            title="College Shifting Procedures",
-            content="Students applying for a shift of program must submit their approved Shifting Form to the Registrar by week 3 of the semester."
-        ),
-        RawChunk(
-            chunk_id="chunk_002",
-            document_id="doc_002",  # Added required field
-            source_url="https://example.edu/scholarships/guidelines",
-            title="Academic Scholarship Guidelines",
-            content="To maintain an academic scholarship, students must have a general weighted average of 1.75 or higher with no failing grades."
-        )
-    ]
+    # 1. Load all scraped university markdown files and split into RawChunks
+    real_chunks = load_and_chunk_knowledge_base()
 
+    # 2. Run the question generation pipeline across all chunks
     asyncio.run(
         process_all_chunks(
-            input_chunks=sample_data,
+            input_chunks=real_chunks,
             output_path=Path("data/generated_questions/enriched_chunks.jsonl"),
             concurrency_limit=5
         )
