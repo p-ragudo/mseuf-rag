@@ -1,10 +1,10 @@
-<script>
+<script lang="ts">
   import { push, pop } from "svelte-spa-router";
   import InfoIcon from "../icons/InfoIcon.svelte";
   import ExitIcon from "../icons/ExitIcon.svelte";
 
-  export let disableInfo = false;
-  export let pageIsToPop = false;
+  export let disableInfo: boolean = false;
+  export let pageIsToPop: boolean = false;
 
   function goToAbout() {
     push("/about");
