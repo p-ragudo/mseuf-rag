@@ -90,34 +90,28 @@ async def process_all_chunks(
             if completed_count % 25 == 0 or completed_count == len(unprocessed):
                 print(f"Progress: {completed_count}/{len(unprocessed)} chunks finished")
 
-
-if __name__ == "__main__":
+def main():
     # When not run as a script, for testing:
-
-    chunk_1_id = generate_uuid("chunk_1_id")
-    chunk_2_id = generate_uuid("chunk_2_id")
-
-    doc_1_id = generate_uuid("doc_1_id")
-    doc_2_id = generate_uuid("doc_2_id")
-
+    
     sample_data = [
         RawChunk(
-            id=chunk_1_id,
-            doc_id=doc_1_id,
+            id=generate_uuid("chunk_1_id"),
+            doc_id=generate_uuid("doc_1_id"),
             source_url="https://example.edu/registrar/shifting",
             title="College Shifting Procedures",
             content="Students applying for a shift of program must submit their approved Shifting Form to the Registrar by week 3 of the semester.",
             tags=["Registrar", "Academic Policy", "Undergraduate"]
         ),
         RawChunk(
-            id=chunk_2_id,
-            doc_id=doc_2_id,
+            id=generate_uuid("chunk_2_id"),
+            doc_id=generate_uuid("doc_2_id"),
             source_url="https://example.edu/scholarships/guidelines",
             title="Academic Scholarship Guidelines",
             content="To maintain an academic scholarship, students must have a general weighted average of 1.75 or higher with no failing grades.",
             tags=["Scholarships", "Financial Aid", "Requirements"]
         )
     ]
+    
     # 1. Load all scraped university markdown files and split into RawChunks
     real_chunks = load_and_chunk_knowledge_base()
 
@@ -129,3 +123,6 @@ if __name__ == "__main__":
             concurrency_limit=5
         )
     )
+
+if __name__ == "__main__":
+    main()

@@ -24,25 +24,25 @@ class QdrantCloudInferenceProvider(BaseVectorDB):
             return
 
         # Check development flag (handles DEVELOPMENT and DEVELOPEMNT typo)
-        is_dev = (
-            os.getenv("DEVELOPMENT", os.getenv("DEVELOPEMNT", "false"))
+        use_test_db = (
+            os.getenv("USE_TEST_QDRANT_DB", "false")
             .lower()
             in ("true", "1", "yes")
         )
 
         cluster_endpoint = url or (
             os.getenv("TEST_QDRANT_CLUSTER_ENDPOINT")
-            if is_dev
+            if use_test_db
             else os.getenv("QDRANT_CLUSTER_ENDPOINT")
         )
         resolved_api_key = api_key or (
             os.getenv("TEST_QDRANT_API_KEY")
-            if is_dev
+            if use_test_db
             else os.getenv("QDRANT_API_KEY")
         )
 
         if not cluster_endpoint:
-            env_var = "TEST_QDRANT_CLUSTER_ENDPOINT" if is_dev else "QDRANT_CLUSTER_ENDPOINT"
+            env_var = "TEST_QDRANT_CLUSTER_ENDPOINT" if use_test_db else "QDRANT_CLUSTER_ENDPOINT"
             raise ValueError(f"{env_var} is not configured in the environment.")
 
         self.client = AsyncQdrantClient(url=cluster_endpoint, api_key=resolved_api_key)

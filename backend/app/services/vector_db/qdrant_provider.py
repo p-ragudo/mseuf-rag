@@ -16,7 +16,7 @@ class QdrantVectorDB(BaseVectorDB):
             self.client = client
             return
 
-        is_dev = os.getenv("DEVELOPMENT", "false").lower() in ("true", "1", "yes")
+        is_dev = os.getenv("USE_TEST_QDRANT_DB", "false").lower() in ("true", "1", "yes")
 
         if is_dev:
             cluster_endpoint = os.getenv("TEST_QDRANT_CLUSTER_ENDPOINT")

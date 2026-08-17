@@ -4,9 +4,9 @@ from .gemini_provider import GeminiQuestionGenerator
 
 def get_question_generator(provider: str = None) -> BaseQuestionGenerator:
     provider = provider or os.getenv("LLM_PROVIDER", "gemini").lower()
+    model = os.getenv("LLM_MODEL", "gemini-3.1-flash-lite")
 
     if provider == "gemini":
-        model = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite")
         return GeminiQuestionGenerator(model_name=model)
     
     # add some more here if ever
