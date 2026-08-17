@@ -8,6 +8,7 @@ if str(BACKEND_ROOT) not in sys.path:
 
 import json
 import asyncio
+from app.utils.uuid_generator import generate_uuid
 from typing import List, Optional, Set
 from dotenv import load_dotenv
 
@@ -89,18 +90,25 @@ async def process_all_chunks(
 
 if __name__ == "__main__":
     # When not run as a script, for testing:
+
+    chunk_1_id = generate_uuid("chunk_1_id")
+    chunk_2_id = generate_uuid("chunk_2_id")
+
+    doc_1_id = generate_uuid("doc_1_id")
+    doc_2_id = generate_uuid("doc_2_id")
+
     sample_data = [
         RawChunk(
-            id="c-001",
-            doc_id="doc-001",
+            id=chunk_1_id,
+            doc_id=doc_1_id,
             source_url="https://example.edu/registrar/shifting",
             title="College Shifting Procedures",
             content="Students applying for a shift of program must submit their approved Shifting Form to the Registrar by week 3 of the semester.",
             tags=["Registrar", "Academic Policy", "Undergraduate"]
         ),
         RawChunk(
-            id="c-002",
-            doc_id="doc-002",
+            id=chunk_2_id,
+            doc_id=doc_2_id,
             source_url="https://example.edu/scholarships/guidelines",
             title="Academic Scholarship Guidelines",
             content="To maintain an academic scholarship, students must have a general weighted average of 1.75 or higher with no failing grades.",

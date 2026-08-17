@@ -4,4 +4,5 @@ requests
 python-dotenv
 pytest
 qdrant-client
-google-genai  
+google-genai
+fastembed
