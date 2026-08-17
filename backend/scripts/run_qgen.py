@@ -21,6 +21,9 @@ from app.services.ingestion.llm_qgen.base_qgen import BaseQuestionGenerator
 MIN_WORDS_PER_CHUNK = 10
 
 
+# Import the chunk loader from your scraper ingestion module
+from app.scraper.ingest import load_and_chunk_knowledge_base
+
 async def generate_questions_for_chunk(
     chunk: RawChunk,
     generator: BaseQuestionGenerator,
@@ -115,7 +118,10 @@ if __name__ == "__main__":
             tags=["Scholarships", "Financial Aid", "Requirements"]
         )
     ]
+    # 1. Load all scraped university markdown files and split into RawChunks
+    real_chunks = load_and_chunk_knowledge_base()
 
+    # 2. Run the question generation pipeline across all chunks
     asyncio.run(
         process_all_chunks(
             input_chunks=sample_data,

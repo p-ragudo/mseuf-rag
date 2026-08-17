@@ -5,4 +5,9 @@ python-dotenv
 pytest
 qdrant-client
 google-genai
-fastembed
+fastembed 
+crawl4ai
+langchain
+langchain-text-splitters
+google-auth
+openai
