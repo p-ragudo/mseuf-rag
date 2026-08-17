@@ -1,13 +1,15 @@
 import os
-from app.services.ingestion.llm_qgen.base import BaseQuestionGenerator
-from app.services.ingestion.llm_qgen.gemini_provider import GeminiQuestionGenerator
-# from app.services.llm_qgen.openai_provider import OpenAICompatibleQuestionGenerator
+from .base_qgen import BaseQuestionGenerator
+from .gemini_provider import GeminiQuestionGenerator
 
 def get_question_generator(provider: str = None) -> BaseQuestionGenerator:
     provider = provider or os.getenv("LLM_PROVIDER", "gemini").lower()
 
     if provider == "gemini":
-        return GeminiQuestionGenerator(model_name=os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite"))
+        model = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite")
+        return GeminiQuestionGenerator(model_name=model)
+    
+    # add some more here if ever
     # elif provider in ("openai", "openrouter", "vllm", "ollama"):
     #     return OpenAICompatibleQuestionGenerator(model_name=os.getenv("OPENAI_MODEL", "gpt-4o-mini"))
 

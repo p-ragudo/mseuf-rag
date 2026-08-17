@@ -3,10 +3,11 @@ beautifulsoup4
 requests
 python-dotenv
 pytest
-qdrant-client  
+qdrant-client
+google-genai
+fastembed 
 crawl4ai
 langchain
 langchain-text-splitters
-google-genai
 google-auth
 openai
