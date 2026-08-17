@@ -36,7 +36,7 @@ async def generate_questions_for_chunk(
                 return questions
             except Exception as e:
                 if attempt == max_retries - 1:
-                    print(f"[Error] Failed chunk {chunk.chunk_id} after {max_retries} attempts: {e}")
+                    print(f"[Error] Failed chunk {chunk.id} after {max_retries} attempts: {e}")
                     return None
                 await asyncio.sleep(2 ** attempt)
         return None
@@ -61,7 +61,7 @@ async def process_all_chunks(
                     if item.get("chunk_id"):
                         processed_chunk_ids.add(item["chunk_id"])
 
-    unprocessed = [c for c in input_chunks if c.chunk_id not in processed_chunk_ids]
+    unprocessed = [c for c in input_chunks if c.id not in processed_chunk_ids]
     print(f"Total: {len(input_chunks)} | Already Processed: {len(processed_chunk_ids)} | Remaining: {len(unprocessed)}")
 
     if not unprocessed:
@@ -91,16 +91,16 @@ if __name__ == "__main__":
     # When not run as a script, for testing:
     sample_data = [
         RawChunk(
-            chunk_id="chunk_001",
-            document_id="doc_001",
+            id="c-001",
+            doc_id="doc-001",
             source_url="https://example.edu/registrar/shifting",
             title="College Shifting Procedures",
             content="Students applying for a shift of program must submit their approved Shifting Form to the Registrar by week 3 of the semester.",
             tags=["Registrar", "Academic Policy", "Undergraduate"]
         ),
         RawChunk(
-            chunk_id="chunk_002",
-            document_id="doc_002",
+            id="c-002",
+            doc_id="doc-002",
             source_url="https://example.edu/scholarships/guidelines",
             title="Academic Scholarship Guidelines",
             content="To maintain an academic scholarship, students must have a general weighted average of 1.75 or higher with no failing grades.",

@@ -49,8 +49,8 @@ class GeminiQuestionGenerator(BaseQuestionGenerator):
             if clean_text:
                 questions.append(
                     GeneratedQuestion(
-                        question_id=f"{chunk.chunk_id}_q{idx:02d}",
-                        chunk_id=chunk.chunk_id,
+                        id=f"{chunk.id}_q-{idx:02d}",
+                        chunk_id=chunk.id,
                         content=clean_text,
                         tags=chunk.tags,
                     )
