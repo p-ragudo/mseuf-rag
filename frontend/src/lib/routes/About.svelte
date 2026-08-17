@@ -1,7 +1,7 @@
 <script>
-
+  import Header from "../components/Header.svelte";
 </script>
 
 <main>
-    <h1>About</h1>
+  <Header disableInfo={true} pageIsToPop={true} />
 </main>
