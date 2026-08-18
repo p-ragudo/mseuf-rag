@@ -1,7 +1,7 @@
 import os
 from typing import Optional
 
-from .qdrant_provider_cloud_inference import QdrantVectorCloudInferenceDB
+from .qdrant_provider_cloud_inference import QdrantCloudInferenceProvider
 from .base_vdb import BaseVectorDB
 from .qdrant_provider import QdrantVectorDB
 
@@ -12,6 +12,6 @@ def get_vector_db(provider: Optional[str] = None) -> BaseVectorDB:
     if provider == "qdrant":
         return QdrantVectorDB()
     if provider == "qdrant_cloud_inference":
-        return QdrantVectorCloudInferenceDB()
+        return QdrantCloudInferenceProvider()
 
     raise ValueError(f"Unsupported Vector DB provider: {provider}")

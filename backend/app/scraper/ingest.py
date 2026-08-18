@@ -4,7 +4,7 @@ import re
 from pathlib import Path
 from typing import List
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from app.services.ingestion.llm_qgen.qgen import RawChunk
+from app.services.ingestion.schema import RawChunk
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 KNOWLEDGE_BASE_DIR = BASE_DIR / "data" / "knowledge_base"

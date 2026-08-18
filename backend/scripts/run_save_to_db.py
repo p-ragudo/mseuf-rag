@@ -1,17 +1,36 @@
 import asyncio
 import json
+import os
 from pathlib import Path
 from typing import Any, List
 
-from app.services.vector_db.qdrant_provider_cloud_inference import QdrantCloudInferenceProvider
 from app.services.vector_db.schema import VectorPoint
-from app.services.vector_db.vdb_service import VectorDatabaseService
+from app.services.vector_db.factory import get_vector_db
 
-COLLECTION_NAME = "questions_collection"
+from scripts.sample_data import SAMPLE_CHUNKS
+from app.scraper.ingest import load_and_chunk_knowledge_base
+
+use_test_db = (
+    os.getenv("USE_TEST_QDRANT_DB", "false")
+    .lower()
+    in ("true", "1", "yes")
+)
+
+use_real_data = (
+    os.getenv("SCRIPT_QGEN_USE_REAL_DATA", "false")
+    .lower()
+    in ("true", "1", "yes")
+)
+
+DENSE_COLLECTION_NAME = os.getenv("DENSE_COLLECTION_NAME", "questions_collection")
+CHUNKS_COLLECTION_NAME = os.getenv("CHUNKS_COLLECTION_NAME", "chunks_collection")
 VECTOR_DIM = 384
-EMBEDDING_MODEL = "sentence-transformers/all-minilm-l6-v2"
-JSONL_FILE_PATH = Path(__file__).resolve().parent.parent / "data" / "generated_questions" / "questions.jsonl"
 
+JSONL_FILE_PATH = ""
+if use_real_data:
+    JSONL_FILE_PATH = Path(__file__).resolve().parent.parent / "data" / "generated_questions" / "questions.jsonl"
+else:
+    JSONL_FILE_PATH = Path(__file__).resolve().parent.parent / "data" / "generated_questions" / "test_questions.jsonl"
 
 def normalize_tags(raw_tags: Any) -> List[str]:
     """Ensures tags are strictly a flat list of clean strings."""
@@ -63,31 +82,42 @@ async def main() -> None:
     if not JSONL_FILE_PATH.exists():
         raise FileNotFoundError(f"Input file not found at: {JSONL_FILE_PATH}")
 
-    sample_points = load_jsonl_points(JSONL_FILE_PATH)
-    print(f"Loaded {len(sample_points)} points from {JSONL_FILE_PATH}")
+    points = load_jsonl_points(JSONL_FILE_PATH)
 
-    if not sample_points:
+    print(f"Loaded {len(points)} points from {JSONL_FILE_PATH}")
+
+    if not points:
         print("No valid points found to insert.")
         return
 
     # Provider automatically resolves endpoint and key based on environment settings
-    provider = QdrantCloudInferenceProvider(default_model=EMBEDDING_MODEL)
-    vdb_service = VectorDatabaseService(db=provider)
+    db = get_vector_db()
 
     try:
-        await vdb_service.ensure_collection(
-            collection_name=COLLECTION_NAME,
-            vector_dim=VECTOR_DIM,
-        )
+        await db.create_collection_if_not_exists(collection_name=DENSE_COLLECTION_NAME, vector_size=VECTOR_DIM)
+        await db.create_collection_if_not_exists(collection_name=CHUNKS_COLLECTION_NAME)
 
-        print(f"Saving {len(sample_points)} points to '{COLLECTION_NAME}' via VectorDatabaseService...")
-        await vdb_service.save_question_vectors(
-            collection_name=COLLECTION_NAME,
-            points=sample_points,
-        )
+        current_db_mode = ""
+        chunks = []
+        if use_test_db:
+            current_db_mode = "TEST DATABASE"
+            chunks = SAMPLE_CHUNKS
+        else:
+            current_db_mode = "PRODUCTION DATABASE"
+            chunks = load_and_chunk_knowledge_base()
+
+        print(f"Saving {len(points)} points to '{DENSE_COLLECTION_NAME}' in {current_db_mode}")
+        await db.upsert_points(collection_name=DENSE_COLLECTION_NAME, points=points)
         print("Successfully saved all question vectors.")
+
+        print(f"Saving {len(chunks)} chunks to {CHUNKS_COLLECTION_NAME} in {current_db_mode}")
+        await db.upsert_payload_only(
+            collection_name=CHUNKS_COLLECTION_NAME, 
+            records=[chunk.model_dump() for chunk in SAMPLE_CHUNKS]
+        )
+        print("Successfully saved all chunks.")
     finally:
-        await provider.close()
+        await db.close()
 
 
 if __name__ == "__main__":

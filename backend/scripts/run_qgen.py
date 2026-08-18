@@ -8,8 +8,8 @@ if str(BACKEND_ROOT) not in sys.path:
 
 import json
 import asyncio
-from app.utils.uuid_generator import generate_uuid
 from typing import List, Optional, Set
+import os
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -17,12 +17,12 @@ load_dotenv()
 from app.services.ingestion.schema import RawChunk, GeneratedQuestion
 from app.services.ingestion.llm_qgen.factory import get_question_generator
 from app.services.ingestion.llm_qgen.base_qgen import BaseQuestionGenerator
-
-MIN_WORDS_PER_CHUNK = 10
-
+from scripts.sample_data import SAMPLE_CHUNKS
 
 # Import the chunk loader from your scraper ingestion module
 from app.scraper.ingest import load_and_chunk_knowledge_base
+
+MIN_WORDS_PER_CHUNK = int(os.getenv("SCRIPT_QGEN_MIN_WORDS_PER_CHUNK", "10"))
 
 async def generate_questions_for_chunk(
     chunk: RawChunk,
@@ -91,35 +91,25 @@ async def process_all_chunks(
                 print(f"Progress: {completed_count}/{len(unprocessed)} chunks finished")
 
 def main():
-    # When not run as a script, for testing:
-    
-    sample_data = [
-        RawChunk(
-            id=generate_uuid("chunk_1_id"),
-            doc_id=generate_uuid("doc_1_id"),
-            source_url="https://example.edu/registrar/shifting",
-            title="College Shifting Procedures",
-            content="Students applying for a shift of program must submit their approved Shifting Form to the Registrar by week 3 of the semester.",
-            tags=["Registrar", "Academic Policy", "Undergraduate"]
-        ),
-        RawChunk(
-            id=generate_uuid("chunk_2_id"),
-            doc_id=generate_uuid("doc_2_id"),
-            source_url="https://example.edu/scholarships/guidelines",
-            title="Academic Scholarship Guidelines",
-            content="To maintain an academic scholarship, students must have a general weighted average of 1.75 or higher with no failing grades.",
-            tags=["Scholarships", "Financial Aid", "Requirements"]
-        )
-    ]
-    
-    # 1. Load all scraped university markdown files and split into RawChunks
-    real_chunks = load_and_chunk_knowledge_base()
+    use_real_data = (
+        os.getenv("SCRIPT_QGEN_USE_REAL_DATA", "false")
+        .lower()
+        in ("true", "1", "yes")
+    )
 
-    # 2. Run the question generation pipeline across all chunks
+    resolved_chunks = []
+    filename_output = ""
+    if use_real_data:
+        resolved_chunks = load_and_chunk_knowledge_base()
+        filename_output = "questions.jsonl"
+    else:
+        resolved_chunks = SAMPLE_CHUNKS
+        filename_output = "test_questions.jsonl"
+
     asyncio.run(
         process_all_chunks(
-            input_chunks=sample_data,
-            output_path=Path("data/generated_questions/questions.jsonl"),
+            input_chunks=resolved_chunks,
+            output_path=BACKEND_ROOT / "data" / "generated_questions" / filename_output,
             concurrency_limit=5
         )
     )

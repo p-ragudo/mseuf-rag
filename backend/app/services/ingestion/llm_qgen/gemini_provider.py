@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 
 from .base_qgen import BaseQuestionGenerator
 from ..schema import RawChunk, GeneratedQuestion, GeneratedQuestionSet
-from ....utils.uuid_generator import generate_uuid 
+from ....utils.uuid_generator import generate_question_id
 from .sys_instructions import SYSTEM_INSTRUCTION
 
 load_dotenv()
@@ -48,11 +48,13 @@ class GeminiQuestionGenerator(BaseQuestionGenerator):
         for idx, text in enumerate(raw_set.questions, start=1):
             clean_text = text.strip()
             if clean_text:
-                id = generate_uuid(clean_text)
+                # Binding to chunk.id guarantees uniqueness across different chunks,
+                # while keeping the ID deterministic if you re-run question generation.
+                question_id = generate_question_id(chunk_id=chunk.id, question=clean_text)
                 
                 questions.append(
                     GeneratedQuestion(
-                        id=id,
+                        id=question_id,
                         chunk_id=chunk.id,
                         content=clean_text,
                         tags=chunk.tags,

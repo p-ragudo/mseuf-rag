@@ -34,26 +34,33 @@ class QdrantVectorDB(BaseVectorDB):
     async def create_collection_if_not_exists(
         self, 
         collection_name: str, 
-        vector_size: int, 
+        vector_size: Optional[int] = None, 
         distance: str = "Cosine"
     ) -> None:
-        distance_map = {
-            "Cosine": rest_models.Distance.COSINE,
-            "Dot": rest_models.Distance.DOT,
-            "Euclid": rest_models.Distance.EUCLID,
-        }
-        selected_distance = distance_map.get(distance, rest_models.Distance.COSINE)
-
         collections = await self.client.get_collections()
         existing_names = {col.name for col in collections.collections}
 
         if collection_name not in existing_names:
+            distance_map = {
+                "Cosine": rest_models.Distance.COSINE,
+                "Dot": rest_models.Distance.DOT,
+                "Euclid": rest_models.Distance.EUCLID,
+            }
+            selected_distance = distance_map.get(distance, rest_models.Distance.COSINE)
+
+            # Pass {} to vectors_config for unvectorized payload-only storage
+            vectors_config = (
+                rest_models.VectorParams(
+                    size=vector_size,
+                    distance=selected_distance,
+                )
+                if vector_size is not None
+                else {}
+            )
+
             await self.client.create_collection(
                 collection_name=collection_name,
-                vectors_config=rest_models.VectorParams(
-                    size=vector_size,
-                    distance=selected_distance
-                )
+                vectors_config=vectors_config,
             )
 
     async def upsert_points(
@@ -73,6 +80,44 @@ class QdrantVectorDB(BaseVectorDB):
             collection_name=collection_name,
             points=qdrant_points,
             wait=True
+        )
+
+    async def upsert_payload_only(
+        self,
+        collection_name: str,
+        records: List[Dict[str, Any]],
+        id_key: str = "id",
+    ) -> None:
+        """Upserts records directly as payloads without vector generation.
+
+        Args:
+            collection_name: Target collection.
+            records: List of dictionaries to store as payload data.
+            id_key: Key inside each record to use as point ID (falls back to UUID).
+        """
+        qdrant_points: List[rest_models.PointStruct] = []
+
+        for record in records:
+            point_id = record.get(id_key)
+            if not point_id:
+                raise ValueError(
+                    f"Record is missing required identifier key '{id_key}': {record}"
+                )
+
+            payload = {k: v for k, v in record.items() if k != id_key}
+
+            qdrant_points.append(
+                rest_models.PointStruct(
+                    id=point_id,
+                    vector={},
+                    payload=payload,
+                )
+            )
+
+        await self.client.upsert(
+            collection_name=collection_name,
+            points=qdrant_points,
+            wait=True,
         )
 
     async def search(
