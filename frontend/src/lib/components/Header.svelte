@@ -16,23 +16,23 @@
 </script>
 
 <header
-  class="flex flex-row bg-red-900 text-white py-2 px-5 justify-between items-center"
+  class="flex flex-row bg-red-900 text-white py-2 px-5  items-center"
 >
   <div class="flex flex-row items-center">
     <img src="/icon.png" alt="icon" class="w-14" />
-    <h1 class="font-heading text-xl font-semibold mx-4">MSEUF - CHATBOT</h1>
+    <h1 class="font-heading text-mg font-semibold mx-4`">MSEUF - CHATBOT</h1>
   </div>
 
   <!--ACTIONS-->
-  <div class="flex flex-row items-center">
+  <div class="fixed right-0 mx-5">
     {#if !disableInfo}
       <button on:click={goToAbout}>
-        <InfoIcon size={34} />
+        <InfoIcon size={30} />
       </button>
     {/if}
     {#if pageIsToPop}
       <button on:click={goBack}>
-        <ExitIcon size={34} />
+        <ExitIcon size={30} />
       </button>
     {/if}
   </div>
