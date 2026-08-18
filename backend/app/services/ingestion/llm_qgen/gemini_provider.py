@@ -1,3 +1,4 @@
+import os
 from typing import List
 from google import genai
 from google.genai import types
@@ -14,7 +15,12 @@ class GeminiQuestionGenerator(BaseQuestionGenerator):
     def __init__(self, model_name: str = "gemini-3.1-flash-lite", temperature: float = 0.2):
         self.model_name = model_name
         self.temperature = temperature
-        self.client = genai.Client()
+
+        api_key = os.getenv("LLM_API_KEY")
+        if not api_key:
+            raise ValueError("No API key found. Please set LLM_API_KEY in your .env file.")
+
+        self.client = genai.Client(api_key=api_key)
 
     async def generate_questions(self, chunk: RawChunk) -> List[GeneratedQuestion]:
         tags_str = ", ".join(chunk.tags) if chunk.tags else "N/A"
