@@ -20,11 +20,11 @@
 >
   <div class="flex flex-row items-center">
     <img src="/icon.png" alt="icon" class="w-14" />
-    <h1 class="font-heading text-mg font-semibold mx-4`">MSEUF - CHATBOT</h1>
+    <h1 class="font-heading text-mg font-semibold">MSEUF - CHATBOT</h1>
   </div>
 
   <!--ACTIONS-->
-  <div class="fixed right-0 mx-5">
+  <div class="fixed right-0 mr-5 items-center">
     {#if !disableInfo}
       <button on:click={goToAbout}>
         <InfoIcon size={30} />
