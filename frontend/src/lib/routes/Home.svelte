@@ -31,12 +31,7 @@
   <Header />
 
   <div class="flex-1 min-h-0 overflow-y-auto">
-    <div class="flex min-h-full flex-col justify-end">
-      <ErrorChatBubble sender={Sender.ME} message={"nigga ka ba?"} />
-      <ErrorChatBubble sender={Sender.AI} message={"nigga ka ba?"} />
-      <ChatBubble sender={Sender.ME}>ausiduiad</ChatBubble>
-      <ChatBubble sender={Sender.AI}>uihdivhasiu</ChatBubble>
-    </div>
+    <div class="flex min-h-full flex-col justify-end"></div>
   </div>
 
   <footer class="flex flex-row items-end gap-2 p-3 border-t border-gray-200">

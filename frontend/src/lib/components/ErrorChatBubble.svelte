@@ -24,14 +24,6 @@
     ? 'flex-row-reverse'
     : 'flex-row'}"
 >
-  {#if sender === Sender.AI}
-    <img
-      src="/icon.png"
-      alt="AI"
-      class="h-8 w-8 shrink-0 rounded-full ring-2 ring-red-100 overflow-visible"
-    />
-  {/if}
-
   <div
     class="flex max-w-[75%] items-start gap-3 rounded-2xl border border-red-200
       bg-red-50 px-4 py-3 shadow-sm
