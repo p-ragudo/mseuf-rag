@@ -194,6 +194,8 @@ joblib==1.5.3
     # via nltk
 jsonpatch==1.33
     # via langchain-core
+jsonpath-ng==1.8.0
+    # via redisvl
 jsonpointer==3.1.1
     # via jsonpatch
 jsonschema==4.26.0
@@ -240,6 +242,8 @@ markupsafe==3.0.3
     # via jinja2
 mdurl==0.1.2
     # via markdown-it-py
+ml-dtypes==0.6.0
+    # via redisvl
 mmh3==5.2.1
     # via fastembed
 multidict==6.7.1
@@ -255,9 +259,11 @@ numpy==2.5.2
     #   alphashape
     #   crawl4ai
     #   fastembed
+    #   ml-dtypes
     #   onnxruntime
     #   qdrant-client
     #   rank-bm25
+    #   redisvl
     #   scipy
     #   shapely
     #   trimesh
@@ -328,6 +334,7 @@ pydantic==2.13.4
     #   pydantic-extra-types
     #   pydantic-settings
     #   qdrant-client
+    #   redisvl
     #   unclecode-litellm
 pydantic-core==2.46.4
     # via pydantic
@@ -356,6 +363,8 @@ python-dotenv==1.2.2
     #   uvicorn
 python-multipart==0.0.32
     # via fastapi
+python-ulid==4.0.1
+    # via redisvl
 pywin32==312
     # via portalocker
 pyyaml==6.0.3
@@ -363,11 +372,16 @@ pyyaml==6.0.3
     #   crawl4ai
     #   huggingface-hub
     #   langchain-core
+    #   redisvl
     #   uvicorn
 qdrant-client==1.19.0
     # via -r requirements.in
 rank-bm25==0.2.2
     # via crawl4ai
+redis==7.4.1
+    # via redisvl
+redisvl==0.25.1
+    # via -r requirements.in
 referencing==0.37.0
     # via
     #   jsonschema
@@ -430,6 +444,7 @@ tenacity==9.1.4
     # via
     #   google-genai
     #   langchain-core
+    #   redisvl
 tiktoken==0.13.0
     # via unclecode-litellm
 tokenizers==0.23.1
