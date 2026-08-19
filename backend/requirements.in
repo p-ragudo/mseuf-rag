@@ -12,3 +12,5 @@ langchain-text-splitters
 google-auth
 openai
 redisvl
+redis
+sentence-transformers
