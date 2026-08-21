@@ -1,118 +1,117 @@
 import sys
 from pathlib import Path
 
-# Dynamic root anchor: 2 levels up to 'backend'
-BACKEND_ROOT = Path(__file__).resolve().parent.parent
-if str(BACKEND_ROOT) not in sys.path:
-    sys.path.insert(0, str(BACKEND_ROOT))
+# Add backend root to path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import json
 import asyncio
-from typing import List, Optional, Set
-import os
-from dotenv import load_dotenv
+from typing import Any, List, Optional, Union
 
-load_dotenv()
-
-from app.services.ingestion.schema import RawChunk, GeneratedQuestion
-from app.services.ingestion.llm_qgen.factory import get_question_generator
-from app.services.ingestion.llm_qgen.base_qgen import BaseQuestionGenerator
-from scripts.sample_data import SAMPLE_CHUNKS
-
-# Import the chunk loader from your scraper ingestion module
 from app.scraper.ingest import load_and_chunk_knowledge_base
+from app.services.ingestion.llm_qgen.base_qgen import BaseQuestionGenerator
+from app.services.ingestion.llm_qgen.factory import get_question_generator
+from app.services.ingestion.schema import RawChunk
+from app.utils.checkpoint import JsonlCheckpoint
 
-MIN_WORDS_PER_CHUNK = int(os.getenv("SCRIPT_QGEN_MIN_WORDS_PER_CHUNK", "10"))
 
-async def generate_questions_for_chunk(
+class EnrichedChunk(RawChunk):
+    generated_questions: List[Any] = []
+
+
+def extract_question_text(q: Any) -> str:
+    """Extract string text from a GeneratedQuestion object, dict, or raw string."""
+    if isinstance(q, str):
+        return q
+    if hasattr(q, "question"):
+        return q.question
+    if hasattr(q, "text"):
+        return q.text
+    if isinstance(q, dict):
+        return q.get("question") or q.get("text") or str(q)
+    return str(q)
+
+
+async def generate_with_backoff(
     chunk: RawChunk,
     generator: BaseQuestionGenerator,
-    semaphore: asyncio.Semaphore,
-    max_retries: int = 3,
-) -> Optional[List[GeneratedQuestion]]:
-    if len(chunk.content.split()) < MIN_WORDS_PER_CHUNK:
-        return []
+    max_retries: int = 5,
+) -> Optional[EnrichedChunk]:
+    for attempt in range(max_retries):
+        try:
+            result = await generator.generate_questions(chunk)
+            
+            # Extract raw questions list from response
+            if isinstance(result, list):
+                raw_list = result
+            elif hasattr(result, "questions"):
+                raw_list = result.questions
+            elif isinstance(result, dict) and "questions" in result:
+                raw_list = result["questions"]
+            else:
+                raw_list = []
 
-    async with semaphore:
-        for attempt in range(max_retries):
-            try:
-                questions = await generator.generate_questions(chunk)
-                return questions
-            except Exception as e:
-                if attempt == max_retries - 1:
-                    print(f"[Error] Failed chunk {chunk.id} after {max_retries} attempts: {e}")
-                    return None
-                await asyncio.sleep(2 ** attempt)
-        return None
+            # Extract string texts from objects
+            questions = [extract_question_text(q) for q in raw_list if q]
+
+            if not questions:
+                raise ValueError(f"No valid questions extracted from result: {result}")
+
+            return EnrichedChunk(
+                **chunk.model_dump(),
+                generated_questions=questions,
+            )
+        except Exception as e:
+            err_msg = str(e)
+            if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg:
+                wait_sec = 25 * (attempt + 1)
+                print(f"[Rate Limit] Chunk {chunk.id}: Hit 429 quota. Waiting {wait_sec}s...")
+                await asyncio.sleep(wait_sec)
+            else:
+                wait_sec = 2**attempt
+                print(f"[Retry {attempt + 1}/{max_retries}] Chunk {chunk.id}: {e}. Waiting {wait_sec}s...")
+                await asyncio.sleep(wait_sec)
+
+    print(f"[Error] Skipping chunk {chunk.id} after {max_retries} failed attempts.")
+    return None
 
 
 async def process_all_chunks(
     input_chunks: List[RawChunk],
-    output_path: Path,
-    provider: Optional[str] = None,
-    concurrency_limit: int = 10,
+    checkpoint_path: Path,
+    provider: str = None,
+    delay_between_requests: float = 4.5,
 ):
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    checkpoint = JsonlCheckpoint(filepath=checkpoint_path, key_field="id")
     generator = get_question_generator(provider)
 
-    # 1. Resume checkpoints via foreign key lookup
-    processed_chunk_ids: Set[str] = set()
-    if output_path.exists():
-        with open(output_path, "r", encoding="utf-8") as f:
-            for line in f:
-                if line.strip():
-                    item = json.loads(line)
-                    if item.get("chunk_id"):
-                        processed_chunk_ids.add(item["chunk_id"])
-
-    unprocessed = [c for c in input_chunks if c.id not in processed_chunk_ids]
-    print(f"Total: {len(input_chunks)} | Already Processed: {len(processed_chunk_ids)} | Remaining: {len(unprocessed)}")
-
-    if not unprocessed:
-        print("All chunks are already processed.")
-        return
-
-    # 2. Process concurrently
-    semaphore = asyncio.Semaphore(concurrency_limit)
-    tasks = [generate_questions_for_chunk(chunk, generator, semaphore) for chunk in unprocessed]
-
-    # 3. Stream write normalized questions to JSONL
-    completed_count = 0
-    with open(output_path, "a", encoding="utf-8") as f:
-        for future in asyncio.as_completed(tasks):
-            questions = await future
-            completed_count += 1
-            if questions:
-                for q in questions:
-                    f.write(q.model_dump_json() + "\n")
-                f.flush()
-            
-            if completed_count % 25 == 0 or completed_count == len(unprocessed):
-                print(f"Progress: {completed_count}/{len(unprocessed)} chunks finished")
-
-def main():
-    use_real_data = (
-        os.getenv("SCRIPT_QGEN_USE_REAL_DATA", "false")
-        .lower()
-        in ("true", "1", "yes")
+    unprocessed = [c for c in input_chunks if not checkpoint.is_completed(c.id)]
+    print(
+        f"Total Chunks: {len(input_chunks)} | "
+        f"Already Processed: {checkpoint.completed_count} | "
+        f"Remaining: {len(unprocessed)}"
     )
 
-    resolved_chunks = []
-    filename_output = ""
-    if use_real_data:
-        resolved_chunks = load_and_chunk_knowledge_base()
-        filename_output = "questions.jsonl"
-    else:
-        resolved_chunks = SAMPLE_CHUNKS
-        filename_output = "test_questions.jsonl"
+    if not unprocessed:
+        print("[✔] All chunks are already generated and up to date.")
+        return
+
+    for chunk in unprocessed:
+        enriched = await generate_with_backoff(chunk, generator)
+        if enriched:
+            checkpoint.record(enriched.model_dump())
+            print(f"[+] Saved chunk {enriched.id} ({len(enriched.generated_questions)} questions)")
+
+        # Pacing delay to guarantee staying under 15 requests per minute
+        await asyncio.sleep(delay_between_requests)
+
+
+if __name__ == "__main__":
+    chunks = load_and_chunk_knowledge_base()
 
     asyncio.run(
         process_all_chunks(
-            input_chunks=resolved_chunks,
-            output_path=BACKEND_ROOT / "data" / "generated_questions" / filename_output,
-            concurrency_limit=5
+            input_chunks=chunks,
+            checkpoint_path=Path("data/generated_questions/enriched_chunks.jsonl"),
+            delay_between_requests=4.5,
         )
     )
-
-if __name__ == "__main__":
-    main()
