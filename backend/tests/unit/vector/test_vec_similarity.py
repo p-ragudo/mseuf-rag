@@ -1,13 +1,12 @@
 import os
 import numpy as np
-from dotenv import load_dotenv
 
 # Bypass HF Hub remote checks for speed
 os.environ["HF_HUB_OFFLINE"] = "1"
 os.environ["TRANSFORMERS_OFFLINE"] = "1"
 
-load_dotenv()
 
+from app.core.config import settings
 from sentence_transformers import SentenceTransformer
 from app.services.cache.vectorizer import get_cache_vectorizer
 
@@ -23,8 +22,8 @@ def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
 
 
 def main():
-    model_name = os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
-    cache_threshold = float(os.getenv("SEMANTIC_CACHE_THRESHOLD", "0.55"))
+    model_name = settings.embedding_model
+    cache_threshold = settings.semantic_cache_threshold
 
     print("=" * 60)
     print("VECTOR SIMILARITY & DISTANCE DIAGNOSTIC")

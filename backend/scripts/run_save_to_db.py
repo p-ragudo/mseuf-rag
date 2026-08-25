@@ -1,30 +1,30 @@
 import asyncio
 import json
-import os
 from pathlib import Path
 from typing import Any, List
 
 from app.services.vector_db.schema import VectorPoint
 from app.services.vector_db.factory import get_vector_db
+from app.core.config import settings
 
 from scripts.sample_data import SAMPLE_CHUNKS
 from app.scraper.ingest import load_and_chunk_knowledge_base
 
 use_test_db = (
-    os.getenv("USE_TEST_QDRANT_DB", "false")
+    settings.use_test_qdrant_db
     .lower()
     in ("true", "1", "yes")
 )
 
 use_real_data = (
-    os.getenv("SCRIPT_QGEN_USE_REAL_DATA", "false")
+    settings.script_qgen_use_real_data
     .lower()
     in ("true", "1", "yes")
 )
 
-DENSE_COLLECTION_NAME = os.getenv("DENSE_COLLECTION_NAME", "questions_collection")
-CHUNKS_COLLECTION_NAME = os.getenv("CHUNKS_COLLECTION_NAME", "chunks_collection")
-VECTOR_DIM = 384
+DENSE_COLLECTION_NAME = settings.dense_collection_name
+CHUNKS_COLLECTION_NAME = settings.chunk_collection_name
+VECTOR_DIM = settings.vector_dim
 
 JSONL_FILE_PATH = ""
 if use_real_data:

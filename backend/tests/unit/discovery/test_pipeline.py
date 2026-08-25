@@ -8,9 +8,8 @@ real recursion, cycle-detection, and dedup logic exactly as production runs it.
 """
 
 import requests
-import os
-from dotenv import load_dotenv
 
+from app.core.config import settings
 from app.scraper.discovery.pipeline import (
     SitemapCrawlResult,
     crawl_all_sitemaps,
@@ -19,9 +18,7 @@ from app.scraper.discovery.pipeline import (
 )
 from .conftest_helpers import make_robots_txt, make_sitemap_xml
 
-load_dotenv()
-
-TEST_TARGET_DOMAIN = os.getenv("TEST_TARGET_DOMAIN")
+TEST_TARGET_DOMAIN = settings.test_target_domain
 if not TEST_TARGET_DOMAIN:
     raise ValueError(
         "[!] TEST_TARGET_DOMAIN environment variable is not set in .env file."

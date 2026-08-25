@@ -1,10 +1,10 @@
-import os
 from .base_qgen import BaseQuestionGenerator
 from .gemini_provider import GeminiQuestionGenerator
+from app.core.config import settings
 
 def get_question_generator(provider: str = None) -> BaseQuestionGenerator:
-    provider = provider or os.getenv("LLM_PROVIDER", "gemini").lower()
-    model = os.getenv("LLM_MODEL", "gemini-3.1-flash-lite")
+    provider = provider or settings.llm_provider.lower()
+    model = settings.llm_model
 
     if provider == "gemini":
         return GeminiQuestionGenerator(model_name=model)

@@ -19,9 +19,6 @@ import csv
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from dotenv import load_dotenv #Added import for loading environment variables
-
-load_dotenv()  # Load environment variables from .env file
 
 import requests
 import xml.etree.ElementTree as ET

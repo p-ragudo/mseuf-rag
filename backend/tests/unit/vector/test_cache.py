@@ -1,9 +1,6 @@
-import os
 import asyncio
-from dotenv import load_dotenv
 
-load_dotenv()
-
+from app.core.config import settings
 from app.services.cache.factory import semantic_cache
 from app.services.cache.schemas import CacheMetadata
 
@@ -11,11 +8,11 @@ def print_debug(message: str): print(f"[DEBUG] {message}")
 
 
 async def main():
-    print_debug(f"EMBEDDING MODEL: {os.getenv("EMBEDDING_MODEL")}")
-    print_debug(f"EMBEDDING PROVIDER: {os.getenv("EMBEDDING_PROVIDER")}")
+    print_debug(f"EMBEDDING MODEL: {settings.embedding_model}")
+    print_debug(f"EMBEDDING PROVIDER: {settings.embedding_provider}")
 
-    print_debug(f"SEMANTIC_CACHE_PROVIDER: {os.getenv("SEMANTIC_CACHE_PROVIDER")}")
-    print_debug(f"SEMANTIC_CACHE_THRESHOLD: {os.getenv("SEMANTIC_CACHE_THRESHOLD")}")
+    print_debug(f"SEMANTIC_CACHE_PROVIDER: {settings.semantic_cache_provider}")
+    print_debug(f"SEMANTIC_CACHE_THRESHOLD: {settings.semantic_cache_threshold}")
 
     print("--- 1. Store Test ---")
     question = "How do I shift to another program?"

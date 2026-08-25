@@ -1,13 +1,8 @@
-import os
 from typing import Dict, Optional, Type
-from dotenv import load_dotenv
-
-from backend.app.services.embeddings.base import BaseEmbedder
+from app.core.config import settings
+from app.services.embeddings.base import BaseEmbedder
 from gemini_embedder import GeminiEmbedder
 from schema import EmbedderConfig
-
-load_dotenv()
-
 
 class EmbedderFactory:
     _registry: Dict[str, Type[BaseEmbedder]] = {
@@ -27,9 +22,9 @@ class EmbedderFactory:
 
     @classmethod
     def create_from_env(cls) -> BaseEmbedder:
-        provider = os.getenv("EMBEDDING_PROVIDER")
-        model_name = os.getenv("EMBEDDING_MODEL")
-        api_key = os.getenv("EMBEDDING_API_KEY")
+        provider = settings.embedding_provider
+        model_name = settings.embedding_model
+        api_key = settings.embedding_api_key
 
         if not provider:
             raise ValueError("Environment variable 'EMBEDDING_PROVIDER' is required.")
@@ -38,9 +33,9 @@ class EmbedderFactory:
         if not api_key:
             raise ValueError("Environment variable 'EMBEDDING_API_KEY' is required.")
 
-        raw_dim = os.getenv("EMBEDDING_DIMENSION")
+        raw_dim = settings.embedding_dimension
         output_dim = int(raw_dim) if raw_dim else None
-        task_type = os.getenv("EMBEDDING_TASK_TYPE")
+        task_type = settings.embedding_task_type
 
         config = EmbedderConfig(
             provider=provider,

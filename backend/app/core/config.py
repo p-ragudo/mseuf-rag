@@ -16,6 +16,8 @@ class Settings(BaseSettings):
 
     # Vector Database Settings
     vector_db_provider: str
+    vector_db_embedding_model: str
+    qdrant_embedding_model: str
     use_test_qdrant_db: bool = True
 
     # Production Qdrant
@@ -47,6 +49,8 @@ class Settings(BaseSettings):
     embedding_api_key: str
     embedding_dimension: Optional[int] = None
     embedding_task_type: Optional[str] = None
+
+    vector_dim: float
 
     # Semantic Cache Settings
     semantic_cache_provider: str

@@ -1,22 +1,19 @@
-import os
 from typing import List
 from google import genai
 from google.genai import types
-from dotenv import load_dotenv
 
+from app.core.config import settings
 from .base_qgen import BaseQuestionGenerator
 from ..schema import RawChunk, GeneratedQuestion, GeneratedQuestionSet
 from ....utils.uuid_generator import generate_question_id
 from .sys_instructions import SYSTEM_INSTRUCTION
-
-load_dotenv()
 
 class GeminiQuestionGenerator(BaseQuestionGenerator):
     def __init__(self, model_name: str = "gemini-3.1-flash-lite", temperature: float = 0.2):
         self.model_name = model_name
         self.temperature = temperature
 
-        api_key = os.getenv("LLM_API_KEY")
+        api_key =  settings.llm_api_key
         if not api_key:
             raise ValueError("No API key found. Please set LLM_API_KEY in your .env file.")
 

@@ -1,14 +1,10 @@
-import os
 from typing import Any, Dict, List, Optional
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.http import models as rest_models
-from dotenv import load_dotenv
+from app.core.config import settings
 
-from .base_vdb import BaseVectorDB
+from .base import BaseVectorDB
 from .schema import VectorPoint, SearchResult
-
-load_dotenv()
-
 
 class QdrantVectorDB(BaseVectorDB):
     def __init__(self, client: Optional[AsyncQdrantClient] = None):
@@ -16,14 +12,14 @@ class QdrantVectorDB(BaseVectorDB):
             self.client = client
             return
 
-        is_dev = os.getenv("USE_TEST_QDRANT_DB", "false").lower() in ("true", "1", "yes")
+        is_dev = settings.use_test_qdrant_db.lower() in ("true", "1", "yes")
 
         if is_dev:
-            cluster_endpoint = os.getenv("TEST_QDRANT_CLUSTER_ENDPOINT")
-            api_key = os.getenv("TEST_QDRANT_API_KEY")
+            cluster_endpoint = settings.test_qdrant_cluster_endpoint
+            api_key = settings.test_qdrant_api_key
         else:
-            cluster_endpoint = os.getenv("QDRANT_CLUSTER_ENDPOINT")
-            api_key = os.getenv("QDRANT_API_KEY")
+            cluster_endpoint = settings.qdrant_cluster_endpoint
+            api_key = settings.qdrant_api_key
 
         if not cluster_endpoint:
             env_var = "TEST_QDRANT_CLUSTER_ENDPOINT" if is_dev else "QDRANT_CLUSTER_ENDPOINT"

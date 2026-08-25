@@ -2,12 +2,8 @@
 Config: paths, constants, and environment-derived settings.
 """
 
-import os
 from pathlib import Path
-
-from dotenv import load_dotenv
-
-load_dotenv()
+from app.core.config import settings
 
 # app/scraper/discovery/config.py -> parents[3] reaches backend/
 BASE_DIR = Path(__file__).resolve().parents[3]
@@ -17,7 +13,7 @@ RAW_SITEMAP_DIR = DISCOVERY_DIR / "raw_sitemaps"
 DISCOVERY_DIR.mkdir(parents=True, exist_ok=True)
 RAW_SITEMAP_DIR.mkdir(parents=True, exist_ok=True)
 
-TARGET_DOMAIN = os.getenv("TARGET_DOMAIN")
+TARGET_DOMAIN = settings.target_domain
 
 if not TARGET_DOMAIN:
     raise ValueError(

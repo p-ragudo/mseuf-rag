@@ -1,14 +1,10 @@
-import os
-from dotenv import load_dotenv
 from .base import BaseSemanticCache
 from .redis_cache import RedisSemanticCache
 from .in_memory_cache import InMemorySemanticCache
-
-load_dotenv()
-
+from app.core.config import settings
 
 def get_semantic_cache() -> BaseSemanticCache:
-    provider = os.getenv("SEMANTIC_CACHE_PROVIDER")
+    provider = settings.semantic_cache_provider
 
     if not provider:
         raise ValueError("Environment variable 'SEMANTIC_CACHE_PROVIDER' is required.")
@@ -16,19 +12,19 @@ def get_semantic_cache() -> BaseSemanticCache:
     provider = provider.lower()
 
     if provider == "redis":
-        url = os.getenv("SEMANTIC_CACHE_URL")
+        url = settings.semantic_cache_url
         if not url:
             raise ValueError("SEMANTIC_CACHE_URL environment variable is required for redis provider.")
 
-        threshold = os.getenv("SEMANTIC_CACHE_THRESHOLD")
+        threshold = settings.semantic_cache_threshold
         if not threshold:
             raise ValueError("SEMANTIC_CACHE_THRESHOLD environment variable is required.")
 
-        ttl = os.getenv("SEMANTIC_CACHE_TTL_SECONDS")
+        ttl = settings.semantic_cache_ttl_seconds
         if not ttl:
             raise ValueError("SEMANTIC_CACHE_TTL_SECONDS environment variable is required.")
 
-        index_name = os.getenv("SEMANTIC_CACHE_INDEX_NAME")
+        index_name = settings.semantic_cache_index_name
         if not index_name:
             raise ValueError("SEMANTIC_CACHE_INDEX_NAME environment variable is required.")
 
@@ -40,7 +36,7 @@ def get_semantic_cache() -> BaseSemanticCache:
         )
 
     elif provider in ("memory", "mock", "test"):
-        threshold = float(os.getenv("SEMANTIC_CACHE_THRESHOLD", "0.12"))
+        threshold = settings.semantic_cache_threshold
         return InMemorySemanticCache(distance_threshold=threshold)
 
     else:

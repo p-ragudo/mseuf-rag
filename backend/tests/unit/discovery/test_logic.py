@@ -6,9 +6,8 @@ every test is plain input -> assert output.
 import xml.etree.ElementTree as ET
 
 import pytest
-import os
-from dotenv import load_dotenv
 
+from app.core.config import settings
 from app.scraper.discovery.logic import (
     assign_bucket,
     build_bucket_summary,
@@ -19,9 +18,7 @@ from app.scraper.discovery.logic import (
 )
 from .conftest_helpers import make_robots_txt, make_sitemap_xml
 
-load_dotenv()
-
-TEST_TARGET_DOMAIN = os.getenv("TEST_TARGET_DOMAIN")
+TEST_TARGET_DOMAIN = settings.test_target_domain
 if not TEST_TARGET_DOMAIN:
     raise ValueError(
         "[!] TEST_TARGET_DOMAIN environment variable is not set in .env file."

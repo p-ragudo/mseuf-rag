@@ -1,13 +1,9 @@
-import os
 from typing import Any, Dict, List, Optional
-from dotenv import load_dotenv
 from qdrant_client import AsyncQdrantClient, models
+from app.core.config import settings
 
-from .base_vdb import BaseVectorDB
+from .base import BaseVectorDB
 from .schema import SearchResult, VectorPoint
-
-load_dotenv()
-
 
 class QdrantCloudInferenceProvider(BaseVectorDB):
     def __init__(
@@ -17,7 +13,7 @@ class QdrantCloudInferenceProvider(BaseVectorDB):
         api_key: Optional[str] = None,
         default_model: Optional[str] = None
     ):
-        env_model = os.getenv("VECTOR_DB_EMBEDDING_MODEL")
+        env_model = settings.qdrant_embedding_model
         if not env_model:
             raise ValueError("VECTOR_DB_EMBEDDING_MODEL is not configured in the environment.")
 
@@ -29,24 +25,24 @@ class QdrantCloudInferenceProvider(BaseVectorDB):
 
         # Check development flag (handles DEVELOPMENT and DEVELOPEMNT typo)
         use_test_db = (
-            os.getenv("USE_TEST_QDRANT_DB", "false")
+            settings.use_test_qdrant_db
             .lower()
             in ("true", "1", "yes")
         )
 
         embedding_model = (
-            os.getenv("VECTOR_DB_EMBEDDING_MODEL").lower()
+            settings.vector_db_embedding_model.lower()
         )
 
         cluster_endpoint = url or (
-            os.getenv("TEST_QDRANT_CLUSTER_ENDPOINT")
+            settings.test_qdrant_cluster_endpoint
             if use_test_db
-            else os.getenv("QDRANT_CLUSTER_ENDPOINT")
+            else settings.qdrant_cluster_endpoint
         )
         resolved_api_key = api_key or (
-            os.getenv("TEST_QDRANT_API_KEY")
+            settings.test_qdrant_api_key
             if use_test_db
-            else os.getenv("QDRANT_API_KEY")
+            else settings.qdrant_api_key
         )
 
         if not cluster_endpoint:
