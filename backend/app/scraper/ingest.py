@@ -1,13 +1,15 @@
-import os
 import glob
+import os
 import re
 from pathlib import Path
 from typing import List
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+
 from app.services.ingestion.schema import RawChunk
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
-KNOWLEDGE_BASE_DIR = BASE_DIR / "data" / "knowledge_base"
+DATA_DIR = BASE_DIR / "data"
+
 
 def clean_markdown_content(text: str) -> str:
     """Strips unnecessary HTML tags and excess whitespace."""
@@ -19,15 +21,17 @@ def clean_markdown_content(text: str) -> str:
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
 
+
 def load_and_chunk_knowledge_base() -> List[RawChunk]:
-    """Reads all markdown files from knowledge_base and converts them into RawChunk models."""
-    md_files = glob.glob(str(KNOWLEDGE_BASE_DIR / "*.md"))
-    print(f"Loading {len(md_files)} Markdown files from {KNOWLEDGE_BASE_DIR}...")
+    """Reads all markdown files from the data directory and converts them into RawChunk models."""
+    # Recursively find all .md files in the data directory
+    md_files = [str(p) for p in DATA_DIR.rglob("*.md")]
+    print(f"Loading {len(md_files)} Markdown files from {DATA_DIR}...")
 
     text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=800,
         chunk_overlap=150,
-        separators=["\n\n", "\n", ". ", " ", ""]
+        separators=["\n\n", "\n", ". ", " ", ""],
     )
 
     raw_chunks: List[RawChunk] = []
@@ -42,7 +46,13 @@ def load_and_chunk_knowledge_base() -> List[RawChunk]:
                 raw_content = f.read()
 
             source_url = "https://mseuf.edu.ph"
-            title = doc_id.replace("mseuf_edu_ph_", "").replace("_", " ").replace("-", " ").title()
+            title = (
+                doc_id.replace("mseuf_edu_ph_", "")
+                .replace("portal_mseuf_edu_ph_", "")
+                .replace("_", " ")
+                .replace("-", " ")
+                .title()
+            )
             content = raw_content
 
             # Parse frontmatter metadata if present
@@ -67,11 +77,12 @@ def load_and_chunk_knowledge_base() -> List[RawChunk]:
                 if len(text.strip()) > 40:  # Skip trivial fragments
                     raw_chunks.append(
                         RawChunk(
-                            chunk_id=f"chunk_{chunk_counter:06d}",
-                            document_id=doc_id,
+                            id=f"chunk_{chunk_counter:06d}",
+                            doc_id=doc_id,
                             source_url=source_url,
                             title=title,
-                            content=text.strip()
+                            content=text.strip(),
+                            tags=[],
                         )
                     )
                     chunk_counter += 1
@@ -81,6 +92,7 @@ def load_and_chunk_knowledge_base() -> List[RawChunk]:
 
     print(f"Successfully generated {len(raw_chunks)} RawChunk objects ready for QGen.")
     return raw_chunks
+
 
 if __name__ == "__main__":
     chunks = load_and_chunk_knowledge_base()

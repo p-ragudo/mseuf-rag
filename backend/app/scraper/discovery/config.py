@@ -25,4 +25,4 @@ if not TARGET_DOMAIN:
     )
 
 ROBOTS_URL = f"{TARGET_DOMAIN}/robots.txt" if TARGET_DOMAIN else None
-USER_AGENT = "ThesisScraperBot/1.0"
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
