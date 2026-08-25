@@ -15,9 +15,13 @@ class QdrantCloudInferenceProvider(BaseVectorDB):
         client: Optional[AsyncQdrantClient] = None,
         url: Optional[str] = None,
         api_key: Optional[str] = None,
-        default_model: str = "sentence-transformers/all-minilm-l6-v2",
+        default_model: Optional[str] = None
     ):
-        self.default_model = default_model
+        env_model = os.getenv("VECTOR_DB_EMBEDDING_MODEL")
+        if not env_model:
+            raise ValueError("VECTOR_DB_EMBEDDING_MODEL is not configured in the environment.")
+
+        self.default_model = (default_model)
 
         if client:
             self.client = client
@@ -28,6 +32,10 @@ class QdrantCloudInferenceProvider(BaseVectorDB):
             os.getenv("USE_TEST_QDRANT_DB", "false")
             .lower()
             in ("true", "1", "yes")
+        )
+
+        embedding_model = (
+            os.getenv("VECTOR_DB_EMBEDDING_MODEL").lower()
         )
 
         cluster_endpoint = url or (
