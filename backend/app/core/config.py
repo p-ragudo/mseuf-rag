@@ -1,39 +1,96 @@
-from pydantic import Field
+from functools import lru_cache
+from typing import Optional
+from pydantic import HttpUrl, computed_field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+
 class Settings(BaseSettings):
-    # --- RAG Defaults (Safe Fallbacks for Local Dev & Tests) ---
-    DEFAULT_TOP_K: int = 5
-    MIN_TOP_K: int = 1
-    MAX_TOP_K: int = 20
+    # App & Server Configuration
+    development: bool = True
+    host: str
+    port: int = 8000
 
-    # --- Domain / Scraping (Strictly Required from .env) ---
-    TARGET_DOMAIN: str
-    TEST_TARGET_DOMAIN: str
+    # Target Domains
+    target_domain: str
+    test_target_domain: str
 
-    # --- Infrastructure Secrets (Optional for offline tests, strictly typed) ---
-    QDRANT_API_KEY: str | None = None
-    QDRANT_CLUSTER_ENDPOINT: str | None = None
+    # Vector Database Settings
+    vector_db_provider: str
+    use_test_qdrant_db: bool = True
 
-    # --- Server Bind Settings (Safe Fallbacks) ---
-    HOST: str = "127.0.0.1"
-    PORT: int = Field(default=8000, ge=1, le=65535)
+    # Production Qdrant
+    qdrant_api_key: Optional[str] = None
+    qdrant_cluster_endpoint: Optional[str] = None
 
-    @property
-    def SERVER_BIND_HOST(self) -> str:
-        """Strips protocol prefixes for Uvicorn binding."""
-        return (
-            self.HOST
-            .replace("http://", "")
-            .replace("https://", "")
-            .split(":")[0]
-            .split("/")[0]
-        )
+    # Test Qdrant
+    test_qdrant_api_key: Optional[str] = None
+    test_qdrant_cluster_endpoint: Optional[str] = None
+
+    # Collection Names
+    dense_collection_name: str = "questions_collection"
+    sparse_collection_name: str = "sparse_collection"
+    chunk_collection_name: str = "chunks_collection"
+
+    # Retrieval Constraints
+    default_top_k: int = 5
+    min_top_k: int = 1
+    max_top_k: int = 20
+
+    # LLM Settings
+    llm_provider: str
+    llm_api_key: str
+    llm_model: str
+
+    # Embedding Service Settings
+    embedding_provider: str
+    embedding_model: str
+    embedding_api_key: str
+    embedding_dimension: Optional[int] = None
+    embedding_task_type: Optional[str] = None
+
+    # Semantic Cache Settings
+    semantic_cache_provider: str
+    semantic_cache_url: Optional[str] = None
+    semantic_cache_threshold: float = 0.25
+    semantic_cache_ttl_seconds: int = 604800
+    semantic_cache_index_name: str = "thesis_semantic_cache"
+
+    # Question Generation Script Settings
+    script_qgen_use_real_data: bool = False
+    script_qgen_min_words_per_chunk: int = 10
 
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
-        extra="ignore"
+        extra="ignore",
+        case_sensitive=False,  # Reads uppercase .env keys into lowercase attributes
     )
 
-settings = Settings()
+    @computed_field
+    @property
+    def active_qdrant_endpoint(self) -> Optional[str]:
+        """Dynamically returns test or production endpoint based on USE_TEST_QDRANT_DB."""
+        return (
+            self.test_qdrant_cluster_endpoint
+            if self.use_test_qdrant_db
+            else self.qdrant_cluster_endpoint
+        )
+
+    @computed_field
+    @property
+    def active_qdrant_api_key(self) -> Optional[str]:
+        """Dynamically returns test or production API key based on USE_TEST_QDRANT_DB."""
+        return (
+            self.test_qdrant_api_key
+            if self.use_test_qdrant_db
+            else self.qdrant_api_key
+        )
+
+
+@lru_cache
+def get_settings() -> Settings:
+    """Cached singleton instance of the settings."""
+    return Settings()
+
+
+settings = get_settings()

@@ -1,3 +1,4 @@
+import os
 import asyncio
 from dotenv import load_dotenv
 
@@ -6,8 +7,16 @@ load_dotenv()
 from app.services.cache.factory import semantic_cache
 from app.services.cache.schemas import CacheMetadata
 
+def print_debug(message: str): print(f"[DEBUG] {message}")
+
 
 async def main():
+    print_debug(f"EMBEDDING MODEL: {os.getenv("EMBEDDING_MODEL")}")
+    print_debug(f"EMBEDDING PROVIDER: {os.getenv("EMBEDDING_PROVIDER")}")
+
+    print_debug(f"SEMANTIC_CACHE_PROVIDER: {os.getenv("SEMANTIC_CACHE_PROVIDER")}")
+    print_debug(f"SEMANTIC_CACHE_THRESHOLD: {os.getenv("SEMANTIC_CACHE_THRESHOLD")}")
+
     print("--- 1. Store Test ---")
     question = "How do I shift to another program?"
     answer = "Submit the Shifting Form to the Registrar by Week 3."
@@ -22,10 +31,10 @@ async def main():
     )
     print("✓ Stored in Redis!\n")
 
-    await asyncio.sleep(1)
+    await asyncio.sleep(3)
 
     print("--- 2. Similar Question Test ---")
-    similar_question = "What is the procedure for shifting to a different course?"
+    similar_question = "How is procedure for shifting?"
     hit = await semantic_cache.get(similar_question)
     if hit:
         print(f"✓ CACHE HIT! Matched Answer: {hit.response}\n")
@@ -39,6 +48,10 @@ async def main():
         print("✓ CACHE MISS (Expected)! Unrelated query bypassed successfully.\n")
     else:
         print(f"✗ UNEXPECTED HIT: {unrelated_hit.response}\n")
+
+
+    if hasattr(semantic_cache, "_cache") and hasattr(semantic_cache._cache, "_redis"):
+        await semantic_cache._cache._redis.aclose()
 
 
 if __name__ == "__main__":
