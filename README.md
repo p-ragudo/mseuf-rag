@@ -58,7 +58,7 @@ Whenever your project's dependencies change, follow these three steps:
 
 2. Update the lockfile
 ```
-uv pip compile requirements.in -o requirements.txt
+uv pip compile requirements.in --universal -o requirements.txt
 ```
 
 3. Apply changes to your local .venv
