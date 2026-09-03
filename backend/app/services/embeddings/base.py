@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from typing import List
-from schema import EmbedderConfig, EmbeddingResult
+from app.services.embeddings.schema import EmbedderConfig, EmbeddingResult
 
 
 class BaseEmbedder(ABC):
@@ -8,14 +8,17 @@ class BaseEmbedder(ABC):
         self.config = config
 
     @abstractmethod
-    def embed_query(self, text: str) -> EmbeddingResult:
-        """Embed a single search query."""
+    def embed(self, texts: List[str]) -> List[EmbeddingResult]:
+        """Embed a list of texts into vectors.
+        
+        Subclasses should handle internal batching, model prefixes,
+        and payload limits.
+        """
         pass
 
-    @abstractmethod
-    def embed_documents(self, texts: List[str]) -> List[EmbeddingResult]:
-        """Embed a batch of document texts."""
-        pass
+    def embed_one(self, text: str) -> EmbeddingResult:
+        """Convenience method to embed a single text string."""
+        return self.embed([text])[0]
 
     @property
     @abstractmethod

@@ -4,8 +4,8 @@ from google.genai import types
 
 from app.core.config import settings
 from .base_qgen import BaseQuestionGenerator
-from ..schema import RawChunk, GeneratedQuestion, GeneratedQuestionSet
-from ....utils.uuid_generator import generate_question_id
+from .schema import RawChunk, GeneratedQuestion, GeneratedQuestionSet
+from ...utils.uuid_generator import generate_question_id
 from .sys_instructions import SYSTEM_INSTRUCTION
 
 class GeminiQuestionGenerator(BaseQuestionGenerator):

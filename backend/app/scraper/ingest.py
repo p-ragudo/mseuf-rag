@@ -4,7 +4,7 @@ import re
 from pathlib import Path
 from typing import List
 
-from app.services.ingestion.schema import RawChunk
+from backend.app.services.llm_qgen.schema import RawChunk
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent

@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from typing import List
-from ..schema import RawChunk, GeneratedQuestion
+from .schema import RawChunk, GeneratedQuestion
 
 class BaseQuestionGenerator(ABC):
     @abstractmethod
