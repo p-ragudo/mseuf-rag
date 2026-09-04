@@ -1,5 +1,6 @@
 from typing import List, Optional
 from redisvl.extensions.llmcache import SemanticCache
+from redisvl.utils.vectorize import CustomVectorizer
 
 from .base import BaseSemanticCache
 from .schemas import CacheEntry, CacheMetadata
@@ -12,7 +13,7 @@ class RedisSemanticCache(BaseSemanticCache):
         distance_threshold: float,
         ttl: int,
         index_name: str,
-        dim: float
+        dim: int
     ) -> None:
         self.redis_url = redis_url
         self.distance_threshold = distance_threshold
@@ -20,14 +21,20 @@ class RedisSemanticCache(BaseSemanticCache):
         self.index_name = index_name
         self.dim = dim
 
+        # Dummy function satisfies RedisVL without importing torch or sentence-transformers
+        dummy_vectorizer = CustomVectorizer(
+            embed=lambda text, **kwargs: [0.0] * self.dim
+        )
+
         # SemanticCache handles vector comparison (range query / cosine distance)
         self._cache = SemanticCache(
             name=self.index_name,
             redis_url=self.redis_url,
             distance_threshold=self.distance_threshold,
             ttl=self.ttl,
-            overwrite=False,
-            dim=self.dim
+            overwrite=True,
+            dim=self.dim,
+            vectorizer=dummy_vectorizer,  # Prevents defaulting to HFTextVectorizer / torch
         )
 
     async def get(self, vector: List[float]) -> Optional[CacheEntry]:

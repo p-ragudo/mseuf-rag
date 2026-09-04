@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
@@ -6,15 +6,16 @@ from pydantic import BaseModel, Field
 class CacheMetadata(BaseModel):
     doc_ids: List[str] = Field(default_factory=list, description="IDs of source docs used")
     chunk_ids: List[str] = Field(default_factory=list, description="IDs of chunks used")
-    confidence_score: Optional[float] = Field(None, description="Retrieval similarity score")
-    extra: Dict[str, Any] = Field(default_factory=dict)
+    confidence_score: Optional[float] = Field(None, description="Retrieval similarity score from primary retrieval")
+    extra: Dict[str, Any] = Field(default_factory=dict, description="Arbitrary metadata")
 
 
 class CacheEntry(BaseModel):
-    query: str
-    response: str
+    query: str = Field(..., description="Actual question text cached (user query or synthetic query)")
+    response: str = Field(..., description="The finalized answer string to return")
     metadata: CacheMetadata = Field(default_factory=CacheMetadata)
-    cached_at: Optional[datetime] = None
+    cached_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    distance: Optional[float] = Field(None, description="Vector distance returned by the cache hit (if read)")
 
 
 class ChatQueryRequest(BaseModel):

@@ -28,11 +28,16 @@ def get_semantic_cache() -> BaseSemanticCache:
         if not index_name:
             raise ValueError("SEMANTIC_CACHE_INDEX_NAME environment variable is required.")
 
+        dim = settings.vector_dim
+        if not dim:
+            raise ValueError("VECTOR_DIM is required for redis provider.")
+
         return RedisSemanticCache(
             redis_url=url,
             distance_threshold=float(threshold),
             ttl=int(ttl),
             index_name=index_name,
+            dim=dim
         )
 
     elif provider in ("memory", "mock", "test"):
