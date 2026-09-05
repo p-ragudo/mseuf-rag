@@ -37,7 +37,7 @@ class GeminiQuestionGenerator(BaseQuestionGenerator):
         self.model_name = model_name
         self.temperature = temperature
 
-        api_key = settings.llm_api_key
+        api_key =  settings.llm_qgen_api_key
         if not api_key:
             raise ValueError("No API key found. Please set LLM_API_KEY in your .env file.")
 
