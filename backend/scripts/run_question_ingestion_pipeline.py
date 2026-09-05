@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from backend.app.services.llm_qgen.schema import RawChunk
+from app.services.ingestion.schema import RawChunk
 
 # Import runners directly from your existing scripts
 from scripts.run_qgen import process_all_chunks
