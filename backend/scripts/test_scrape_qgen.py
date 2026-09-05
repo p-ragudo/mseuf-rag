@@ -7,8 +7,8 @@ import asyncio
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.scraper.ingest import load_and_chunk_knowledge_base
-from app.services.ingestion.schema import RawChunk, GeneratedQuestion
-from app.services.ingestion.llm_qgen.factory import get_question_generator
+from app.services.llm_qgen.schema import RawChunk, GeneratedQuestion
+from app.services.llm_qgen.factory import get_question_generator
 from app.utils.checkpoint import JsonlCheckpoint
 
 def extract_question_text(q) -> str:
