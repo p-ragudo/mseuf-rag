@@ -1,6 +1,6 @@
 from typing import List
 
-from app.services.ingestion.schema import RawChunk
+from app.services.llm_qgen.schema import RawChunk
 from app.utils.uuid_generator import generate_chunk_id
 from app.utils.uuid_generator import generate_doc_id
 

@@ -10,7 +10,8 @@ class BaseSemanticCache(ABC):
     async def get(self, vector: List[float]) -> Optional[CacheEntry]:
         """Queries the semantic cache using a pre-computed vector.
         
-        Returns a validated CacheEntry if similarity is within threshold, else None.
+        Performs vector range comparison (cosine distance <= threshold).
+        Returns CacheEntry if a match exists, else None.
         """
         pass
 

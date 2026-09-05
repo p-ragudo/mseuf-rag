@@ -8,9 +8,9 @@ import asyncio
 from typing import Any, List, Optional, Union
 
 from app.scraper.ingest import load_and_chunk_knowledge_base
-from app.services.ingestion.llm_qgen.base_qgen import BaseQuestionGenerator
-from app.services.ingestion.llm_qgen.factory import get_question_generator
-from app.services.ingestion.schema import RawChunk
+from backend.app.services.llm_qgen.base_qgen import BaseQuestionGenerator
+from backend.app.services.llm_qgen.factory import get_question_generator
+from backend.app.services.llm_qgen.schema import RawChunk
 from app.utils.checkpoint import JsonlCheckpoint
 
 

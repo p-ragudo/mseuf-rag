@@ -24,11 +24,7 @@ class QdrantCloudInferenceProvider(BaseVectorDB):
             return
 
         # Check development flag (handles DEVELOPMENT and DEVELOPEMNT typo)
-        use_test_db = (
-            settings.use_test_qdrant_db
-            .lower()
-            in ("true", "1", "yes")
-        )
+        use_test_db = settings.use_test_qdrant_db
 
         embedding_model = (
             settings.vector_db_embedding_model.lower()

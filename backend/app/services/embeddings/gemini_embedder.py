@@ -1,8 +1,8 @@
 from typing import List, Optional
 from google import genai
 from google.genai import types
-from backend.app.services.embeddings.base import BaseEmbedder
-from schema import EmbedderConfig, EmbeddingResult
+from app.services.embeddings.base import BaseEmbedder
+from app.services.embeddings.schema import EmbedderConfig, EmbeddingResult
 
 
 class GeminiEmbedder(BaseEmbedder):
@@ -11,35 +11,44 @@ class GeminiEmbedder(BaseEmbedder):
         self.client = genai.Client(api_key=config.api_key)
         self._cached_dimension: Optional[int] = config.output_dimensionality
 
-    def _build_config(self, task_type: Optional[str]) -> Optional[types.EmbedContentConfig]:
-        resolved_task_type = task_type or self.config.task_type
-        if not resolved_task_type and not self.config.output_dimensionality:
+        model_id = config.model_name
+        if not model_id.startswith("models/"):
+            model_id = f"models/{model_id}"
+        self.model_name = model_id
+
+    def _build_config(self) -> Optional[types.EmbedContentConfig]:
+        task_type = self.config.task_type or "RETRIEVAL_QUERY"
+        if not task_type and not self.config.output_dimensionality:
             return None
         return types.EmbedContentConfig(
-            task_type=resolved_task_type,
+            task_type=task_type,
             output_dimensionality=self.config.output_dimensionality,
         )
 
-    def embed_query(self, text: str) -> EmbeddingResult:
-        config = self._build_config(task_type="RETRIEVAL_QUERY")
-        response = self.client.models.embed_content(
-            model=self.config.model_name,
-            contents=text,
-            config=config,
-        )
-        return EmbeddingResult(values=response.embeddings[0].values)
+    def embed(self, texts: List[str]) -> List[EmbeddingResult]:
+        if not texts:
+            return []
 
-    def embed_documents(self, texts: List[str]) -> List[EmbeddingResult]:
-        config = self._build_config(task_type="RETRIEVAL_DOCUMENT")
-        response = self.client.models.embed_content(
-            model=self.config.model_name,
-            contents=texts,
-            config=config,
-        )
-        return [EmbeddingResult(values=emb.values) for emb in response.embeddings]
+        config = self._build_config()
+        results: List[EmbeddingResult] = []
+
+        for text in texts:
+            response = self.client.models.embed_content(
+                model=self.model_name,
+                contents=text,
+                config=config,
+            )
+            # Each call yields a list with exactly one ContentEmbedding for that text
+            for emb in response.embeddings:
+                results.append(EmbeddingResult(values=emb.values))
+
+        return results
 
     @property
     def dimension(self) -> int:
         if self._cached_dimension is None:
-            self._cached_dimension = self.embed_query("probe").dimension
+            probe_result = self.embed_one("probe")
+            self._cached_dimension = getattr(
+                probe_result, "dimension", len(probe_result.values)
+            )
         return self._cached_dimension

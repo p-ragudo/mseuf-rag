@@ -50,7 +50,7 @@ class Settings(BaseSettings):
     embedding_dimension: Optional[int] = None
     embedding_task_type: Optional[str] = None
 
-    vector_dim: float
+    vector_dim: int
 
     # Semantic Cache Settings
     semantic_cache_provider: str
