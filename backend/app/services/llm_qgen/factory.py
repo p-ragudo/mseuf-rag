@@ -3,8 +3,8 @@ from .gemini_provider import GeminiQuestionGenerator
 from app.core.config import settings
 
 def get_question_generator(provider: str = None) -> BaseQuestionGenerator:
-    provider = provider or settings.llm_provider.lower()
-    model = settings.llm_model
+    provider = provider or settings.llm_qgen_provider.lower()
+    model = settings.llm_qgen_model
 
     if provider == "gemini":
         return GeminiQuestionGenerator(model_name=model)

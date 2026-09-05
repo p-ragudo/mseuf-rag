@@ -12,7 +12,7 @@ class GeminiQASynthesizer(BaseQASynthesizer):
         self.temperature = temperature
 
         # Uses QA-specific API key if available, falling back to general LLM_API_KEY
-        api_key = getattr(settings, "qa_llm_api_key", None) or settings.llm_api_key
+        api_key = getattr(settings, "llm_qa_api_key", None) or settings.llm_qa_api_key
         if not api_key:
             raise ValueError("No API key found. Please set LLM_API_KEY or QA_LLM_API_KEY in your .env file.")
 

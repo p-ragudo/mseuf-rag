@@ -38,10 +38,15 @@ class Settings(BaseSettings):
     min_top_k: int = 1
     max_top_k: int = 20
 
-    # LLM Settings
-    llm_provider: str
-    llm_api_key: str
-    llm_model: str
+    # LLM QGEN Settings
+    llm_qgen_provider: str
+    llm_qgen_api_key: str
+    llm_qgen_model: str
+
+    # LLM QA Settings
+    llm_qa_provider: str
+    llm_qa_api_key: str
+    llm_qgen_model: str
 
     # Embedding Service Settings
     embedding_provider: str

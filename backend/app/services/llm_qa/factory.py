@@ -4,8 +4,8 @@ from app.core.config import settings
 
 def get_qa_synthesizer(provider: str = None) -> BaseQASynthesizer:
     # Allows overriding QA-specific provider/model in settings independently of qgen
-    provider = provider or getattr(settings, "qa_llm_provider", settings.llm_provider).lower()
-    model = getattr(settings, "qa_llm_model", settings.llm_model)
+    provider = provider or getattr(settings, "llm_qa_provider", settings.llm_qa_provider).lower()
+    model = getattr(settings, "llm_qa_model", settings.llm_qa_model)
 
     if provider == "gemini":
         return GeminiQASynthesizer(model_name=model)
