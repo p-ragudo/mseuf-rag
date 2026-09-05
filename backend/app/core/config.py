@@ -46,7 +46,7 @@ class Settings(BaseSettings):
     # LLM QA Settings
     llm_qa_provider: str
     llm_qa_api_key: str
-    llm_qgen_model: str
+    llm_qa_model: str
 
     # Embedding Service Settings
     embedding_provider: str
