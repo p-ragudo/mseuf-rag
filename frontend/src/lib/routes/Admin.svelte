@@ -2,6 +2,7 @@
   import AdminHeader from "../components/AdminHeader.svelte";
   import AdminSideBar from "../components/AdminSideBar.svelte";
   import AdminDashboard from "../components/AdminDashboard.svelte";
+  import ChunkUpdates from "../components/ChunkUpdates.svelte";
 
   let currentIndex: number = $state(0);
 </script>
@@ -14,7 +15,7 @@
     {#if currentIndex == 0}
       <AdminDashboard />
     {:else if currentIndex == 1}
-      <div>Chunks</div>
+      <ChunkUpdates />
     {:else if currentIndex == 2}
       <div>Setting</div>
     {:else if currentIndex == 3}
