@@ -1,7 +1,9 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
+
 from app.core.config import settings
+from app.api.query import router as query_router
 
 app = FastAPI()
 
@@ -18,9 +20,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@app.get("/api/query")
-def read_root():
-    return {"status": "connected to backend"}
+app.include_router(query_router)
 
 if __name__ == "__main__":
     uvicorn.run(
