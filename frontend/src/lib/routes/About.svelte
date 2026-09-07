@@ -2,9 +2,9 @@
   import Header from "../components/Header.svelte";
 </script>
 
-<main class="">
+<main class="h-screen overflow-y-auto">
   <Header disableInfo={true} pageIsToPop={true} />
-  <div class="p-5">
+  <div class="p-5 pb-10">
     <section>
       <h2 class="text-3xl font-heading font-semibold mb-3.5">About</h2>
       <p class="text-[#393939] font-heading">
@@ -38,7 +38,7 @@
         This chatbot provides general information for guidance purposes only.
         While we strive to keep all information accurate and up to date, some
         details may change. For official confirmation or specific concerns,
-        please contact the Admissions Office
+        please contact the Admissions Office.
       </p>
     </section>
   </div>
