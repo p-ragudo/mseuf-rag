@@ -1,3 +1,4 @@
+import asyncio
 from typing import Any, Dict, List, Optional
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.http import models as rest_models
@@ -12,7 +13,7 @@ class QdrantVectorDB(BaseVectorDB):
             self.client = client
             return
 
-        is_dev = settings.use_test_qdrant_db.lower() in ("true", "1", "yes")
+        is_dev = bool(settings.use_test_qdrant_db)
 
         if is_dev:
             cluster_endpoint = settings.test_qdrant_cluster_endpoint
@@ -129,7 +130,6 @@ class QdrantVectorDB(BaseVectorDB):
             conditions = []
             for key, val in filters.items():
                 if isinstance(val, list):
-                    # Matches any tag in a list
                     conditions.append(
                         rest_models.FieldCondition(
                             key=key,
@@ -161,3 +161,11 @@ class QdrantVectorDB(BaseVectorDB):
             )
             for hit in response.points
         ]
+
+    async def close(self) -> None:
+        """Closes the vector database client connection."""
+        if hasattr(self, "client") and self.client is not None:
+            if hasattr(self.client, "close"):
+                res = self.client.close()
+                if asyncio.iscoroutine(res):
+                    await res
