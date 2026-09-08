@@ -17,7 +17,7 @@ class QdrantCloudInferenceProvider(BaseVectorDB):
         if not env_model:
             raise ValueError("VECTOR_DB_EMBEDDING_MODEL is not configured in the environment.")
 
-        self.default_model = (default_model)
+        self.default_model = default_model or env_model
 
         if client:
             self.client = client
@@ -45,7 +45,7 @@ class QdrantCloudInferenceProvider(BaseVectorDB):
             env_var = "TEST_QDRANT_CLUSTER_ENDPOINT" if use_test_db else "QDRANT_CLUSTER_ENDPOINT"
             raise ValueError(f"{env_var} is not configured in the environment.")
 
-        self.client = AsyncQdrantClient(url=cluster_endpoint, api_key=resolved_api_key)
+        self.client = AsyncQdrantClient(url=cluster_endpoint, api_key=resolved_api_key, cloud_inference=True)# added cloud_inference=True to enable Qdrant Cloud Inference mode
 
     async def create_collection_if_not_exists(
         self,

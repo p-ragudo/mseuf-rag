@@ -7,20 +7,13 @@ from app.services.vector_db.schema import VectorPoint
 from app.services.vector_db.factory import get_vector_db
 from app.core.config import settings
 
+from app.services.embeddings.factory import get_embedder
+
 from scripts.sample_data import SAMPLE_CHUNKS
 from app.scraper.ingest import load_and_chunk_knowledge_base
 
-use_test_db = (
-    settings.use_test_qdrant_db
-    .lower()
-    in ("true", "1", "yes")
-)
-
-use_real_data = (
-    settings.script_qgen_use_real_data
-    .lower()
-    in ("true", "1", "yes")
-)
+use_test_db = bool(settings.use_test_qdrant_db)
+use_real_data = bool(settings.script_qgen_use_real_data)
 
 DENSE_COLLECTION_NAME = settings.dense_collection_name
 CHUNKS_COLLECTION_NAME = settings.chunk_collection_name
@@ -48,9 +41,9 @@ def normalize_tags(raw_tags: Any) -> List[str]:
         return flattened
     return [str(raw_tags).strip()]
 
-
+#Replaced the load_jsonl_points function with batch embedding:
 def load_jsonl_points(file_path: Path) -> List[VectorPoint]:
-    points: List[VectorPoint] = []
+    raw_records = []
 
     with open(file_path, "r", encoding="utf-8") as f:
         for line_num, line in enumerate(f):
@@ -71,9 +64,20 @@ def load_jsonl_points(file_path: Path) -> List[VectorPoint]:
                 "tags": normalize_tags(record.get("tags")),
                 "source": record.get("source", None),
             }
+            raw_records.append((point_id, question_text, payload))
 
-            # vector=None lets Qdrant Cloud Inference handle embedding via Document
-            points.append(VectorPoint(id=point_id, vector=None, payload=payload))
+    if not raw_records:
+        return []
+
+    # Generate 3072-dim Gemini vectors via batch embedding
+    embedder = get_embedder()
+    questions = [rec[1] for rec in raw_records]
+    print(f"Generating Gemini embeddings for {len(questions)} items...")
+    embedding_results = embedder.embed(questions)
+
+    points: List[VectorPoint] = []
+    for (point_id, _, payload), emb_result in zip(raw_records, embedding_results):
+        points.append(VectorPoint(id=point_id, vector=emb_result.values, payload=payload))
 
     return points
 
@@ -113,7 +117,7 @@ async def main() -> None:
         print(f"Saving {len(chunks)} chunks to {CHUNKS_COLLECTION_NAME} in {current_db_mode}")
         await db.upsert_payload_only(
             collection_name=CHUNKS_COLLECTION_NAME, 
-            records=[chunk.model_dump() for chunk in SAMPLE_CHUNKS]
+            records=[chunk.model_dump() for chunk in chunks] #convert to dicts for payload-only upsert
         )
         print("Successfully saved all chunks.")
     finally:
