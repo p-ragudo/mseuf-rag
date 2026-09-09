@@ -40,9 +40,10 @@ Each vector point in Qdrant represents a content chunk with the following struct
 
 ### Multi-Tenancy Strategy
 
-- **Single Master Collection**: All tenants share one Qdrant collection to optimize resource efficiency.
-- **Shard Key Isolation**: Each point includes a tenant identifier (e.g., "mit", "stanford") in the payload.
-- **Query-Time Filtering**: All queries use shard key filters to ensure tenants never see each other's data.
+- **Single Master Collection**: All tenants reside within a single collection and shard, avoiding the memory, index, and segment overhead of multi-collection or cluster-sharded architectures.
+- **Payload-Based Partitioning (group_id)**: Every point contains a tenant identifier in its payload metadata (e.g., group_id: "mit" or group_id: "stanford").
+- **Tenant-Aware HNSW Sub-Indexing (is_tenant=true)**: The group_id payload field is configured with is_tenant=true. This compels Qdrant to construct isolated, tenant-specific graph edge structures within segments, preventing HNSW graph pollution, eliminating cross-tenant search dead ends, and preserving search recall.
+- **Strict Query-Time Filtering**: Every incoming query applies a mandatory group_id match filter as a hard constraint, mathematically guaranteeing zero cross-tenant data leakage or vector bleeding.
 
 ---
 
