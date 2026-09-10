@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
 from app.core.config import settings
-from app.api.query import router as query_router
+from backend.app.api.v1.query import router as query_router
 
 app = FastAPI()
 

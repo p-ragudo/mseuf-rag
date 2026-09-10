@@ -70,6 +70,8 @@ class Settings(BaseSettings):
     script_qgen_use_real_data: bool = False
     script_qgen_min_words_per_chunk: int = 10
 
+    telegram_bot_token: str
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
