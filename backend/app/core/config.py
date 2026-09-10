@@ -71,6 +71,7 @@ class Settings(BaseSettings):
     script_qgen_min_words_per_chunk: int = 10
 
     telegram_bot_token: str
+    telegram_bot_fastapi_key: str
 
     model_config = SettingsConfigDict(
         env_file=".env",
