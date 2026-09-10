@@ -10,21 +10,23 @@ def generate_uuid(*, seed: str) -> str:
 
 def generate_doc_id(
     *,
+    tenant_id: str,
     source_url: str,
 ) -> str:
     """Generates a deterministic document-level ID based on source URL."""
-    seed = f"doc::{source_url.strip()}"
+    seed = f"doc::{tenant_id}::{source_url.strip()}"
     return generate_uuid(seed=seed)
 
 
 def generate_chunk_id(
     *,
+    tenant_id: str,
     source_url: str,
     chunk_index: int,
     content: str,
 ) -> str:
     """Combines document origin, sequential index, and text to prevent collisions."""
-    seed = f"chunk::{source_url}#{chunk_index}:{content.strip()}"
+    seed = f"chunk::{tenant_id}::{source_url}#{chunk_index}:{content.strip()}"
     return generate_uuid(seed=seed)
 
 

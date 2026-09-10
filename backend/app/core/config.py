@@ -64,6 +64,8 @@ class Settings(BaseSettings):
     semantic_cache_ttl_seconds: int = 604800
     semantic_cache_index_name: str = "thesis_semantic_cache"
 
+    database_url: str
+
     # Question Generation Script Settings
     script_qgen_use_real_data: bool = False
     script_qgen_min_words_per_chunk: int = 10
