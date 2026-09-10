@@ -16,27 +16,27 @@ Each vector point in Qdrant represents a content chunk with the following struct
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
-│                        QDRANT VECTOR POINT                             │
+│                   QDRANT VECTOR POINT (QUESTION)                       │
 ├────────────────────────────────────────────────────────────────────────┤
-│ ID: UUID (parent chunk identifier)                                      │
-│ SHARD_KEY: "mit" | "stanford" | etc. (tenant isolation via payload)    │
+│ ID: UUID (unique ID for this question point)                           │
 ├────────────────────────────────────────────────────────────────────────┤
-│ DENSE VECTORS (HNSW Index):                                            │
-│   - question_vector_1: [0.12, -0.43, 0.67, ...]                        │
-│   - question_vector_2: [0.05,  0.88, -0.21, ...]                       │
-│   - question_vector_3: [0.91, -0.11,  0.34, ...]                       │
-│   (Up to 5 questions per chunk)                                         │
+│ DENSE VECTOR:                                                          │
+│   - question_dense: [0.12, -0.43, 0.67, ...]  (embeds the question)    │
 ├────────────────────────────────────────────────────────────────────────┤
-│ SPARSE VECTOR:                                                          │
-│   - chunk_sparse: {indices: [0, 5, 12, ...], values: [0.8, 0.4, ...]}  │
-│     (BM25-style term frequency encoding of chunk text)                  │
+│ SPARSE VECTOR:                                                         │
+│   - chunk_sparse: {indices: [...], values: [...]}                      │
+│     (BM25/SPLADE tokens of the parent chunk text)                      │
 ├────────────────────────────────────────────────────────────────────────┤
-│ PAYLOAD (Metadata):                                                     │
-│   - chunk_text: "The actual plaintext content of this chunk..."         │
-│   - source_url: "https://example.com/page"                              │
-│   - tenant_id: "mit" (used for shard key filtering)                     │
+│ PAYLOAD (Metadata Only):                                               │
+│   - parent_chunk_id: "a1b2c3d4-..."                                    │
+│   - question_text: "What are the admission requirements for...?"       │
+│   - chunk_text: "Plaintext of the parent chunk..." (no vector needed)  │
+│   - source_url: "https://example.com/page"                             │
+│   - tenant_id: "mit"                                                   │
 └────────────────────────────────────────────────────────────────────────┘
 ```
+
+IMPORTANT: For dense vectors, we embed the generated questions. For sparse vectors, we embed the actual chunk context to keep the keywords.
 
 ### Multi-Tenancy Strategy
 
@@ -76,11 +76,16 @@ Each vector point in Qdrant represents a content chunk with the following struct
          ↓
 [5. Database Persistence]
          ↓
-    Store single Qdrant point with:
-    - Multiple question embeddings
-    - One sparse vector for the chunk
-    - Full plaintext chunk in payload
-    - Tenant shard key
+    Store multiple Qdrant points (1 point per generated question) with:
+    - Point ID: Unique UUID for each question point
+    - Dense Vector: Embedding of that specific generated question
+    - Sparse Vector: BM25/SPLADE token vector of the parent chunk
+    - Payload:
+        • group_id (to identify which tenant)
+        • parent_chunk_id (UUID linking back to the source chunk)
+        • question_text (the raw generated question string)
+        • chunk_text (raw plaintext of the parent chunk; no vector)
+        • source_url & metadata
 ```
 
 ### Fault Tolerance
@@ -131,10 +136,12 @@ These cases are logged with recovery checkpoints to allow resumption.
             ↓
 [4. Database Retrieval Check]
          ↓
-    Query Qdrant with dense vector:
-    • Retrieve top-k matching question vectors
-    • Filter by shard key (tenant isolation)
-    • Hybrid retrieval if sparse vector enabled
+    Query Qdrant with dense and sparse vectors:
+    • Filter by group id (tenant isolation via payload partitioning and isolated hnsw graphs)
+    • Retrieve matching question vectors
+    • Retrieve matching sparse vectors
+    • Combine results using RRF reranker
+    • further cross-encoder reranking for fine-grained results
          ↓
     ├─ Found relevant chunks?
     │       ↓ YES
@@ -223,7 +230,6 @@ These cases are logged with recovery checkpoints to allow resumption.
          └──→ [RRF Reranker] ←─────────────┘
                     ↓
            [Cross-Encoder Reranker]
-           (optional LLM-based ranking)
                     ↓
               [Final Ranked List]
                     ↓
