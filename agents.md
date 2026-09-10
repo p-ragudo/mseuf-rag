@@ -252,6 +252,7 @@ The system combines dense and sparse results using Reciprocal Rank Fusion for ba
 ---
 
 ## Tenant Isolation & Security
+(still determining this part. will update soon. anything mentioned below is not final)
 
 - **Shard Key**: Every query must specify tenant (e.g., `shard_key: "mit"`)
 - **Query Filtering**: Qdrant filter ensures zero cross-tenant data leakage
