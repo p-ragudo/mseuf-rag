@@ -3,4 +3,12 @@ beautifulsoup4
 requests
 python-dotenv
 pytest
-qdrant-client  
+qdrant-client
+
+# --- Database & Auth ---
+sqlalchemy[asyncio]
+asyncpg
+alembic
+passlib[bcrypt]
+python-jose[cryptography]
+python-multipart

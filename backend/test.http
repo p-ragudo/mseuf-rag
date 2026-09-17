@@ -1,0 +1,19 @@
+### Register
+POST http://127.0.0.1:8000/auth/register
+Content-Type: application/json
+
+{
+  "email": "test@mseuf.edu.ph",
+  "password": "testpass123",
+  "first_name": "Test",
+  "last_name": "User"
+}
+
+### Login
+POST http://127.0.0.1:8000/auth/login
+Content-Type: application/json
+
+{
+  "email": "test@mseuf.edu.ph",
+  "password": "testpass123"
+}

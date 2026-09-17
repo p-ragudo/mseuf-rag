@@ -19,6 +19,13 @@ class Settings(BaseSettings):
     HOST: str = "127.0.0.1"
     PORT: int = Field(default=8000, ge=1, le=65535)
 
+    # --- Database ---
+    DATABASE_URL: str | None = None
+    
+    # --- Auth ---
+    SECRET_KEY: str
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
+    
     @property
     def SERVER_BIND_HOST(self) -> str:
         """Strips protocol prefixes for Uvicorn binding."""
