@@ -9,7 +9,21 @@ from app.core.config import settings
 from app.api.v1.query import router as query_router
 from app.utils.telegram_bot import start_telegram_bot_listener
 
-app = FastAPI()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Start telegram bot background worker
+    poller_task = asyncio.create_task(start_telegram_bot_listener())
+    yield
+    # Cancel gracefully on shutdown
+    poller_task.cancel()
+    try:
+        await poller_task
+    except asyncio.CancelledError:
+        pass
+
+
+app = FastAPI(lifespan=lifespan)
 
 origins = [
     "http://localhost:5173",
@@ -25,18 +39,6 @@ app.add_middleware(
 )
 
 app.include_router(query_router)
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Start telegram bot background worker
-    poller_task = asyncio.create_task(start_telegram_bot_listener())
-    yield
-    # Cancel gracefully on shutdown
-    poller_task.cancel()
-    try:
-        await poller_task
-    except asyncio.CancelledError:
-        pass
 
 if __name__ == "__main__":
     uvicorn.run(
