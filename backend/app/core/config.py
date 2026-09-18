@@ -24,6 +24,23 @@ class Settings(BaseSettings):
     qdrant_api_key: Optional[str] = None
     qdrant_cluster_endpoint: Optional[str] = None
 
+    # --- Database ---
+    DATABASE_URL: str | None = None
+    
+    # --- Auth ---
+    SECRET_KEY: str
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
+    
+    @property
+    def SERVER_BIND_HOST(self) -> str:
+        """Strips protocol prefixes for Uvicorn binding."""
+        return (
+            self.HOST
+            .replace("http://", "")
+            .replace("https://", "")
+            .split(":")[0]
+            .split("/")[0]
+        )
     # Test Qdrant
     test_qdrant_api_key: Optional[str] = None
     test_qdrant_cluster_endpoint: Optional[str] = None

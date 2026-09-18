@@ -4,6 +4,14 @@ requests
 python-dotenv
 pytest
 qdrant-client
+
+# --- Database & Auth ---
+sqlalchemy[asyncio]
+asyncpg
+alembic
+passlib[bcrypt]
+python-jose[cryptography]
+python-multipart
 google-genai
 fastembed 
 crawl4ai
@@ -14,4 +22,3 @@ openai
 redisvl
 redis
 sentence-transformers
-asyncpg
