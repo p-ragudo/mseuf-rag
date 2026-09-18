@@ -12,3 +12,13 @@ alembic
 passlib[bcrypt]
 python-jose[cryptography]
 python-multipart
+google-genai
+fastembed 
+crawl4ai
+langchain
+langchain-text-splitters
+google-auth
+openai
+redisvl
+redis
+sentence-transformers
