@@ -1,3 +1,4 @@
+# --- Web server ---
 fastapi[standard]
 beautifulsoup4
 requests
@@ -12,13 +13,14 @@ alembic
 passlib[bcrypt]
 python-jose[cryptography]
 python-multipart
-google-genai
-fastembed 
-crawl4ai
-langchain
-langchain-text-splitters
 google-auth
+
+# --- Scraping & Ingestion ---
+crawl4ai
+langchain-text-splitters
+
+# --- LLM, Embedding API & Cache ---
+google-genai
 openai
-redisvl
 redis
-sentence-transformers
+redisvl
