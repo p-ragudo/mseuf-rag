@@ -23,8 +23,10 @@ class PostgresDatabaseRepository(DatabaseRepository):
     async def connect(self):
         """Initializes connection pool and ensures schema exists."""
         if not self._pool:
+            clean_dsn = str(self._dsn).replace("postgresql+asyncpg://", "postgresql://")
+
             self._pool = await asyncpg.create_pool(
-                dsn=self._dsn,
+                dsn=clean_dsn,
                 min_size=2,
                 max_size=10,
             )

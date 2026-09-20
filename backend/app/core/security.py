@@ -1,16 +1,13 @@
 
 from datetime import datetime, timedelta, timezone
 
-from passlib.context import CryptContext
 from jose import jwt
+from pwdlib import PasswordHash
+from pwdlib.hashers.bcrypt import BcryptHasher
 
 from app.core.config import settings
 
-pwd_context = CryptContext(
-    schemes=["bcrypt"],
-    deprecated="auto",
-)
-
+pwd_hash = PasswordHash((BcryptHasher(),))
 
 def _truncate_password(password: str) -> str:
     # bcrypt only supports passwords up to 72 bytes.
@@ -18,11 +15,11 @@ def _truncate_password(password: str) -> str:
 
 
 def hash_password(password: str) -> str:
-    return pwd_context.hash(_truncate_password(password))
+    return pwd_hash.hash(_truncate_password(password))
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    return pwd_context.verify(
+    return pwd_hash.verify(
         _truncate_password(plain_password),
         hashed_password,
     )

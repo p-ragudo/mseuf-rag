@@ -1,7 +1,6 @@
 from sqlalchemy import String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.database import Base
-from app.models.org_member import OrgMember
 
 class User(Base):
     __tablename__ = "users"

@@ -10,7 +10,7 @@ qdrant-client
 sqlalchemy[asyncio]
 asyncpg
 alembic
-passlib[bcrypt]
+pwdlib[bcrypt]
 python-jose[cryptography]
 python-multipart
 google-auth
