@@ -1,6 +1,7 @@
 from sqlalchemy import String, ForeignKey
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.database import Base
+from app.models.org_member import OrgMember
 
 class Org(Base):
     __tablename__ = "orgs"

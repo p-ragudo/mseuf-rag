@@ -65,3 +65,12 @@ uv pip compile requirements.in --universal -o requirements.txt
 ```
 uv pip sync requirements.txt
 ```
+
+## To run the backend, run:
+```
+uv run uvicorn app.main:app --reload
+
+# or if you have fastapi[standard] installed, you can also use FastAPI's built-in CLI:
+
+uv run fastapi dev app/main.py
+```

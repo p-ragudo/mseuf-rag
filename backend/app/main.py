@@ -7,7 +7,6 @@ import uvicorn
 from app.api.v1.query import router as query_router
 from app.core.config import settings
 from app.core.database import engine, Base
-import app.models
 from app.routes.auth import router as auth_router
 from app.utils.telegram_bot import start_telegram_bot_listener
 
