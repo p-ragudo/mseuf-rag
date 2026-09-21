@@ -5,6 +5,7 @@ from app.core.database import Base
 
 if TYPE_CHECKING:
     from app.models.scraped_page import ScrapedPage
+    from app.models.generated_question import GeneratedQuestion  # <-- Add import
 
 
 class Chunk(Base):
@@ -20,3 +21,7 @@ class Chunk(Base):
 
     # Relationships
     page: Mapped["ScrapedPage"] = relationship(back_populates="chunks")
+    questions: Mapped[list["GeneratedQuestion"]] = relationship(
+        back_populates="chunk",
+        cascade="all, delete-orphan",
+    )
