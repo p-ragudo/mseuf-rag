@@ -1,6 +1,7 @@
 import enum
+from datetime import datetime
 from typing import TYPE_CHECKING
-from sqlalchemy import String, Text, ForeignKey, Enum
+from sqlalchemy import String, Text, ForeignKey, Enum, Integer, DateTime
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.database import Base
 
@@ -30,6 +31,10 @@ class ScrapedPage(Base):
         default=PageProcessStatus.PENDING,
         nullable=False,
     )
+    chunked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    retries: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
     # Relationships
     org: Mapped["Org"] = relationship()

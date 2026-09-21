@@ -3,7 +3,7 @@ import httpx
 from typing import Optional
 from app.core.config import settings
 from app.services.sql_db.postgres_provider import PostgresDatabaseRepository
-from app.services.ingest_pipeline.scrape import scrape_site
+from backend.app.services.ingest_pipeline.scraper import scrape_site
 from app.services.ingest_pipeline.chunk import process_and_chunk_pages
 
 
