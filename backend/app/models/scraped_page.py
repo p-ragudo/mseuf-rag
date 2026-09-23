@@ -1,7 +1,7 @@
 import enum
 from datetime import datetime
 from typing import TYPE_CHECKING
-from sqlalchemy import String, Text, ForeignKey, Enum, Integer, DateTime
+from sqlalchemy import String, Text, ForeignKey, Enum, Integer, DateTime, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.database import Base
 
@@ -20,6 +20,9 @@ class PageProcessStatus(str, enum.Enum):
 
 class ScrapedPage(Base):
     __tablename__ = "scraped_pages"
+    __table_args__ = (
+        UniqueConstraint("org_id", "web_id", "url", name="uq_scraped_pages_org_web_url"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     org_id: Mapped[int] = mapped_column(ForeignKey("orgs.id", ondelete="CASCADE"), index=True)

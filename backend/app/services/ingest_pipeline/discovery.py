@@ -154,8 +154,13 @@ async def _get_robot_parser(base_url: str) -> RobotFileParser:
     return parser
 
 
-async def run_discovery(org_id: int, web_id: int, base_url: str) -> int:
-    """Finds all URLs and performs an idempotent bulk insert."""
+async def run_discovery(
+    org_id: int, 
+    web_id: int, 
+    base_url: str,
+    max_pages: int = 50,  # <-- Sensible cap for testing; set to 0 or None for unlimited
+) -> int:
+    """Finds all URLs and performs chunked bulk inserts to prevent parameter overflow."""
     clean_base = _normalize_url(base_url)
     robot_parser = await _get_robot_parser(clean_base)
 
@@ -169,6 +174,12 @@ async def run_discovery(org_id: int, web_id: int, base_url: str) -> int:
     if not urls:
         return 0
 
+    # Cap URLs for testing so you don't crawl 2,500 pages in one go
+    sorted_urls = sorted(urls)
+    if max_pages and len(sorted_urls) > max_pages:
+        # Keep base landing page and take first max_pages
+        sorted_urls = [clean_base] + [u for u in sorted_urls if u != clean_base][:max_pages - 1]
+
     records = [
         {
             "org_id": org_id,
@@ -178,18 +189,25 @@ async def run_discovery(org_id: int, web_id: int, base_url: str) -> int:
             "status": PageProcessStatus.PENDING,
             "retries": 0,
         }
-        for target_url in urls
+        for target_url in sorted_urls
     ]
 
-    async with async_session() as session:
-        stmt = (
-            insert(ScrapedPage)
-            .values(records)
-            .on_conflict_do_nothing(index_elements=["org_id", "web_id", "url"])
-            .returning(ScrapedPage.id)
-        )
-        res = await session.execute(stmt)
-        inserted_rows = len(res.scalars().all())
-        await session.commit()
+    total_inserted = 0
+    # Batch into chunks of 200 records (200 * 6 = 1,200 params per query)
+    BATCH_SIZE = 200
 
-    return inserted_rows
+    async with async_session() as session:
+        for i in range(0, len(records), BATCH_SIZE):
+            batch = records[i:i + BATCH_SIZE]
+            stmt = (
+                insert(ScrapedPage)
+                .values(batch)
+                .on_conflict_do_nothing(index_elements=["org_id", "web_id", "url"])
+                .returning(ScrapedPage.id)
+            )
+            res = await session.execute(stmt)
+            inserted_ids = res.scalars().all()
+            total_inserted += len(inserted_ids)
+            await session.commit()
+
+    return total_inserted
