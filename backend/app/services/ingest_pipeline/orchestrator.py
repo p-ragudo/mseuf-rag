@@ -215,7 +215,7 @@ async def sync_questions_to_qdrant(org_id: int, web_id: int) -> int:
     points_synced = 0
     vector_db = get_vector_db()
     embedder = get_embedder()
-    target_collection = settings.dense_collection_name
+    target_collection = settings.collection_name
 
     await vector_db.create_collection_if_not_exists(
         collection_name=target_collection,
