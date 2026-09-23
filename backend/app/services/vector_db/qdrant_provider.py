@@ -5,7 +5,8 @@ from qdrant_client.http import models as rest_models
 from app.core.config import settings
 
 from .base import BaseVectorDB
-from .schema import VectorPoint, SearchResult
+from .schema import VectorPoint, SearchResult, SparseVectorData
+
 
 class QdrantVectorDB(BaseVectorDB):
     def __init__(self, client: Optional[AsyncQdrantClient] = None):
@@ -23,17 +24,23 @@ class QdrantVectorDB(BaseVectorDB):
             api_key = settings.qdrant_api_key
 
         if not cluster_endpoint:
-            env_var = "TEST_QDRANT_CLUSTER_ENDPOINT" if is_dev else "QDRANT_CLUSTER_ENDPOINT"
+            env_var = (
+                "TEST_QDRANT_CLUSTER_ENDPOINT" if is_dev else "QDRANT_CLUSTER_ENDPOINT"
+            )
             raise ValueError(f"{env_var} is not configured in the environment.")
 
         self.client = AsyncQdrantClient(url=cluster_endpoint, api_key=api_key)
 
     async def create_collection_if_not_exists(
-        self, 
-        collection_name: str, 
-        vector_size: Optional[int] = None, 
-        distance: str = "Cosine"
+        self,
+        collection_name: str,
+        dense_vector_size: int,
+        distance: str = "Cosine",
     ) -> None:
+        """
+        Creates a multi-tenant collection with named dense & sparse vectors,
+        root HNSW m=0, and creates an isolated tenant index on `group_id`.
+        """
         collections = await self.client.get_collections()
         existing_names = {col.name for col in collections.collections}
 
@@ -45,38 +52,67 @@ class QdrantVectorDB(BaseVectorDB):
             }
             selected_distance = distance_map.get(distance, rest_models.Distance.COSINE)
 
-            # Pass {} to vectors_config for unvectorized payload-only storage
-            vectors_config = (
-                rest_models.VectorParams(
-                    size=vector_size,
-                    distance=selected_distance,
-                )
-                if vector_size is not None
-                else {}
-            )
-
             await self.client.create_collection(
                 collection_name=collection_name,
-                vectors_config=vectors_config,
+                vectors_config={
+                    "question_dense": rest_models.VectorParams(
+                        size=dense_vector_size,
+                        distance=selected_distance,
+                        hnsw_config=rest_models.HnswConfigDiff(
+                            m=0,  # Global graph disabled to prevent cross-tenant dead ends
+                            payload_m=16,  # Multi-tenant sub-graph edges
+                        ),
+                    )
+                },
+                sparse_vectors_config={
+                    "chunk_sparse": rest_models.SparseVectorParams(
+                        index=rest_models.SparseIndexParams(on_disk=False)
+                    )
+                },
+            )
+
+            # Establish the tenant-aware index on group_id
+            await self.client.create_payload_index(
+                collection_name=collection_name,
+                field_name="group_id",
+                field_schema=rest_models.PayloadSchemaType.KEYWORD,
+                is_tenant=True,
             )
 
     async def upsert_points(
-        self, 
-        collection_name: str, 
-        points: List[VectorPoint]
+        self, collection_name: str, points: List[VectorPoint]
     ) -> None:
-        qdrant_points = [
-            rest_models.PointStruct(
-                id=p.id,
-                vector=p.vector,
-                payload=p.payload
+        qdrant_points: List[rest_models.PointStruct] = []
+
+        for p in points:
+            converted_vectors: Dict[str, Any] = {}
+            if isinstance(p.vector, dict):
+                for v_name, v_val in p.vector.items():
+                    if isinstance(v_val, SparseVectorData):
+                        converted_vectors[v_name] = rest_models.SparseVector(
+                            indices=v_val.indices,
+                            values=v_val.values,
+                        )
+                    elif isinstance(v_val, dict) and "indices" in v_val:
+                        converted_vectors[v_name] = rest_models.SparseVector(
+                            indices=v_val["indices"],
+                            values=v_val["values"],
+                        )
+                    else:
+                        converted_vectors[v_name] = v_val
+            else:
+                converted_vectors = p.vector
+
+            qdrant_points.append(
+                rest_models.PointStruct(
+                    id=p.id,
+                    vector=converted_vectors,
+                    payload=p.payload,
+                )
             )
-            for p in points
-        ]
+
         await self.client.upsert(
-            collection_name=collection_name,
-            points=qdrant_points,
-            wait=True
+            collection_name=collection_name, points=qdrant_points, wait=True
         )
 
     async def upsert_payload_only(
@@ -85,24 +121,14 @@ class QdrantVectorDB(BaseVectorDB):
         records: List[Dict[str, Any]],
         id_key: str = "id",
     ) -> None:
-        """Upserts records directly as payloads without vector generation.
-
-        Args:
-            collection_name: Target collection.
-            records: List of dictionaries to store as payload data.
-            id_key: Key inside each record to use as point ID (falls back to UUID).
-        """
         qdrant_points: List[rest_models.PointStruct] = []
-
         for record in records:
             point_id = record.get(id_key)
             if not point_id:
                 raise ValueError(
                     f"Record is missing required identifier key '{id_key}': {record}"
                 )
-
             payload = {k: v for k, v in record.items() if k != id_key}
-
             qdrant_points.append(
                 rest_models.PointStruct(
                     id=point_id,
@@ -120,7 +146,8 @@ class QdrantVectorDB(BaseVectorDB):
     async def search(
         self,
         collection_name: str,
-        query_vector: List[float],
+        query_vector: Optional[List[float]] = None,
+        query_text: Optional[str] = None,
         limit: int = 5,
         filters: Optional[Dict[str, Any]] = None,
         with_payload: bool = True,
@@ -132,15 +159,13 @@ class QdrantVectorDB(BaseVectorDB):
                 if isinstance(val, list):
                     conditions.append(
                         rest_models.FieldCondition(
-                            key=key,
-                            match=rest_models.MatchAny(any=val)
+                            key=key, match=rest_models.MatchAny(any=val)
                         )
                     )
                 else:
                     conditions.append(
                         rest_models.FieldCondition(
-                            key=key,
-                            match=rest_models.MatchValue(value=val)
+                            key=key, match=rest_models.MatchValue(value=val)
                         )
                     )
             qdrant_filter = rest_models.Filter(must=conditions)
@@ -155,15 +180,12 @@ class QdrantVectorDB(BaseVectorDB):
 
         return [
             SearchResult(
-                id=str(hit.id),
-                score=hit.score,
-                payload=hit.payload or {}
+                id=str(hit.id), score=hit.score, payload=hit.payload or {}
             )
             for hit in response.points
         ]
 
     async def close(self) -> None:
-        """Closes the vector database client connection."""
         if hasattr(self, "client") and self.client is not None:
             if hasattr(self.client, "close"):
                 res = self.client.close()
