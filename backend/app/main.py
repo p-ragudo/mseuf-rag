@@ -10,6 +10,8 @@ from app.core.database import engine, Base
 from app.routes.auth import router as auth_router
 from app.routes.ingest import router as ingest_router
 from app.utils.telegram_bot import start_telegram_bot_listener
+from app.routes.orgs import router as orgs_router
+from app.routes.websites import router as websites_router
 
 
 @asynccontextmanager
@@ -45,8 +47,10 @@ app.add_middleware(
 )
 
 app.include_router(auth_router)
-app.include_router(query_router)
+app.include_router(orgs_router)
+app.include_router(websites_router)
 app.include_router(ingest_router)
+app.include_router(query_router)
 
 if __name__ == "__main__":
     uvicorn.run(
