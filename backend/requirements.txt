@@ -267,6 +267,7 @@ pillow==12.3.0
     # via crawl4ai
 playwright==1.62.0
     # via
+    #   -r requirements.in
     #   crawl4ai
     #   playwright-stealth
 playwright-stealth==2.0.3
