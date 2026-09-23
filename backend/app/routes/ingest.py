@@ -3,11 +3,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 
 from app.core.database import get_db
+from app.models.user import User
+from app.models.org_member import OrgMember
 from app.models.website import Website, WebsiteScrapeStatus
 from app.models.scraped_page import ScrapedPage, PageProcessStatus
 from app.models.chunk import Chunk
 from app.models.generated_question import GeneratedQuestion
 from app.services.ingest_pipeline.orchestrator import run_full_pipeline
+from app.routes.auth import get_current_user
 
 router = APIRouter(prefix="/ingest", tags=["Ingest Pipeline"])
 
@@ -16,19 +19,29 @@ router = APIRouter(prefix="/ingest", tags=["Ingest Pipeline"])
 async def trigger_ingestion(
     website_id: int,
     background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """
     Triggers discovery, scraping, chunking, question generation,
     and Qdrant indexing for a website in the background.
     """
-    res = await db.execute(select(Website).where(Website.id == website_id))
+    # Join Website with OrgMember to ensure the user belongs to the owning org
+    stmt = (
+        select(Website)
+        .join(OrgMember, Website.org_id == OrgMember.org_id)
+        .where(
+            Website.id == website_id,
+            OrgMember.user_id == current_user.id,
+        )
+    )
+    res = await db.execute(stmt)
     website = res.scalar_one_or_none()
 
     if not website:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Website {website_id} does not exist",
+            detail=f"Website {website_id} not found or you lack access permissions.",
         )
 
     if website.status == WebsiteScrapeStatus.IN_PROGRESS:
@@ -50,16 +63,26 @@ async def trigger_ingestion(
 @router.get("/status/{website_id}")
 async def get_ingestion_status(
     website_id: int,
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Returns database checkpoint stats across all 5 ingestion stages."""
-    res = await db.execute(select(Website).where(Website.id == website_id))
+    # Ensure user has access to the organization that owns this website
+    stmt = (
+        select(Website)
+        .join(OrgMember, Website.org_id == OrgMember.org_id)
+        .where(
+            Website.id == website_id,
+            OrgMember.user_id == current_user.id,
+        )
+    )
+    res = await db.execute(stmt)
     website = res.scalar_one_or_none()
 
     if not website:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Website not found",
+            detail=f"Website {website_id} not found or you lack access permissions.",
         )
 
     # 1. Page status breakdown

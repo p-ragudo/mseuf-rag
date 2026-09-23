@@ -50,6 +50,8 @@ class Settings(BaseSettings):
     sparse_collection_name: str = "sparse_collection"
     chunk_collection_name: str = "chunks_collection"
 
+    collection_name: str = "mseuf_rag_test"
+
     # Retrieval Constraints
     default_top_k: int = 5
     min_top_k: int = 1
