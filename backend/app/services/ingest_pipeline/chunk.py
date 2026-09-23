@@ -7,7 +7,7 @@ from sqlalchemy import select, delete
 from app.core.database import async_session_factory
 from app.models.scraped_page import ScrapedPage, PageProcessStatus
 from app.models.chunk import Chunk
-from app.services.cleaner import clean_markdown
+from app.services.ingest_pipeline.clean_markdown import clean_markdown
 
 
 def estimate_token_count(text: str) -> int:

@@ -1,9 +1,12 @@
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, func
 
 from app.core.database import get_db
 from app.models.website import Website, WebsiteScrapeStatus
+from app.models.scraped_page import ScrapedPage, PageProcessStatus
+from app.models.chunk import Chunk
+from app.models.generated_question import GeneratedQuestion
 from app.services.ingest_pipeline.orchestrator import run_full_pipeline
 
 router = APIRouter(prefix="/ingest", tags=["Ingest Pipeline"])
@@ -16,8 +19,8 @@ async def trigger_ingestion(
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Triggers discovery, scraping, chunking, and question generation
-    for a website in the background.
+    Triggers discovery, scraping, chunking, question generation,
+    and Qdrant indexing for a website in the background.
     """
     res = await db.execute(select(Website).where(Website.id == website_id))
     website = res.scalar_one_or_none()
@@ -34,7 +37,7 @@ async def trigger_ingestion(
             detail="Scrape and ingestion pipeline is already running for this site.",
         )
 
-    # Queue execution
+    # Launch non-blocking background orchestration
     background_tasks.add_task(run_full_pipeline, website_id=website_id)
 
     return {
@@ -49,7 +52,7 @@ async def get_ingestion_status(
     website_id: int,
     db: AsyncSession = Depends(get_db),
 ):
-    """Returns the current database checkpoint progress for this website."""
+    """Returns database checkpoint stats across all 5 ingestion stages."""
     res = await db.execute(select(Website).where(Website.id == website_id))
     website = res.scalar_one_or_none()
 
@@ -59,9 +62,54 @@ async def get_ingestion_status(
             detail="Website not found",
         )
 
+    # 1. Page status breakdown
+    page_counts_res = await db.execute(
+        select(ScrapedPage.status, func.count(ScrapedPage.id))
+        .where(ScrapedPage.web_id == website_id)
+        .group_by(ScrapedPage.status)
+    )
+    page_stats = {status_val.value: count for status_val, count in page_counts_res.all()}
+    total_pages = sum(page_stats.values())
+
+    # 2. Chunk stats
+    chunks_count_res = await db.execute(
+        select(func.count(Chunk.id))
+        .join(ScrapedPage, Chunk.page_id == ScrapedPage.id)
+        .where(ScrapedPage.web_id == website_id)
+    )
+    total_chunks = chunks_count_res.scalar_one() or 0
+
+    # 3. Question & Qdrant sync stats
+    q_stats_res = await db.execute(
+        select(
+            func.count(GeneratedQuestion.id),
+            func.count(GeneratedQuestion.id).filter(GeneratedQuestion.is_synced_qdrant.is_(True)),
+        )
+        .join(Chunk, GeneratedQuestion.chunk_id == Chunk.id)
+        .join(ScrapedPage, Chunk.page_id == ScrapedPage.id)
+        .where(ScrapedPage.web_id == website_id)
+    )
+    total_questions, synced_qdrant_count = q_stats_res.one()
+
     return {
         "website_id": website.id,
         "url": website.url,
         "status": website.status,
         "error_message": website.error_message,
+        "checkpoints": {
+            "pages": {
+                "total_discovered": total_pages,
+                "pending": page_stats.get(PageProcessStatus.PENDING.value, 0),
+                "in_progress": page_stats.get(PageProcessStatus.IN_PROGRESS.value, 0),
+                "completed": page_stats.get(PageProcessStatus.COMPLETED.value, 0),
+                "failed": page_stats.get(PageProcessStatus.FAILED.value, 0),
+            },
+            "chunks": {
+                "total": total_chunks,
+            },
+            "questions": {
+                "total_generated": total_questions or 0,
+                "synced_qdrant": synced_qdrant_count or 0,
+            },
+        },
     }

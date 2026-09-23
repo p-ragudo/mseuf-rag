@@ -1,11 +1,11 @@
 import hashlib
 from collections import Counter
 from datetime import datetime, timezone
-from typing import Dict, List, Tuple
+from typing import Dict, List
 
-import tiktoken
 from crawl4ai import AsyncWebCrawler, CrawlerRunConfig, CacheMode
-from sqlalchemy import select, update
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from sqlalchemy import select, update, delete
 from sqlalchemy.orm import selectinload
 
 from app.core.config import settings
@@ -15,47 +15,20 @@ from app.models.generated_question import GeneratedQuestion
 from app.models.scraped_page import PageProcessStatus, ScrapedPage
 from app.models.website import Website, WebsiteScrapeStatus
 from app.services.embeddings.factory import get_embedder
+from app.services.ingest_pipeline.clean_markdown import clean_markdown
 from app.services.ingest_pipeline.discovery import run_discovery
 from app.services.llm_qgen.factory import get_question_generator
 from app.services.llm_qgen.schema import RawChunk
 from app.services.vector_db.factory import get_vector_db
 from app.services.vector_db.schema import SparseVectorData, VectorPoint
-from app.utils.uuid_generator import generate_chunk_id, generate_question_id
-
-tokenizer = tiktoken.get_encoding("cl100k_base")
+from app.utils.uuid_generator import generate_chunk_id, generate_doc_id, generate_question_id
 
 
-# =========================================================================
-# Stage Helpers
-# =========================================================================
-
-def _simple_chunk_text(
-    text: str, max_tokens: int = 500, overlap: int = 50
-) -> List[Tuple[str, int]]:
-    """Splits text by token length using tiktoken. Returns list of (chunk_text, token_count)."""
-    tokens = tokenizer.encode(text)
-    total_tokens = len(tokens)
-    chunks = []
-    start = 0
-
-    while start < total_tokens:
-        end = min(start + max_tokens, total_tokens)
-        chunk_token_slice = tokens[start:end]
-        chunk_str = tokenizer.decode(chunk_token_slice)
-        chunks.append((chunk_str, len(chunk_token_slice)))
-
-        if end == total_tokens:
-            break
-        start += max_tokens - overlap
-
-    return chunks
+def estimate_token_count(text: str) -> int:
+    return max(1, len(text.split()))
 
 
-def _compute_simple_sparse_vector(text: str) -> SparseVectorData:
-    """
-    Builds a sparse token frequency vector suitable for BM25/keyword indexing.
-    Maps word hashes into unsigned 32-bit indices.
-    """
+def compute_simple_sparse_vector(text: str) -> SparseVectorData:
     words = [w.lower() for w in text.split() if w.isalnum()]
     if not words:
         return SparseVectorData(indices=[], values=[])
@@ -65,12 +38,10 @@ def _compute_simple_sparse_vector(text: str) -> SparseVectorData:
     values = []
 
     for word, freq in counts.items():
-        # Hash to an integer index suitable for Qdrant sparse vectors (uint32)
         idx = int(hashlib.md5(word.encode("utf-8")).hexdigest()[:8], 16)
         indices.append(idx)
         values.append(float(freq))
 
-    # Qdrant requires sparse indices to be sorted ascending
     sorted_pairs = sorted(zip(indices, values), key=lambda x: x[0])
     return SparseVectorData(
         indices=[p[0] for p in sorted_pairs],
@@ -78,12 +49,7 @@ def _compute_simple_sparse_vector(text: str) -> SparseVectorData:
     )
 
 
-# =========================================================================
-# Pipeline Stages
-# =========================================================================
-
 async def scrape_pending_pages(web_id: int, max_retries: int = 3) -> int:
-    """Fetches PENDING scraped_pages for this website and scrapes their markdown content."""
     scraped_count = 0
     config = CrawlerRunConfig(cache_mode=CacheMode.BYPASS)
 
@@ -130,9 +96,18 @@ async def scrape_pending_pages(web_id: int, max_retries: int = 3) -> int:
     return scraped_count
 
 
-async def chunk_completed_pages(web_id: int) -> int:
-    """Processes COMPLETED scraped_pages that have not yet been chunked."""
+async def chunk_completed_pages(
+    web_id: int,
+    chunk_size: int = 800,
+    chunk_overlap: int = 150,
+) -> int:
+    """Uses clean_markdown and RecursiveCharacterTextSplitter to produce chunks."""
     chunks_created = 0
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        separators=["\n\n", "\n", ". ", " ", ""],
+    )
 
     async with async_session() as session:
         stmt = select(ScrapedPage).where(
@@ -145,21 +120,34 @@ async def chunk_completed_pages(web_id: int) -> int:
         pages = res.scalars().all()
 
         for page in pages:
-            if not page.markdown_content or not page.markdown_content.strip():
-                page.chunked_at = datetime.now(timezone.utc)
-                await session.commit()
-                continue
+            raw_text = page.markdown_content or ""
+            cleaned = clean_markdown(raw_text)
 
-            raw_chunks = _simple_chunk_text(page.markdown_content)
-            for chunk_content, token_count in raw_chunks:
-                chunk = Chunk(
-                    page_id=page.id,
-                    content=chunk_content,
-                    token_count=token_count,
-                    has_qgen=False,
-                )
-                session.add(chunk)
-                chunks_created += 1
+            if cleaned.startswith("---"):
+                parts = cleaned.split("---", 2)
+                if len(parts) >= 3:
+                    cleaned = parts[2].strip()
+
+            split_texts = text_splitter.split_text(cleaned)
+            valid_chunks: List[Chunk] = []
+
+            for text in split_texts:
+                stripped_chunk = text.strip()
+                if len(stripped_chunk) > 40:
+                    valid_chunks.append(
+                        Chunk(
+                            page_id=page.id,
+                            content=stripped_chunk,
+                            token_count=estimate_token_count(stripped_chunk),
+                            has_qgen=False,
+                        )
+                    )
+
+            await session.execute(delete(Chunk).where(Chunk.page_id == page.id))
+
+            if valid_chunks:
+                session.add_all(valid_chunks)
+                chunks_created += len(valid_chunks)
 
             page.chunked_at = datetime.now(timezone.utc)
             await session.commit()
@@ -168,7 +156,6 @@ async def chunk_completed_pages(web_id: int) -> int:
 
 
 async def generate_questions_for_chunks(web_id: int) -> int:
-    """Generates synthetic questions via LLM for chunks where has_qgen=False."""
     questions_created = 0
     generator = get_question_generator()
 
@@ -180,14 +167,23 @@ async def generate_questions_for_chunks(web_id: int) -> int:
                 ScrapedPage.web_id == web_id,
                 Chunk.has_qgen.is_(False),
             )
+            .options(selectinload(Chunk.page))
         )
         res = await session.execute(stmt)
         pending_chunks = res.scalars().all()
 
         for chunk in pending_chunks:
+            page = chunk.page
+            tenant_str = str(page.org_id)
+            doc_id = generate_doc_id(tenant_id=tenant_str, source_url=page.url)
+
             raw_chunk_payload = RawChunk(
-                chunk_id=chunk.id,
+                id=str(chunk.id),
+                doc_id=doc_id,
+                source_url=page.url,
+                title=page.url.split("/")[-1] or "Homepage",
                 content=chunk.content,
+                tags=[tenant_str],
             )
 
             try:
@@ -195,7 +191,7 @@ async def generate_questions_for_chunks(web_id: int) -> int:
 
                 for item in generated:
                     question_text = (
-                        item.question if hasattr(item, "question") else str(item)
+                        item.content if hasattr(item, "content") else str(item)
                     )
                     q_record = GeneratedQuestion(
                         chunk_id=chunk.id,
@@ -216,20 +212,11 @@ async def generate_questions_for_chunks(web_id: int) -> int:
 
 
 async def sync_questions_to_qdrant(org_id: int, web_id: int) -> int:
-    """
-    Syncs GeneratedQuestion records where is_synced_qdrant=False into Qdrant.
-    Stores each question as an isolated point containing:
-      - Point ID: Deterministic UUIDv5 based on chunk and question text
-      - question_dense: Dense embedding of the question
-      - chunk_sparse: Token frequency sparse vector of the parent chunk
-      - Payload: metadata with group_id / tenant_id for sub-index isolation
-    """
     points_synced = 0
     vector_db = get_vector_db()
     embedder = get_embedder()
     target_collection = settings.dense_collection_name
 
-    # Ensure the multi-tenant collection exists with proper sub-indexing
     await vector_db.create_collection_if_not_exists(
         collection_name=target_collection,
         dense_vector_size=embedder.dimension,
@@ -237,7 +224,6 @@ async def sync_questions_to_qdrant(org_id: int, web_id: int) -> int:
     )
 
     async with async_session() as session:
-        # Load questions joined with chunk and page to populate metadata
         stmt = (
             select(GeneratedQuestion)
             .join(Chunk, GeneratedQuestion.chunk_id == Chunk.id)
@@ -246,9 +232,7 @@ async def sync_questions_to_qdrant(org_id: int, web_id: int) -> int:
                 ScrapedPage.web_id == web_id,
                 GeneratedQuestion.is_synced_qdrant.is_(False),
             )
-            .options(
-                selectinload(GeneratedQuestion.chunk).selectinload(Chunk.page)
-            )
+            .options(selectinload(GeneratedQuestion.chunk).selectinload(Chunk.page))
         )
         res = await session.execute(stmt)
         unsynced_questions = res.scalars().all()
@@ -256,11 +240,9 @@ async def sync_questions_to_qdrant(org_id: int, web_id: int) -> int:
         if not unsynced_questions:
             return 0
 
-        # Batch embed question texts
         question_texts = [q.question for q in unsynced_questions]
         embedded_results = embedder.embed(question_texts)
 
-        # Cache sparse representations per parent chunk so we don't recompute
         chunk_sparse_cache: Dict[int, SparseVectorData] = {}
         points_to_upsert: List[VectorPoint] = []
         synced_ids: List[int] = []
@@ -272,12 +254,9 @@ async def sync_questions_to_qdrant(org_id: int, web_id: int) -> int:
             page = chunk.page
 
             if chunk.id not in chunk_sparse_cache:
-                chunk_sparse_cache[chunk.id] = _compute_simple_sparse_vector(
-                    chunk.content
-                )
+                chunk_sparse_cache[chunk.id] = compute_simple_sparse_vector(chunk.content)
             sparse_data = chunk_sparse_cache[chunk.id]
 
-            # Deterministic IDs
             chunk_uuid = generate_chunk_id(
                 tenant_id=tenant_key,
                 source_url=page.url,
@@ -296,7 +275,7 @@ async def sync_questions_to_qdrant(org_id: int, web_id: int) -> int:
                     "chunk_sparse": sparse_data,
                 },
                 payload={
-                    "group_id": tenant_key,  # Used by Qdrant tenant-aware HNSW
+                    "group_id": tenant_key,
                     "tenant_id": tenant_key,
                     "parent_chunk_id": chunk_uuid,
                     "question_text": q_record.question,
@@ -310,12 +289,9 @@ async def sync_questions_to_qdrant(org_id: int, web_id: int) -> int:
             synced_ids.append(q_record.id)
 
         if points_to_upsert:
-            # Upsert in bulk to Qdrant
             await vector_db.upsert_points(
                 collection_name=target_collection, points=points_to_upsert
             )
-
-            # Mark all as synced in PostgreSQL
             await session.execute(
                 update(GeneratedQuestion)
                 .where(GeneratedQuestion.id.in_(synced_ids))
@@ -327,12 +303,7 @@ async def sync_questions_to_qdrant(org_id: int, web_id: int) -> int:
     return points_synced
 
 
-# =========================================================================
-# Master Orchestrator
-# =========================================================================
-
 async def run_full_pipeline(website_id: int) -> dict:
-    """Executes the complete pipeline with status tracking across all 5 checkpoints."""
     async with async_session() as session:
         website = await session.get(Website, website_id)
         if not website:
@@ -346,23 +317,12 @@ async def run_full_pipeline(website_id: int) -> dict:
         base_url = website.url
 
     try:
-        # Checkpoint 1: URL Discovery
         discovered_urls = await run_discovery(
             org_id=org_id, web_id=website_id, base_url=base_url
         )
-
-        # Checkpoint 2: Page Scraping
         scraped_pages = await scrape_pending_pages(web_id=website_id)
-
-        # Checkpoint 3: Content Chunking
         created_chunks = await chunk_completed_pages(web_id=website_id)
-
-        # Checkpoint 4: Question Generation
-        generated_questions = await generate_questions_for_chunks(
-            web_id=website_id
-        )
-
-        # Checkpoint 5: Qdrant Multi-Tenant Sync
+        generated_questions = await generate_questions_for_chunks(web_id=website_id)
         synced_qdrant_points = await sync_questions_to_qdrant(
             org_id=org_id, web_id=website_id
         )

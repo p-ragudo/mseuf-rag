@@ -8,7 +8,9 @@ from app.api.v1.query import router as query_router
 from app.core.config import settings
 from app.core.database import engine, Base
 from app.routes.auth import router as auth_router
+from app.routes.ingest import router as ingest_router
 from app.utils.telegram_bot import start_telegram_bot_listener
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -44,11 +46,12 @@ app.add_middleware(
 
 app.include_router(auth_router)
 app.include_router(query_router)
+app.include_router(ingest_router)
 
 if __name__ == "__main__":
     uvicorn.run(
         "app.main:app", 
         host=settings.SERVER_BIND_HOST, 
         port=settings.PORT, 
-        reload=True
+        reload=True,
     )

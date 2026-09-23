@@ -1,42 +1,65 @@
 import xml.etree.ElementTree as ET
+from typing import List, Optional, Set
 from urllib.parse import urljoin, urlparse
-from typing import List, Set
+from urllib.robotparser import RobotFileParser
+
 import httpx
 from crawl4ai import AsyncWebCrawler, CrawlerRunConfig, CacheMode
-from sqlalchemy import select
-from app.core.database import async_session_factory
+from sqlalchemy.dialects.postgresql import insert
+
+from app.core.database import async_session
 from app.models.scraped_page import ScrapedPage, PageProcessStatus
+
+DEFAULT_USER_AGENT = "Mozilla/5.0 (compatible; ResearchBot/1.0)"
 
 
 def _normalize_url(url: str) -> str:
     parsed = urlparse(url)
-    # Strip fragment (#) and trailing slashes
-    clean = parsed._replace(fragment="").geturl().rstrip("/")
-    return clean
+    return parsed._replace(fragment="").geturl().rstrip("/")
 
 
-async def _fetch_sitemap_urls(client: httpx.AsyncClient, sitemap_url: str) -> Set[str]:
-    """Recursively parses XML sitemaps and nested sitemapindexes."""
+async def _fetch_sitemap_urls(
+    client: httpx.AsyncClient,
+    sitemap_url: str,
+    visited_sitemaps: Set[str],
+) -> Set[str]:
+    """Recursively parses XML sitemaps and sitemap indexes with cycle prevention."""
+    clean_sitemap_url = _normalize_url(sitemap_url)
+    if clean_sitemap_url in visited_sitemaps:
+        return set()
+
+    visited_sitemaps.add(clean_sitemap_url)
     discovered: Set[str] = set()
+
     try:
-        resp = await client.get(sitemap_url, timeout=15.0, follow_redirects=True)
+        resp = await client.get(clean_sitemap_url, timeout=15.0, follow_redirects=True)
         if resp.status_code != 200 or not resp.text.strip():
             return discovered
 
         root = ET.fromstring(resp.text)
         namespace = {"ns": root.tag.split("}")[0].strip("{")} if "}" in root.tag else {}
 
-        # 1. Check if this is a sitemap index referencing other sitemaps
-        sitemap_tags = root.findall(".//ns:sitemap/ns:loc", namespace) if namespace else root.findall(".//sitemap/loc")
+        # Check for nested sitemaps
+        sitemap_tags = (
+            root.findall(".//ns:sitemap/ns:loc", namespace)
+            if namespace
+            else root.findall(".//sitemap/loc")
+        )
         if sitemap_tags:
             for tag in sitemap_tags:
                 if tag.text:
-                    child_urls = await _fetch_sitemap_urls(client, tag.text.strip())
+                    child_urls = await _fetch_sitemap_urls(
+                        client, tag.text.strip(), visited_sitemaps
+                    )
                     discovered.update(child_urls)
             return discovered
 
-        # 2. Standard sitemap containing page URLs
-        url_tags = root.findall(".//ns:url/ns:loc", namespace) if namespace else root.findall(".//url/loc")
+        # Standard sitemap containing URLs
+        url_tags = (
+            root.findall(".//ns:url/ns:loc", namespace)
+            if namespace
+            else root.findall(".//url/loc")
+        )
         for tag in url_tags:
             if tag.text:
                 discovered.add(_normalize_url(tag.text.strip()))
@@ -47,18 +70,22 @@ async def _fetch_sitemap_urls(client: httpx.AsyncClient, sitemap_url: str) -> Se
     return discovered
 
 
-async def _discover_from_sitemaps(base_url: str) -> Set[str]:
-    """Tries robots.txt sitemap directives, then standard /sitemap.xml fallbacks."""
+async def _discover_from_sitemaps(
+    base_url: str,
+    robot_parser: Optional[RobotFileParser] = None,
+) -> Set[str]:
+    """Parses robots.txt sitemaps and common fallback paths without premature breaks."""
     parsed = urlparse(base_url)
     root_origin = f"{parsed.scheme}://{parsed.netloc}"
     discovered: Set[str] = set()
-
     candidate_sitemaps: List[str] = []
+    visited_sitemaps: Set[str] = set()
 
-    async with httpx.AsyncClient(headers={"User-Agent": "Mozilla/5.0"}) as client:
-        # Check robots.txt for Sitemap directives
+    async with httpx.AsyncClient(headers={"User-Agent": DEFAULT_USER_AGENT}) as client:
         try:
-            robots_resp = await client.get(f"{root_origin}/robots.txt", timeout=10.0, follow_redirects=True)
+            robots_resp = await client.get(
+                f"{root_origin}/robots.txt", timeout=10.0, follow_redirects=True
+            )
             if robots_resp.status_code == 200:
                 for line in robots_resp.text.splitlines():
                     if line.lower().startswith("sitemap:"):
@@ -66,24 +93,29 @@ async def _discover_from_sitemaps(base_url: str) -> Set[str]:
         except Exception:
             pass
 
-        # Standard sitemap path conventions
         candidate_sitemaps.extend([
             f"{root_origin}/sitemap.xml",
             f"{root_origin}/sitemap_index.xml",
             f"{root_origin}/wp-sitemap.xml",
         ])
 
-        for sm_url in dict.fromkeys(candidate_sitemaps):
-            urls = await _fetch_sitemap_urls(client, sm_url)
-            if urls:
-                discovered.update(urls)
-                break  # Stop once a working sitemap is found and parsed
+        for sm_url in list(dict.fromkeys(candidate_sitemaps)):
+            urls = await _fetch_sitemap_urls(client, sm_url, visited_sitemaps)
+            discovered.update(urls)
+
+    if robot_parser:
+        discovered = {
+            url for url in discovered if robot_parser.can_fetch(DEFAULT_USER_AGENT, url)
+        }
 
     return discovered
 
 
-async def _discover_from_internal_links(base_url: str) -> Set[str]:
-    """Fallback: Crawl base_url and collect internal hyperlinks."""
+async def _discover_from_internal_links(
+    base_url: str,
+    robot_parser: Optional[RobotFileParser] = None,
+) -> Set[str]:
+    """Fallback crawl using crawl4ai."""
     domain = urlparse(base_url).netloc
     found: Set[str] = set()
 
@@ -97,47 +129,67 @@ async def _discover_from_internal_links(base_url: str) -> Set[str]:
                     continue
                 full_url = urljoin(base_url, href)
                 if urlparse(full_url).netloc == domain:
-                    found.add(_normalize_url(full_url))
+                    clean = _normalize_url(full_url)
+                    if not robot_parser or robot_parser.can_fetch(DEFAULT_USER_AGENT, clean):
+                        found.add(clean)
 
     return found
 
 
+async def _get_robot_parser(base_url: str) -> RobotFileParser:
+    parsed = urlparse(base_url)
+    robots_url = f"{parsed.scheme}://{parsed.netloc}/robots.txt"
+    parser = RobotFileParser()
+
+    try:
+        async with httpx.AsyncClient(headers={"User-Agent": DEFAULT_USER_AGENT}) as client:
+            resp = await client.get(robots_url, timeout=10.0, follow_redirects=True)
+            if resp.status_code == 200:
+                parser.parse(resp.text.splitlines())
+            else:
+                parser.allow_all = True
+    except Exception:
+        parser.allow_all = True
+
+    return parser
+
+
 async def run_discovery(org_id: int, web_id: int, base_url: str) -> int:
-    """
-    Finds all URLs on a website via sitemap (falling back to internal links)
-    and saves them to scraped_pages with status=PENDING.
-    Returns the count of newly inserted URLs.
-    """
+    """Finds all URLs and performs an idempotent bulk insert."""
     clean_base = _normalize_url(base_url)
-    urls = await _discover_from_sitemaps(clean_base)
+    robot_parser = await _get_robot_parser(clean_base)
+
+    urls = await _discover_from_sitemaps(clean_base, robot_parser=robot_parser)
+    if not urls:
+        urls = await _discover_from_internal_links(clean_base, robot_parser=robot_parser)
+
+    if robot_parser.can_fetch(DEFAULT_USER_AGENT, clean_base):
+        urls.add(clean_base)
 
     if not urls:
-        urls = await _discover_from_internal_links(clean_base)
+        return 0
 
-    # Ensure the root page is always part of the set
-    urls.add(clean_base)
+    records = [
+        {
+            "org_id": org_id,
+            "web_id": web_id,
+            "url": target_url,
+            "markdown_content": None,
+            "status": PageProcessStatus.PENDING,
+            "retries": 0,
+        }
+        for target_url in urls
+    ]
 
-    new_inserts = 0
-    async with async_session_factory() as session:
-        for url in urls:
-            stmt = select(ScrapedPage.id).where(
-                ScrapedPage.org_id == org_id,
-                ScrapedPage.web_id == web_id,
-                ScrapedPage.url == url,
-            )
-            res = await session.execute(stmt)
-            if res.scalar_one_or_none() is None:
-                new_page = ScrapedPage(
-                    org_id=org_id,
-                    web_id=web_id,
-                    url=url,
-                    markdown_content=None,
-                    status=PageProcessStatus.PENDING,
-                    retries=0,
-                )
-                session.add(new_page)
-                new_inserts += 1
-
+    async with async_session() as session:
+        stmt = (
+            insert(ScrapedPage)
+            .values(records)
+            .on_conflict_do_nothing(index_elements=["org_id", "web_id", "url"])
+            .returning(ScrapedPage.id)
+        )
+        res = await session.execute(stmt)
+        inserted_rows = len(res.scalars().all())
         await session.commit()
 
-    return new_inserts
+    return inserted_rows
