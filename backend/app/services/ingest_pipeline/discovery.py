@@ -39,7 +39,7 @@ async def _fetch_sitemap_urls(
         root = ET.fromstring(resp.text)
         namespace = {"ns": root.tag.split("}")[0].strip("{")} if "}" in root.tag else {}
 
-        # Check for nested sitemaps
+        # Nested sitemaps (sitemap index)
         sitemap_tags = (
             root.findall(".//ns:sitemap/ns:loc", namespace)
             if namespace
@@ -54,7 +54,7 @@ async def _fetch_sitemap_urls(
                     discovered.update(child_urls)
             return discovered
 
-        # Standard sitemap containing URLs
+        # Direct page URLs
         url_tags = (
             root.findall(".//ns:url/ns:loc", namespace)
             if namespace
@@ -115,7 +115,7 @@ async def _discover_from_internal_links(
     base_url: str,
     robot_parser: Optional[RobotFileParser] = None,
 ) -> Set[str]:
-    """Fallback crawl using crawl4ai."""
+    """Fallback crawl using crawl4ai when sitemaps do not exist."""
     domain = urlparse(base_url).netloc
     found: Set[str] = set()
 
@@ -158,26 +158,30 @@ async def run_discovery(
     org_id: int, 
     web_id: int, 
     base_url: str,
-    max_pages: int = 50,  # <-- Sensible cap for testing; set to 0 or None for unlimited
+    max_pages: Optional[int] = None,  # None means unlimited discovery
 ) -> int:
-    """Finds all URLs and performs chunked bulk inserts to prevent parameter overflow."""
+    """Discovers all website URLs and writes them to PostgreSQL in safe transactional chunks."""
     clean_base = _normalize_url(base_url)
     robot_parser = await _get_robot_parser(clean_base)
 
+    # 1. Discover via sitemaps
     urls = await _discover_from_sitemaps(clean_base, robot_parser=robot_parser)
+    
+    # 2. Fall back to internal link crawling if no sitemaps are present
     if not urls:
         urls = await _discover_from_internal_links(clean_base, robot_parser=robot_parser)
 
+    # Always ensure the root landing page is included
     if robot_parser.can_fetch(DEFAULT_USER_AGENT, clean_base):
         urls.add(clean_base)
 
     if not urls:
         return 0
 
-    # Cap URLs for testing so you don't crawl 2,500 pages in one go
     sorted_urls = sorted(urls)
-    if max_pages and len(sorted_urls) > max_pages:
-        # Keep base landing page and take first max_pages
+
+    # Only apply cap if explicitly provided as an integer > 0
+    if max_pages and max_pages > 0 and len(sorted_urls) > max_pages:
         sorted_urls = [clean_base] + [u for u in sorted_urls if u != clean_base][:max_pages - 1]
 
     records = [
@@ -193,7 +197,7 @@ async def run_discovery(
     ]
 
     total_inserted = 0
-    # Batch into chunks of 200 records (200 * 6 = 1,200 params per query)
+    # Safe chunk size: 200 records = 1,200 bound parameters per execute
     BATCH_SIZE = 200
 
     async with async_session() as session:
@@ -208,6 +212,7 @@ async def run_discovery(
             res = await session.execute(stmt)
             inserted_ids = res.scalars().all()
             total_inserted += len(inserted_ids)
+            # Commit after each batch so downstream workers can pick up pending links immediately
             await session.commit()
 
     return total_inserted

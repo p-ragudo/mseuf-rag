@@ -74,3 +74,9 @@ uv run uvicorn app.main:app --reload
 
 uv run fastapi dev app/main.py
 ```
+
+## Run playwright first before running the app:
+Make sure you are in the backend directory
+```
+uv run playwright install --with-deps chromium
+```

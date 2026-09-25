@@ -53,18 +53,33 @@ class GeminiQuestionGenerator(BaseQuestionGenerator):
             f"Content:\n{chunk.content.strip()}"
         )
 
-        response = await self.client.aio.models.generate_content(
-            model=self.model_name,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=SYSTEM_INSTRUCTION,
-                response_mime_type="application/json",
-                temperature=self.temperature,
-                max_output_tokens=1500,
-            ),
-        )
+        max_retries = 5
+        base_delay = 5.0
+        response = None
 
-        raw_text = response.text or ""
+        for attempt in range(max_retries):
+            try:
+                response = await self.client.aio.models.generate_content(
+                    model=self.model_name,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        system_instruction=SYSTEM_INSTRUCTION,
+                        response_mime_type="application/json",
+                        temperature=self.temperature,
+                        max_output_tokens=1500,
+                    ),
+                )
+                break
+            except Exception as e:
+                err_text = str(e)
+                if ("429" in err_text or "RESOURCE_EXHAUSTED" in err_text) and attempt < max_retries - 1:
+                    wait_sec = base_delay * (2 ** attempt)  # 5s, 10s, 20s...
+                    print(f"[Gemini 429] Rate limit hit on chunk {chunk.id}. Retrying in {wait_sec:.1f}s...")
+                    await asyncio.sleep(wait_sec)
+                else:
+                    raise e
+
+        raw_text = response.text or "" if response else ""
         json_str = extract_clean_json(raw_text)
         question_list: List[str] = []
 
@@ -75,13 +90,11 @@ class GeminiQuestionGenerator(BaseQuestionGenerator):
             elif isinstance(parsed, list):
                 question_list = parsed
         except Exception:
-            # Fallback if string got cut off near the end
             question_list = parse_questions_fallback(raw_text)
 
         if not question_list:
             raise ValueError(f"Could not parse questions from response: {raw_text[:200]}")
 
-        # Build normalized GeneratedQuestion objects
         questions: List[GeneratedQuestion] = []
         for text in question_list:
             clean_text = str(text).strip()
