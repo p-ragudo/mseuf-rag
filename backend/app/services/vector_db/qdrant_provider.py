@@ -58,7 +58,7 @@ class QdrantVectorDB(BaseVectorDB):
     ) -> None:
         """
         Creates a multi-tenant collection with named dense & sparse vectors,
-        root HNSW m=0, and creates an isolated tenant index on `group_id`.
+        root HNSW m=0, and ensures the tenant index on `group_id` exists.
         """
         collections = await self.client.get_collections()
         existing_names = {col.name for col in collections.collections}
@@ -78,8 +78,8 @@ class QdrantVectorDB(BaseVectorDB):
                         size=dense_vector_size,
                         distance=selected_distance,
                         hnsw_config=rest_models.HnswConfigDiff(
-                            m=0,  # Global graph disabled to prevent cross-tenant dead ends
-                            payload_m=16,  # Multi-tenant sub-graph edges
+                            m=0,
+                            payload_m=16,
                         ),
                     )
                 },
@@ -90,12 +90,18 @@ class QdrantVectorDB(BaseVectorDB):
                 },
             )
 
-            # Establish the tenant-aware index on group_id
+        # Inspect existing payload indexes to prevent duplicate creation or unindexed filter failures
+        collection_info = await self.client.get_collection(collection_name)
+        payload_schema = collection_info.payload_schema or {}
+
+        if "group_id" not in payload_schema:
             await self.client.create_payload_index(
                 collection_name=collection_name,
                 field_name="group_id",
-                field_schema=rest_models.PayloadSchemaType.KEYWORD,
-                is_tenant=True,
+                field_schema=rest_models.KeywordIndexParams(
+                    type="keyword",
+                    is_tenant=True,
+                ),
             )
 
     async def upsert_points(
@@ -174,18 +180,10 @@ class QdrantVectorDB(BaseVectorDB):
     ) -> List[SearchResult]:
         qdrant_filter = self._build_filter(filters)
 
-        target_query = (
-            rest_models.NamedVector(
-                name=using_vector_name,
-                vector=query_vector,
-            )
-            if query_vector is not None
-            else None
-        )
-
         response = await self.client.query_points(
             collection_name=collection_name,
-            query=target_query,
+            query=query_vector,
+            using=using_vector_name,
             limit=limit,
             query_filter=qdrant_filter,
             with_payload=with_payload,
@@ -210,17 +208,48 @@ class QdrantVectorDB(BaseVectorDB):
     ) -> List[SearchResult]:
         qdrant_filter = self._build_filter(filters)
 
-        target_query = rest_models.NamedSparseVector(
-            name=using_vector_name,
-            vector=rest_models.SparseVector(
-                indices=sparse_indices,
-                values=sparse_values,
-            ),
+        sparse_query = rest_models.SparseVector(
+            indices=sparse_indices,
+            values=sparse_values,
         )
 
         response = await self.client.query_points(
             collection_name=collection_name,
-            query=target_query,
+            query=sparse_query,
+            using=using_vector_name,
+            limit=limit,
+            query_filter=qdrant_filter,
+            with_payload=with_payload,
+        )
+
+        return [
+            SearchResult(
+                id=str(hit.id), score=hit.score, payload=hit.payload or {}
+            )
+            for hit in response.points
+        ]
+
+    async def search_sparse(
+        self,
+        collection_name: str,
+        sparse_indices: List[int],
+        sparse_values: List[float],
+        limit: int = 5,
+        filters: Optional[Dict[str, Any]] = None,
+        with_payload: bool = True,
+        using_vector_name: str = "chunk_sparse",
+    ) -> List[SearchResult]:
+        qdrant_filter = self._build_filter(filters)
+
+        sparse_query = rest_models.SparseVector(
+            indices=sparse_indices,
+            values=sparse_values,
+        )
+
+        response = await self.client.query_points(
+            collection_name=collection_name,
+            query=sparse_query,
+            using=using_vector_name,
             limit=limit,
             query_filter=qdrant_filter,
             with_payload=with_payload,
