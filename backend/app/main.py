@@ -4,14 +4,15 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
-from app.api.v1.query import router as query_router
 from app.core.config import settings
 from app.core.database import engine, Base
 from app.routes.auth import router as auth_router
 from app.routes.ingest import router as ingest_router
-from app.utils.telegram_bot import start_telegram_bot_listener
 from app.routes.orgs import router as orgs_router
+from app.routes.query import router as query_router
 from app.routes.websites import router as websites_router
+from app.services.vector_db.factory import get_vector_db
+from app.utils.telegram_bot import start_telegram_bot_listener
 
 
 @asynccontextmanager
@@ -29,6 +30,10 @@ async def lifespan(app: FastAPI):
         await poller_task
     except asyncio.CancelledError:
         pass
+
+    # Cleanly close Qdrant vector database client connection
+    vector_db = get_vector_db()
+    await vector_db.close()
 
 
 app = FastAPI(lifespan=lifespan)

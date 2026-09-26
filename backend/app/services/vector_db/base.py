@@ -5,7 +5,6 @@ from .schema import SearchResult, VectorPoint
 
 class BaseVectorDB(ABC):
     @abstractmethod
-    @abstractmethod
     async def create_collection_if_not_exists(
         self,
         collection_name: str,
@@ -43,6 +42,20 @@ class BaseVectorDB(ABC):
         limit: int = 5,
         filters: Optional[Dict[str, Any]] = None,
         with_payload: bool = True,
+        using_vector_name: str = "question_dense",
+    ) -> List[SearchResult]:
+        pass
+
+    @abstractmethod
+    async def search_sparse(
+        self,
+        collection_name: str,
+        sparse_indices: List[int],
+        sparse_values: List[float],
+        limit: int = 5,
+        filters: Optional[Dict[str, Any]] = None,
+        with_payload: bool = True,
+        using_vector_name: str = "chunk_sparse",
     ) -> List[SearchResult]:
         pass
 

@@ -31,6 +31,25 @@ class QdrantVectorDB(BaseVectorDB):
 
         self.client = AsyncQdrantClient(url=cluster_endpoint, api_key=api_key)
 
+    def _build_filter(self, filters: Optional[Dict[str, Any]]) -> Optional[rest_models.Filter]:
+        if not filters:
+            return None
+        conditions = []
+        for key, val in filters.items():
+            if isinstance(val, list):
+                conditions.append(
+                    rest_models.FieldCondition(
+                        key=key, match=rest_models.MatchAny(any=val)
+                    )
+                )
+            else:
+                conditions.append(
+                    rest_models.FieldCondition(
+                        key=key, match=rest_models.MatchValue(value=val)
+                    )
+                )
+        return rest_models.Filter(must=conditions)
+
     async def create_collection_if_not_exists(
         self,
         collection_name: str,
@@ -151,28 +170,57 @@ class QdrantVectorDB(BaseVectorDB):
         limit: int = 5,
         filters: Optional[Dict[str, Any]] = None,
         with_payload: bool = True,
+        using_vector_name: str = "question_dense",
     ) -> List[SearchResult]:
-        qdrant_filter = None
-        if filters:
-            conditions = []
-            for key, val in filters.items():
-                if isinstance(val, list):
-                    conditions.append(
-                        rest_models.FieldCondition(
-                            key=key, match=rest_models.MatchAny(any=val)
-                        )
-                    )
-                else:
-                    conditions.append(
-                        rest_models.FieldCondition(
-                            key=key, match=rest_models.MatchValue(value=val)
-                        )
-                    )
-            qdrant_filter = rest_models.Filter(must=conditions)
+        qdrant_filter = self._build_filter(filters)
+
+        target_query = (
+            rest_models.NamedVector(
+                name=using_vector_name,
+                vector=query_vector,
+            )
+            if query_vector is not None
+            else None
+        )
 
         response = await self.client.query_points(
             collection_name=collection_name,
-            query=query_vector,
+            query=target_query,
+            limit=limit,
+            query_filter=qdrant_filter,
+            with_payload=with_payload,
+        )
+
+        return [
+            SearchResult(
+                id=str(hit.id), score=hit.score, payload=hit.payload or {}
+            )
+            for hit in response.points
+        ]
+
+    async def search_sparse(
+        self,
+        collection_name: str,
+        sparse_indices: List[int],
+        sparse_values: List[float],
+        limit: int = 5,
+        filters: Optional[Dict[str, Any]] = None,
+        with_payload: bool = True,
+        using_vector_name: str = "chunk_sparse",
+    ) -> List[SearchResult]:
+        qdrant_filter = self._build_filter(filters)
+
+        target_query = rest_models.NamedSparseVector(
+            name=using_vector_name,
+            vector=rest_models.SparseVector(
+                indices=sparse_indices,
+                values=sparse_values,
+            ),
+        )
+
+        response = await self.client.query_points(
+            collection_name=collection_name,
+            query=target_query,
             limit=limit,
             query_filter=qdrant_filter,
             with_payload=with_payload,

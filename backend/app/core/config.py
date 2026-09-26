@@ -3,7 +3,6 @@ from typing import Optional
 from pydantic import HttpUrl, computed_field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-
 class Settings(BaseSettings):
     # App & Server Configuration
     development: bool = True

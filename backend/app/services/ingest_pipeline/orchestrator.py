@@ -51,53 +51,68 @@ def compute_simple_sparse_vector(text: str) -> SparseVectorData:
 
 
 async def scraper_worker(web_id: int, is_discovery_done: asyncio.Event, max_retries: int = 3) -> int:
-    """Consumes PENDING pages in small batches as discovery inserts them."""
+    """Consumes PENDING pages in batches with automatic browser context recovery."""
     total_scraped = 0
     config = CrawlerRunConfig(
         cache_mode=CacheMode.BYPASS,
         excluded_tags=["nav", "footer", "header", "script", "style", "noscript"],
+        page_timeout=25000,  # 25s timeout prevents hanging on slow links
+        wait_until="commit", # Doesn't wait indefinitely for hanging trackers/assets
     )
 
-    async with AsyncWebCrawler() as crawler:
-        while True:
-            async with async_session() as session:
-                stmt = (
-                    select(ScrapedPage)
-                    .where(
-                        ScrapedPage.web_id == web_id,
-                        ScrapedPage.status == PageProcessStatus.PENDING,
-                        ScrapedPage.retries < max_retries,
-                    )
-                    .limit(10)
+    while True:
+        async with async_session() as session:
+            stmt = (
+                select(ScrapedPage)
+                .where(
+                    ScrapedPage.web_id == web_id,
+                    ScrapedPage.status == PageProcessStatus.PENDING,
+                    ScrapedPage.retries < max_retries,
                 )
-                res = await session.execute(stmt)
-                pages = res.scalars().all()
+                .limit(10)
+            )
+            res = await session.execute(stmt)
+            pages = res.scalars().all()
 
-                if not pages:
-                    if is_discovery_done.is_set():
-                        break
-                    await asyncio.sleep(1.0)
-                    continue
+            if not pages:
+                if is_discovery_done.is_set():
+                    break
+                await asyncio.sleep(1.0)
+                continue
 
-                for page in pages:
-                    page.status = PageProcessStatus.IN_PROGRESS
-                await session.commit()
+            for page in pages:
+                page.status = PageProcessStatus.IN_PROGRESS
+            await session.commit()
 
-                for page in pages:
-                    try:
-                        crawl_result = await crawler.arun(url=page.url, config=config)
-                        if crawl_result.success and crawl_result.markdown:
-                            page.markdown_content = crawl_result.markdown
-                            page.status = PageProcessStatus.COMPLETED
-                            total_scraped += 1
-                        else:
+            # Fresh browser context per batch ensures zero persistent crashes
+            try:
+                async with AsyncWebCrawler() as crawler:
+                    for page in pages:
+                        try:
+                            crawl_result = await crawler.arun(url=page.url, config=config)
+                            if crawl_result.success and crawl_result.markdown:
+                                page.markdown_content = crawl_result.markdown
+                                page.status = PageProcessStatus.COMPLETED
+                                total_scraped += 1
+                            else:
+                                page.retries += 1
+                                page.status = (
+                                    PageProcessStatus.FAILED
+                                    if page.retries >= max_retries
+                                    else PageProcessStatus.PENDING
+                                )
+                        except Exception as e:
+                            print(f"[Scraper Error] URL {page.url}: {e}")
                             page.retries += 1
                             page.status = (
                                 PageProcessStatus.FAILED
                                 if page.retries >= max_retries
                                 else PageProcessStatus.PENDING
                             )
-                    except Exception:
+            except Exception as batch_err:
+                print(f"[Browser Context Error]: {batch_err}")
+                for page in pages:
+                    if page.status == PageProcessStatus.IN_PROGRESS:
                         page.retries += 1
                         page.status = (
                             PageProcessStatus.FAILED
@@ -105,7 +120,7 @@ async def scraper_worker(web_id: int, is_discovery_done: asyncio.Event, max_retr
                             else PageProcessStatus.PENDING
                         )
 
-                await session.commit()
+            await session.commit()
 
     return total_scraped
 
