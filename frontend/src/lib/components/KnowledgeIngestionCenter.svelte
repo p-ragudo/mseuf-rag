@@ -71,7 +71,9 @@
     if (selectedFile && canStageDocument) {
       onStageDocument?.(selectedFile, selectedCategory);
       selectedFile = null;
-      if (fileInput) fileInput.value = "";
+      if (fileInput) {
+        fileInput.value = "";
+      }
     }
   }
 
@@ -224,7 +226,7 @@
         </p>
         <button
           class="mt-4 rounded-md border border-outline bg-[#F5F8FB] px-4 py-2 text-sm font-semibold hover:bg-accent hover:text-primary transition-colors duration-200"
-          onclick={() => fileInput.click()}
+          onclick={() => fileInput?.click()}
         >
           Browse files
         </button>
