@@ -1,9 +1,15 @@
 <script lang="ts">
   import { fly } from "svelte/transition";
   import DropDownIcon from "../icons/DropDownIcon.svelte";
-  import Dropdown from "./Dropdown.svelte";
+  import ProfileMenu from "./ProfileMenu.svelte";
 
-  let open = $state(false);
+  let open: boolean = $state(false);
+
+  const profiles = [
+    { id: "1", name: "User Profile 1", initials: "UP" },
+    { id: "2", name: "User Profile 2", initials: "UP" },
+    { id: "3", name: "User Profile 3", initials: "UP" },
+  ];
 
   function toggleDropdown() {
     open = !open;
@@ -11,6 +17,11 @@
 
   function closeDropdown() {
     open = false;
+  }
+
+  function handleSelect(profile: (typeof profiles)[number]) {
+    console.log("selected", profile);
+    // e.g. switch active profile, close dropdown, etc.
   }
 </script>
 
@@ -29,7 +40,7 @@
   </div>
   <div class="relative">
     <button
-      class="flex flex-row items-center gap-3 hover:bg-accent hover:text-primary rounded-md transition-colors duration-200 px-3"
+      class="flex flex-row items-center gap-3 hover:bg-accent hover:text-primary hover:cursor-pointer rounded-md transition-colors duration-200 px-3 py-1"
       onclick={(e) => {
         e.stopPropagation();
         toggleDropdown();
@@ -45,7 +56,7 @@
 
     {#if open}
       <div transition:fly={{ y: -8, duration: 150 }}>
-        <Dropdown />
+        <ProfileMenu title="User Menu" {profiles} onSelect={handleSelect} />
       </div>
     {/if}
   </div>

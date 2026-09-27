@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { onMount } from "svelte";
   import type { Snippet } from "svelte";
   import Sidebar from "./SideBar.svelte";
   import Heading from "./Heading.svelte";
