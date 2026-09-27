@@ -12,6 +12,7 @@
   import KnowledgeAssetsTable from "../components/KnowledgeAssestTable.svelte";
   import HumanHandoffCard from "../components/HumanHandOffCard.svelte";
   import { fade } from "svelte/transition";
+  import { push } from "svelte-spa-router";
 
   let selectedTimeframe: string = "Last 24 hours";
   const timeframeOptions: string[] = [
@@ -179,13 +180,13 @@
 
       <KnowledgeAssetsTable
         {documents}
-        onViewAll={() => console.log("navigate to library")}
+        onViewAll={() => push("/knowledge-base")}
       />
 
       <HumanHandoffCard
         openCount={5}
         inquiries={pendingInquiries}
-        onReview={() => console.log("navigate to escalation queue")}
+        onReview={() => push("/escalation")}
       />
     </div>
   </div>

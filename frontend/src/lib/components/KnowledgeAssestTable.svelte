@@ -42,7 +42,7 @@
     </div>
     {#if onViewAll}
       <button
-        class="flex flex-row items-center gap-1 text-sm font-semibold text-primary hover:underline"
+        class="flex flex-row items-center gap-1 text-sm font-semibold text-primary hover:bg-accent hover:cursor-pointer px-3 py-2 rounded-lg transition-colors duration-150"
         onclick={onViewAll}
       >
         {viewAllLabel}

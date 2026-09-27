@@ -54,7 +54,7 @@
 
   {#if onReview}
     <button
-      class="mt-4 flex w-full flex-row items-center justify-center gap-2 rounded-md border border-outline bg-[#F5F8FB] px-4 py-3 text-sm font-semibold hover:bg-accent hover:text-primary transition-colors duration-200"
+      class="mt-4 flex w-full flex-row items-center justify-center gap-2 rounded-md border border-outline bg-[#F5F8FB] px-4 py-3 text-sm font-semibold hover:bg-accent hover:text-primary hover:cursor-pointer transition-colors duration-200"
       onclick={onReview}
     >
       {reviewLabel}
