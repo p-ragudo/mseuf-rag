@@ -66,7 +66,7 @@ uv pip compile requirements.in --universal -o requirements.txt
 uv pip sync requirements.txt
 ```
 
-## Install playwright first (if you don't have it yet, though uv pip sync requirements would already have it) before running the app:
+## Install playwright first (if you don't have it yet) before running the app:
 Make sure you are in the backend directory
 ```
 uv run playwright install --with-deps chromium
@@ -75,8 +75,8 @@ uv run playwright install --with-deps chromium
 ## To run the backend, run:
 ```
 uv run uvicorn app.main:app --reload --reload-dir app
-
-# or if you have fastapi[standard] installed, you can also use FastAPI's built-in CLI:
-
-uv run fastapi dev app/main.py
+```
+or
+```
+uv run fastapi run app/main.py
 ```

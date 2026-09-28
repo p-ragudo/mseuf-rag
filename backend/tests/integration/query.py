@@ -2,7 +2,7 @@ import asyncio
 from app.services.query_pipeline.query_pipeline import QueryPipeline
 from app.services.query_pipeline.schema import PipelineQueryRequest
 
-query = "What are the admission requirements for new students?"
+query = "When is the next admissions?"
 
 async def main():
     print("Initializing Staging Query Pipeline (Redis + Qdrant + Embedder + Gemini QA)...")
