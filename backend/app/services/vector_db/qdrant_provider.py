@@ -229,39 +229,6 @@ class QdrantVectorDB(BaseVectorDB):
             for hit in response.points
         ]
 
-    async def search_sparse(
-        self,
-        collection_name: str,
-        sparse_indices: List[int],
-        sparse_values: List[float],
-        limit: int = 5,
-        filters: Optional[Dict[str, Any]] = None,
-        with_payload: bool = True,
-        using_vector_name: str = "chunk_sparse",
-    ) -> List[SearchResult]:
-        qdrant_filter = self._build_filter(filters)
-
-        sparse_query = rest_models.SparseVector(
-            indices=sparse_indices,
-            values=sparse_values,
-        )
-
-        response = await self.client.query_points(
-            collection_name=collection_name,
-            query=sparse_query,
-            using=using_vector_name,
-            limit=limit,
-            query_filter=qdrant_filter,
-            with_payload=with_payload,
-        )
-
-        return [
-            SearchResult(
-                id=str(hit.id), score=hit.score, payload=hit.payload or {}
-            )
-            for hit in response.points
-        ]
-
     async def close(self) -> None:
         if hasattr(self, "client") and self.client is not None:
             if hasattr(self.client, "close"):

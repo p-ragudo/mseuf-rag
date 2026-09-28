@@ -1,3 +1,4 @@
+import asyncio
 import json
 import re
 from typing import List
@@ -6,30 +7,42 @@ from google.genai import types
 
 from app.core.config import settings
 from .base_qgen import BaseQuestionGenerator
-from .schema import RawChunk, GeneratedQuestion, GeneratedQuestionSet
+from .schema import RawChunk, GeneratedQuestion
 from ...utils.uuid_generator import generate_question_id
 from .sys_instructions import SYSTEM_INSTRUCTION
 
 
 def extract_clean_json(text: str) -> str:
-    """Extract strictly from the first '{' to the last '}' and strip backticks."""
+    """Extract strictly from the first '{' to the last '}' or '[' to ']' and strip backticks."""
     cleaned = re.sub(r"^```(?:json)?\s*", "", text.strip(), flags=re.MULTILINE)
     cleaned = re.sub(r"\s*```$", "", cleaned.strip(), flags=re.MULTILINE)
 
-    start = cleaned.find("{")
-    end = cleaned.rfind("}")
-    if start != -1 and end != -1 and end > start:
-        return cleaned[start : end + 1]
+    # Handle standard JSON objects or lists
+    start_brace = cleaned.find("{")
+    end_brace = cleaned.rfind("}")
+    start_bracket = cleaned.find("[")
+    end_bracket = cleaned.rfind("]")
+
+    if start_bracket != -1 and (start_brace == -1 or start_bracket < start_brace):
+        if end_bracket != -1 and end_bracket > start_bracket:
+            return cleaned[start_bracket : end_bracket + 1]
+
+    if start_brace != -1 and end_brace != -1 and end_brace > start_brace:
+        return cleaned[start_brace : end_brace + 1]
 
     return cleaned.strip()
 
 
 def parse_questions_fallback(raw_text: str) -> List[str]:
     """Fallback parser if JSON is incomplete or slightly truncated."""
-    # Try finding quoted strings inside questions array
+    if raw_text.strip() == "[]":
+        return []
     matches = re.findall(r'"([^"\\]*(?:\\.[^"\\]*)*)"', raw_text)
-    # Filter out common keys
-    return [m for m in matches if m.lower() not in ("questions", "id", "tags", "content") and len(m) > 10]
+    return [
+        m
+        for m in matches
+        if m.lower() not in ("questions", "id", "tags", "content") and len(m) > 10
+    ]
 
 
 class GeminiQuestionGenerator(BaseQuestionGenerator):
@@ -37,7 +50,7 @@ class GeminiQuestionGenerator(BaseQuestionGenerator):
         self.model_name = model_name
         self.temperature = temperature
 
-        api_key =  settings.llm_qgen_api_key
+        api_key = settings.llm_qgen_api_key
         if not api_key:
             raise ValueError("No API key found. Please set LLM_API_KEY in your .env file.")
 
@@ -67,14 +80,28 @@ class GeminiQuestionGenerator(BaseQuestionGenerator):
                         response_mime_type="application/json",
                         temperature=self.temperature,
                         max_output_tokens=1500,
+                        automatic_function_calling=types.AutomaticFunctionCallingConfig(
+                            disable=True
+                        ),
                     ),
                 )
                 break
             except Exception as e:
                 err_text = str(e)
-                if ("429" in err_text or "RESOURCE_EXHAUSTED" in err_text) and attempt < max_retries - 1:
-                    wait_sec = base_delay * (2 ** attempt)  # 5s, 10s, 20s...
-                    print(f"[Gemini 429] Rate limit hit on chunk {chunk.id}. Retrying in {wait_sec:.1f}s...")
+                # Catch both client-side quota limits (429) and upstream server spikes (503)
+                retryable_errors = (
+                    "429",
+                    "RESOURCE_EXHAUSTED",
+                    "503",
+                    "UNAVAILABLE",
+                    "high demand",
+                )
+                if any(err in err_text for err in retryable_errors) and attempt < max_retries - 1:
+                    wait_sec = base_delay * (2 ** attempt)
+                    print(
+                        f"[Gemini Retry] Error on chunk {chunk.id} ({err_text[:80]}...). "
+                        f"Retrying in {wait_sec:.1f}s..."
+                    )
                     await asyncio.sleep(wait_sec)
                 else:
                     raise e
@@ -92,8 +119,9 @@ class GeminiQuestionGenerator(BaseQuestionGenerator):
         except Exception:
             question_list = parse_questions_fallback(raw_text)
 
+        # An empty list is valid: it signals the passage had no substantive content
         if not question_list:
-            raise ValueError(f"Could not parse questions from response: {raw_text[:200]}")
+            return []
 
         questions: List[GeneratedQuestion] = []
         for text in question_list:

@@ -1,3 +1,5 @@
+import asyncio
+import time
 from typing import List, Optional
 from google import genai
 from google.genai import types
@@ -16,38 +18,58 @@ class GeminiEmbedder(BaseEmbedder):
             model_id = f"models/{model_id}"
         self.model_name = model_id
 
-    def _build_config(self) -> Optional[types.EmbedContentConfig]:
-        task_type = self.config.task_type or "RETRIEVAL_QUERY"
-        if not task_type and not self.config.output_dimensionality:
+    def _build_config(
+        self, task_type: Optional[str] = None
+    ) -> Optional[types.EmbedContentConfig]:
+        target_task_type = task_type or self.config.task_type or "RETRIEVAL_QUERY"
+        if not target_task_type and not self.config.output_dimensionality:
             return None
         return types.EmbedContentConfig(
-            task_type=task_type,
+            task_type=target_task_type,
             output_dimensionality=self.config.output_dimensionality,
         )
 
-    def embed(self, texts: List[str]) -> List[EmbeddingResult]:
+    def embed(
+        self, texts: List[str], task_type: Optional[str] = None
+    ) -> List[EmbeddingResult]:
         if not texts:
             return []
 
-        config = self._build_config()
+        config = self._build_config(task_type=task_type)
         results: List[EmbeddingResult] = []
+        max_retries = 5
+        base_delay = 3.0
 
         for text in texts:
-            response = self.client.models.embed_content(
-                model=self.model_name,
-                contents=text,
-                config=config,
-            )
-            # Each call yields a list with exactly one ContentEmbedding for that text
-            for emb in response.embeddings:
-                results.append(EmbeddingResult(values=emb.values))
+            response = None
+            for attempt in range(max_retries):
+                try:
+                    response = self.client.models.embed_content(
+                        model=self.model_name,
+                        contents=text,
+                        config=config,
+                    )
+                    break
+                except Exception as e:
+                    err_msg = str(e)
+                    if (
+                        "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg
+                    ) and attempt < max_retries - 1:
+                        sleep_time = base_delay * (2 ** attempt)
+                        time.sleep(sleep_time)
+                    else:
+                        raise e
+
+            if response:
+                for emb in response.embeddings:
+                    results.append(EmbeddingResult(values=emb.values))
 
         return results
 
     @property
     def dimension(self) -> int:
         if self._cached_dimension is None:
-            probe_result = self.embed_one("probe")
+            probe_result = self.embed_one("probe", task_type="RETRIEVAL_QUERY")
             self._cached_dimension = getattr(
                 probe_result, "dimension", len(probe_result.values)
             )

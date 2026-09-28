@@ -12,7 +12,7 @@ async def main():
     request_data = PipelineQueryRequest(
         query=query,
         org_id=1,
-        top_k=5,
+        top_k=10,
     )
 
     print("\n--- TEST 1: Cold Execution (Expecting Cache Miss -> Qdrant Hybrid Search -> Gemini QA) ---")

@@ -4,15 +4,11 @@ from typing import List
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from sqlalchemy import select, delete
 
-from app.core.database import async_session_factory
+from app.core.database import async_session
 from app.models.scraped_page import ScrapedPage, PageProcessStatus
 from app.models.chunk import Chunk
 from app.services.ingest_pipeline.clean_markdown import clean_markdown
-
-
-def estimate_token_count(text: str) -> int:
-    """Estimates tokens using whitespace heuristics (or 4 chars/token fallback)."""
-    return max(1, len(text.split()))
+from app.services.ingest_pipeline.orchestrator import is_substantive_chunk, estimate_token_count
 
 
 async def process_and_chunk_pages(
@@ -24,10 +20,10 @@ async def process_and_chunk_pages(
 ) -> int:
     """
     Finds COMPLETED pages that have not been chunked yet (chunked_at is NULL).
-    Cleans raw markdown in-memory, splits into chunks, saves to the chunks table,
-    and timestamps chunked_at on the source page.
+    Cleans raw markdown in-memory, splits into chunks, filters UI noise,
+    saves to the chunks table, and timestamps chunked_at on the source page.
     """
-    async with async_session_factory() as session:
+    async with async_session() as session:
         stmt = (
             select(ScrapedPage)
             .where(
@@ -57,7 +53,6 @@ async def process_and_chunk_pages(
             raw_text = page.markdown_content or ""
             cleaned = clean_markdown(raw_text)
 
-            # Strip optional frontmatter if present
             if cleaned.startswith("---"):
                 parts = cleaned.split("---", 2)
                 if len(parts) >= 3:
@@ -68,7 +63,7 @@ async def process_and_chunk_pages(
 
             for text in split_texts:
                 stripped_chunk = text.strip()
-                if len(stripped_chunk) > 40:  # Skip trivial fragments
+                if is_substantive_chunk(stripped_chunk):
                     valid_chunks.append(
                         Chunk(
                             page_id=page.id,
@@ -78,14 +73,12 @@ async def process_and_chunk_pages(
                         )
                     )
 
-            # Clear old chunks for idempotency if re-running
             await session.execute(delete(Chunk).where(Chunk.page_id == page.id))
 
             if valid_chunks:
                 session.add_all(valid_chunks)
                 total_chunks_created += len(valid_chunks)
 
-            # Mark page as chunked
             page.chunked_at = datetime.now(timezone.utc)
 
         await session.commit()

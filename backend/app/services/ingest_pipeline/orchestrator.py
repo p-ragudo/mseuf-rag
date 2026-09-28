@@ -2,12 +2,16 @@ import asyncio
 import hashlib
 from collections import Counter
 from datetime import datetime, timezone
+import math
+import re
 from typing import Dict, List
+from urllib.parse import urlparse
 
 from crawl4ai import AsyncWebCrawler, CrawlerRunConfig, CacheMode
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from sqlalchemy import select, update, delete
 from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import selectinload, joinedload
 
 from app.core.config import settings
 from app.core.database import async_session
@@ -24,24 +28,108 @@ from app.services.vector_db.factory import get_vector_db
 from app.services.vector_db.schema import SparseVectorData, VectorPoint
 from app.utils.uuid_generator import generate_chunk_id, generate_doc_id, generate_question_id
 
+STOP_WORDS = {
+    "a", "about", "above", "after", "again", "against", "all", "am", "an", "and",
+    "any", "are", "aren't", "as", "at", "be", "because", "been", "before", "being",
+    "below", "between", "both", "but", "by", "can't", "cannot", "could", "couldn't",
+    "did", "didn't", "do", "does", "doesn't", "doing", "don't", "down", "during",
+    "each", "few", "for", "from", "further", "had", "hadn't", "has", "hasn't",
+    "have", "haven't", "having", "he", "he'd", "he'll", "he's", "her", "here",
+    "here's", "hers", "herself", "him", "himself", "his", "how", "how's", "i",
+    "i'd", "i'll", "i'm", "i've", "if", "in", "into", "is", "isn't", "it", "it's",
+    "its", "itself", "let's", "me", "more", "most", "mustn't", "my", "myself",
+    "no", "nor", "not", "of", "off", "on", "once", "only", "or", "other", "ought",
+    "our", "ours", "ourselves", "out", "over", "own", "same", "shan't", "she",
+    "she'd", "she'll", "she's", "should", "shouldn't", "so", "some", "such", "than",
+    "that", "that's", "the", "their", "theirs", "them", "themselves", "then", "there",
+    "there's", "these", "they", "they'd", "they'll", "they're", "they've", "this",
+    "those", "through", "to", "too", "under", "until", "up", "very", "was", "wasn't",
+    "we", "we'd", "we'll", "we're", "we've", "were", "weren't", "what", "what's",
+    "when", "when's", "where", "where's", "which", "while", "who", "who's", "whom",
+    "why", "why's", "with", "won't", "would", "wouldn't", "you", "you'd", "you'll",
+    "you're", "you've", "your", "yours", "yourself", "yourselves"
+}
+
 
 def estimate_token_count(text: str) -> int:
     return max(1, len(text.split()))
 
 
+def classify_document_type(url: str, text: str = "") -> str:
+    """
+    Classifies content into 'ephemeral' or 'evergreen' based on URL path tokens,
+    archive patterns, and past academic year mentions.
+    """
+    path = urlparse(url).path.lower()
+    ephemeral_indicators = [
+        "/news", "/announcement", "/announcements",
+        "/events", "/event", "/blog", "/posts", "/press",
+        "/memorandum", "/advisory", "/bulletin"
+    ]
+    if any(token in path for token in ephemeral_indicators):
+        return "ephemeral"
+
+    # Match past dates or years in path (e.g. /2021/, /2022/, /2023/, /2024/)
+    if re.search(r"/(?:19|20)\d{2}/", path):
+        return "ephemeral"
+
+    # Flag older academic years if mentioned as past archives
+    lower_content = text[:600].lower()
+    if re.search(r"a\.?y\.?\s*20(?:1\d|2[0-4])", lower_content):
+        return "ephemeral"
+
+    return "evergreen"
+
+
+def is_substantive_chunk(text: str) -> bool:
+    """
+    Filters out UI fragments, link directories, cookie policies, 
+    and chunks with low information density.
+    """
+    words = text.split()
+    if len(words) < 30:
+        return False
+
+    boilerplate_indicators = [
+        "cookie", "privacy policy", "terms of use", "all rights reserved",
+        "share on facebook", "share on x", "share on linkedin",
+        "agree decline", "_chevron_right_", "navigation", "explore our website",
+        "skip to content", "back to top", "read more", "click here"
+    ]
+    lower_text = text.lower()
+    matches = sum(1 for indicator in boilerplate_indicators if indicator in lower_text)
+    if matches >= 2:
+        return False
+
+    # Check for excessive markdown markup or punctuation clutter
+    symbols_count = len(re.findall(r"[_*\[\]\(\)!|#<>]", text))
+    if symbols_count / max(1, len(text)) > 0.20:
+        return False
+
+    # Ensure chunk contains at least two complete sentences
+    sentences = [s for s in re.split(r"[.!?]+", text) if len(s.strip().split()) >= 4]
+    if len(sentences) < 2:
+        return False
+
+    return True
+
+
 def compute_simple_sparse_vector(text: str) -> SparseVectorData:
-    words = [w.lower() for w in text.split() if w.isalnum()]
-    if not words:
+    """Generates stopword-filtered, log-scaled sparse frequency vectors."""
+    raw_tokens = [w.lower() for w in re.findall(r"\b[a-zA-Z0-9_\-]{2,}\b", text)]
+    filtered_tokens = [t for t in raw_tokens if t not in STOP_WORDS]
+    if not filtered_tokens:
         return SparseVectorData(indices=[], values=[])
 
-    counts = Counter(words)
+    counts = Counter(filtered_tokens)
     indices = []
     values = []
 
     for word, freq in counts.items():
         idx = int(hashlib.md5(word.encode("utf-8")).hexdigest()[:8], 16)
         indices.append(idx)
-        values.append(float(freq))
+        # Apply sublinear TF scaling to prevent dominant repetition
+        values.append(float(1.0 + math.log(freq)))
 
     sorted_pairs = sorted(zip(indices, values), key=lambda x: x[0])
     return SparseVectorData(
@@ -51,13 +139,12 @@ def compute_simple_sparse_vector(text: str) -> SparseVectorData:
 
 
 async def scraper_worker(web_id: int, is_discovery_done: asyncio.Event, max_retries: int = 3) -> int:
-    """Consumes PENDING pages in batches with automatic browser context recovery."""
     total_scraped = 0
     config = CrawlerRunConfig(
         cache_mode=CacheMode.BYPASS,
-        excluded_tags=["nav", "footer", "header", "script", "style", "noscript"],
-        page_timeout=25000,  # 25s timeout prevents hanging on slow links
-        wait_until="commit", # Doesn't wait indefinitely for hanging trackers/assets
+        excluded_tags=["nav", "footer", "header", "script", "style", "noscript", "aside"],
+        page_timeout=25000,
+        wait_until="commit",
     )
 
     while True:
@@ -84,7 +171,6 @@ async def scraper_worker(web_id: int, is_discovery_done: asyncio.Event, max_retr
                 page.status = PageProcessStatus.IN_PROGRESS
             await session.commit()
 
-            # Fresh browser context per batch ensures zero persistent crashes
             try:
                 async with AsyncWebCrawler() as crawler:
                     for page in pages:
@@ -101,16 +187,14 @@ async def scraper_worker(web_id: int, is_discovery_done: asyncio.Event, max_retr
                                     if page.retries >= max_retries
                                     else PageProcessStatus.PENDING
                                 )
-                        except Exception as e:
-                            print(f"[Scraper Error] URL {page.url}: {e}")
+                        except Exception:
                             page.retries += 1
                             page.status = (
                                 PageProcessStatus.FAILED
                                 if page.retries >= max_retries
                                 else PageProcessStatus.PENDING
                             )
-            except Exception as batch_err:
-                print(f"[Browser Context Error]: {batch_err}")
+            except Exception:
                 for page in pages:
                     if page.status == PageProcessStatus.IN_PROGRESS:
                         page.retries += 1
@@ -131,7 +215,6 @@ async def chunker_worker(
     chunk_size: int = 800,
     chunk_overlap: int = 150,
 ) -> int:
-    """Picks up COMPLETED pages with chunked_at IS NULL as scraper finishes them."""
     total_chunks = 0
     text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=chunk_size,
@@ -172,7 +255,7 @@ async def chunker_worker(
 
                 for text in split_texts:
                     stripped = text.strip()
-                    if len(stripped) > 40:
+                    if is_substantive_chunk(stripped):
                         valid_chunks.append(
                             Chunk(
                                 page_id=page.id,
@@ -195,77 +278,88 @@ async def chunker_worker(
 
 
 async def qgen_worker(web_id: int, is_chunking_done: asyncio.Event) -> int:
-    """Generates questions as new chunks appear, respecting the 15 RPM rate limit."""
+    """Generates synthetic questions for substantive chunks without ORM relationship lazy-loading."""
     total_questions = 0
     generator = get_question_generator()
 
     while True:
         async with async_session() as session:
+            # Query plain scalars instead of ORM objects to prevent lazy loading
             stmt = (
-                select(Chunk)
+                select(
+                    Chunk.id,
+                    Chunk.content,
+                    ScrapedPage.id.label("page_id"),
+                    ScrapedPage.org_id,
+                    ScrapedPage.url.label("page_url"),
+                )
                 .join(ScrapedPage, Chunk.page_id == ScrapedPage.id)
                 .where(
                     ScrapedPage.web_id == web_id,
                     Chunk.has_qgen.is_(False),
                 )
-                .options(selectinload(Chunk.page))
                 .limit(5)
             )
             res = await session.execute(stmt)
-            chunks = res.scalars().all()
+            rows = res.all()
 
-            if not chunks:
+            if not rows:
                 if is_chunking_done.is_set():
                     break
                 await asyncio.sleep(2.0)
                 continue
 
-            for chunk in chunks:
-                page = chunk.page
-                tenant_str = str(page.org_id)
-                doc_id = generate_doc_id(tenant_id=tenant_str, source_url=page.url)
+            for chunk_id, chunk_content, page_id, page_org_id, page_url in rows:
+                tenant_str = str(page_org_id)
+                doc_id = generate_doc_id(tenant_id=tenant_str, source_url=page_url)
 
                 raw_chunk_payload = RawChunk(
-                    id=str(chunk.id),
+                    id=str(chunk_id),
                     doc_id=doc_id,
-                    source_url=page.url,
-                    title=page.url.split("/")[-1] or "Homepage",
-                    content=chunk.content,
+                    source_url=page_url,
+                    title=page_url.split("/")[-1] or "Homepage",
+                    content=chunk_content,
                     tags=[tenant_str],
                 )
 
                 try:
                     generated = await generator.generate_questions(raw_chunk_payload)
+                    new_questions = []
                     for item in generated:
                         q_text = item.content if hasattr(item, "content") else str(item)
-                        session.add(
-                            GeneratedQuestion(
-                                chunk_id=chunk.id,
-                                question=q_text,
-                                is_synced_qdrant=False,
+                        if q_text.strip():
+                            new_questions.append(
+                                GeneratedQuestion(
+                                    chunk_id=chunk_id,
+                                    question=q_text.strip(),
+                                    is_synced_qdrant=False,
+                                )
                             )
-                        )
-                        total_questions += 1
+                            total_questions += 1
 
-                    chunk.has_qgen = True
+                    if new_questions:
+                        session.add_all(new_questions)
+
+                    await session.execute(
+                        update(Chunk).where(Chunk.id == chunk_id).values(has_qgen=True)
+                    )
                     await session.commit()
                 except Exception as e:
                     await session.rollback()
-                    print(f"[QGen Error] chunk_id={chunk.id}: {e}")
+                    print(f"[QGen Error] chunk_id={chunk_id}: {e}")
                     async with async_session() as err_sess:
                         await err_sess.execute(
-                            update(Chunk).where(Chunk.id == chunk.id).values(has_qgen=True)
+                            update(Chunk).where(Chunk.id == chunk_id).values(has_qgen=True)
                         )
                         await err_sess.commit()
 
-                # Pacing delay: 4.5s keeps generation at ~13 RPM (below the 15 RPM limit)
                 await asyncio.sleep(4.5)
 
     return total_questions
 
 
 async def qdrant_sync_worker(org_id: int, web_id: int, is_qgen_done: asyncio.Event) -> int:
-    """Batches generated questions, embeds them, and syncs points to Qdrant."""
+    """Batches generated questions, embeds them, and syncs points to Qdrant without ORM lazy-loading."""
     total_synced = 0
     vector_db = get_vector_db()
     embedder = get_embedder()
@@ -281,51 +375,66 @@ async def qdrant_sync_worker(org_id: int, web_id: int, is_qgen_done: asyncio.Eve
 
     while True:
         async with async_session() as session:
+            # Query plain primitive columns: eliminates all ORM relationship proxy overhead
             stmt = (
-                select(GeneratedQuestion)
+                select(
+                    GeneratedQuestion.id.label("q_id"),
+                    GeneratedQuestion.question.label("q_text"),
+                    Chunk.id.label("chunk_id"),
+                    Chunk.content.label("chunk_content"),
+                    ScrapedPage.id.label("page_id"),
+                    ScrapedPage.url.label("page_url"),
+                )
                 .join(Chunk, GeneratedQuestion.chunk_id == Chunk.id)
                 .join(ScrapedPage, Chunk.page_id == ScrapedPage.id)
                 .where(
                     ScrapedPage.web_id == web_id,
                     GeneratedQuestion.is_synced_qdrant.is_(False),
                 )
-                .options(selectinload(GeneratedQuestion.chunk).selectinload(Chunk.page))
                 .limit(25)
             )
             res = await session.execute(stmt)
-            questions = res.scalars().all()
+            rows = res.all()
 
-            if not questions:
+            if not rows:
                 if is_qgen_done.is_set():
                     break
                 await asyncio.sleep(1.0)
                 continue
 
-            question_texts = [q.question for q in questions]
-            embedded_results = embedder.embed(question_texts)
-            await asyncio.sleep(1.0)  # <-- Inserted right here
+            question_texts = [r.q_text for r in rows]
+            embedded_results = embedder.embed(
+                question_texts, task_type="RETRIEVAL_DOCUMENT"
+            )
+            await asyncio.sleep(1.0)
 
             chunk_sparse_cache: Dict[int, SparseVectorData] = {}
             points_to_upsert: List[VectorPoint] = []
             synced_ids: List[int] = []
 
-            for q_record, emb_res in zip(questions, embedded_results):
-                chunk = q_record.chunk
-                page = chunk.page
+            for row, emb_res in zip(rows, embedded_results):
+                q_id = row.q_id
+                q_text = row.q_text
+                chunk_id = row.chunk_id
+                chunk_content = row.chunk_content
+                page_id = row.page_id
+                page_url = row.page_url
 
-                if chunk.id not in chunk_sparse_cache:
-                    chunk_sparse_cache[chunk.id] = compute_simple_sparse_vector(chunk.content)
-                sparse_data = chunk_sparse_cache[chunk.id]
+                doc_type = classify_document_type(page_url, chunk_content)
+
+                if chunk_id not in chunk_sparse_cache:
+                    chunk_sparse_cache[chunk_id] = compute_simple_sparse_vector(chunk_content)
+                sparse_data = chunk_sparse_cache[chunk_id]
 
                 chunk_uuid = generate_chunk_id(
                     tenant_id=tenant_key,
-                    source_url=page.url,
-                    chunk_index=chunk.id,
-                    content=chunk.content,
+                    source_url=page_url,
+                    chunk_index=chunk_id,
+                    content=chunk_content,
                 )
                 point_uuid = generate_question_id(
                     chunk_id=chunk_uuid,
-                    question=q_record.question,
+                    question=q_text,
                 )
 
                 point = VectorPoint(
@@ -336,17 +445,17 @@ async def qdrant_sync_worker(org_id: int, web_id: int, is_qgen_done: asyncio.Eve
                     },
                     payload={
                         "group_id": tenant_key,
-                        "tenant_id": tenant_key,
                         "parent_chunk_id": chunk_uuid,
-                        "question_text": q_record.question,
-                        "chunk_text": chunk.content,
-                        "source_url": page.url,
-                        "page_id": page.id,
-                        "chunk_id": chunk.id,
+                        "question_text": q_text,
+                        "chunk_text": chunk_content,
+                        "source_url": page_url,
+                        "page_id": page_id,
+                        "chunk_id": chunk_id,
+                        "doc_type": doc_type,
                     },
                 )
                 points_to_upsert.append(point)
-                synced_ids.append(q_record.id)
+                synced_ids.append(q_id)
 
             if points_to_upsert:
                 await vector_db.upsert_points(
@@ -372,7 +481,6 @@ async def run_full_pipeline(website_id: int) -> dict:
         website.status = WebsiteScrapeStatus.IN_PROGRESS
         website.error_message = None
 
-        # Reset any failed or stuck in-progress pages back to PENDING
         await session.execute(
             update(ScrapedPage)
             .where(
@@ -392,7 +500,6 @@ async def run_full_pipeline(website_id: int) -> dict:
         org_id = website.org_id
         base_url = website.url
 
-    # Events used to signal worker completion across stages
     is_discovery_done = asyncio.Event()
     is_scraping_done = asyncio.Event()
     is_chunking_done = asyncio.Event()
@@ -426,7 +533,6 @@ async def run_full_pipeline(website_id: int) -> dict:
         return await qdrant_sync_worker(org_id=org_id, web_id=website_id, is_qgen_done=is_qgen_done)
 
     try:
-        # All pipeline stages execute concurrently, feeding off database checkpoints
         (
             discovered_urls,
             scraped_pages,
