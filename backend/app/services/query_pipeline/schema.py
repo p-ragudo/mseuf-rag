@@ -1,6 +1,7 @@
 from typing import List, Optional
 from pydantic import BaseModel, Field
 
+from app.services.llm_qa.schema import RetrievedContextItem
 
 class PipelineQueryRequest(BaseModel):
     query: str = Field(..., min_length=2, max_length=1000, description="User question")
@@ -15,3 +16,4 @@ class PipelineQueryResponse(BaseModel):
     is_cached: bool = False
     source: str = Field(..., description="'cache', 'llm', or 'fallback'")
     sources: List[str] = Field(default_factory=list, description="Source URLs or reference links")
+    contexts: List[RetrievedContextItem] = Field(default_factory=list, description="Passages passed to QA LLM")

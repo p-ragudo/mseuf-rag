@@ -195,4 +195,5 @@ class QueryPipeline:
             is_cached=False,
             source="llm",
             sources=qa_response.sources,
+            contexts=contexts
         )
