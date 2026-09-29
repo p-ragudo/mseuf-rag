@@ -8,13 +8,11 @@ class BaseVectorDB(ABC):
     async def create_collection_if_not_exists(
         self,
         collection_name: str,
-        vector_size: Optional[int] = None,
+        dense_vector_size: Optional[int] = None,
         distance: str = "Cosine",
+        enable_quantization: Optional[bool] = None,
     ) -> None:
-        """Creates a collection if it does not exist.
-        
-        If vector_size is None, creates a payload-only collection without vector storage.
-        """
+        """Creates a collection if it does not exist with vector parameters and indexing."""
         pass
 
     @abstractmethod
@@ -43,6 +41,8 @@ class BaseVectorDB(ABC):
         filters: Optional[Dict[str, Any]] = None,
         with_payload: bool = True,
         using_vector_name: str = "question_dense",
+        rescore: Optional[bool] = None,
+        oversampling: Optional[float] = None,
     ) -> List[SearchResult]:
         pass
 

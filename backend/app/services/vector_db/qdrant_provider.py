@@ -50,20 +50,56 @@ class QdrantVectorDB(BaseVectorDB):
                 )
         return rest_models.Filter(must=conditions)
 
+    def _get_quantization_config(self) -> Optional[rest_models.QuantizationConfig]:
+        if not settings.quantization_enabled:
+            return None
+
+        q_type = settings.quantization_type.lower()
+        if q_type == "binary":
+            return rest_models.BinaryQuantization(
+                binary=rest_models.BinaryQuantizationConfig(
+                    always_ram=settings.quantization_always_ram,
+                )
+            )
+        else:
+            # Default to scalar int8 quantization
+            return rest_models.ScalarQuantization(
+                scalar=rest_models.ScalarQuantizationConfig(
+                    type=rest_models.ScalarType.INT8,
+                    quantile=0.99,
+                    always_ram=settings.quantization_always_ram,
+                )
+            )
+
     async def create_collection_if_not_exists(
         self,
         collection_name: str,
-        dense_vector_size: int,
+        dense_vector_size: Optional[int] = None,
         distance: str = "Cosine",
+        enable_quantization: Optional[bool] = None,
     ) -> None:
         """
         Creates a multi-tenant collection with named dense & sparse vectors,
-        root HNSW m=0, server-side BM25/IDF modifier, and tenant indexing on `group_id`.
+        root HNSW m=0, server-side BM25/IDF modifier, tenant indexing on `group_id`,
+        and configurable quantization for the ingestion phase.
         """
         collections = await self.client.get_collections()
         existing_names = {col.name for col in collections.collections}
 
+        use_quantization = (
+            enable_quantization
+            if enable_quantization is not None
+            else settings.quantization_enabled
+        )
+
+        quantization_cfg = (
+            self._get_quantization_config() if use_quantization else None
+        )
+
         if collection_name not in existing_names:
+            if dense_vector_size is None:
+                raise ValueError("dense_vector_size is required to create a new collection.")
+
             distance_map = {
                 "Cosine": rest_models.Distance.COSINE,
                 "Dot": rest_models.Distance.DOT,
@@ -77,19 +113,34 @@ class QdrantVectorDB(BaseVectorDB):
                     "question_dense": rest_models.VectorParams(
                         size=dense_vector_size,
                         distance=selected_distance,
+                        on_disk=True,  # Raw float32 vectors stay on disk for rescoring
                         hnsw_config=rest_models.HnswConfigDiff(
                             m=0,
                             payload_m=16,
                         ),
+                        quantization_config=quantization_cfg,
                     )
                 },
                 sparse_vectors_config={
                     "chunk_sparse": rest_models.SparseVectorParams(
                         index=rest_models.SparseIndexParams(on_disk=False),
-                        modifier=rest_models.Modifier.Idf,  # Server-side corpus IDF scaling
+                        modifier=rest_models.Modifier.Idf,
                     )
                 },
             )
+        else:
+            # If the collection exists without quantization, update it dynamically
+            collection_info = await self.client.get_collection(collection_name)
+            existing_params = collection_info.config.params.vectors
+            target_params = None
+            if isinstance(existing_params, dict):
+                target_params = existing_params.get("question_dense")
+            
+            if use_quantization and target_params and not target_params.quantization_config:
+                await self.client.update_collection(
+                    collection_name=collection_name,
+                    quantization_config=quantization_cfg,
+                )
 
         collection_info = await self.client.get_collection(collection_name)
         payload_schema = collection_info.payload_schema or {}
@@ -177,8 +228,27 @@ class QdrantVectorDB(BaseVectorDB):
         filters: Optional[Dict[str, Any]] = None,
         with_payload: bool = True,
         using_vector_name: str = "question_dense",
+        rescore: Optional[bool] = None,
+        oversampling: Optional[float] = None,
     ) -> List[SearchResult]:
         qdrant_filter = self._build_filter(filters)
+
+        search_params = None
+        if settings.quantization_enabled:
+            search_params = rest_models.SearchParams(
+                quantization=rest_models.QuantizationSearchParams(
+                    rescore=(
+                        rescore
+                        if rescore is not None
+                        else settings.quantization_rescore
+                    ),
+                    oversampling=(
+                        oversampling
+                        if oversampling is not None
+                        else settings.quantization_oversampling
+                    ),
+                )
+            )
 
         response = await self.client.query_points(
             collection_name=collection_name,
@@ -186,6 +256,7 @@ class QdrantVectorDB(BaseVectorDB):
             using=using_vector_name,
             limit=limit,
             query_filter=qdrant_filter,
+            search_params=search_params,
             with_payload=with_payload,
         )
 

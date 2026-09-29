@@ -333,10 +333,12 @@ async def qdrant_sync_worker(org_id: int, web_id: int, is_qgen_done: asyncio.Eve
     sparse_embedder = get_sparse_embedder()
     target_collection = settings.collection_name
 
+    # Initializes collection with quantization configuration defined in settings
     await vector_db.create_collection_if_not_exists(
         collection_name=target_collection,
         dense_vector_size=embedder.dimension,
         distance="Cosine",
+        enable_quantization=settings.quantization_enabled,
     )
 
     tenant_key = str(org_id)

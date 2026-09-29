@@ -73,6 +73,13 @@ class Settings(BaseSettings):
     embedding_dimension: Optional[int] = None
     embedding_task_type: Optional[str] = None
 
+    # Quantization Settings
+    quantization_enabled: bool = True
+    quantization_type: str = "scalar"  # "scalar" or "binary"
+    quantization_always_ram: bool = True
+    quantization_rescore: bool = True
+    quantization_oversampling: float = 2.0
+
     vector_dim: int
 
     # Semantic Cache Settings
