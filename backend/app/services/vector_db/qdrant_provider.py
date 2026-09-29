@@ -58,7 +58,7 @@ class QdrantVectorDB(BaseVectorDB):
     ) -> None:
         """
         Creates a multi-tenant collection with named dense & sparse vectors,
-        root HNSW m=0, and ensures the tenant index on `group_id` exists.
+        root HNSW m=0, server-side BM25/IDF modifier, and tenant indexing on `group_id`.
         """
         collections = await self.client.get_collections()
         existing_names = {col.name for col in collections.collections}
@@ -85,12 +85,12 @@ class QdrantVectorDB(BaseVectorDB):
                 },
                 sparse_vectors_config={
                     "chunk_sparse": rest_models.SparseVectorParams(
-                        index=rest_models.SparseIndexParams(on_disk=False)
+                        index=rest_models.SparseIndexParams(on_disk=False),
+                        modifier=rest_models.Modifier.Idf,  # Server-side corpus IDF scaling
                     )
                 },
             )
 
-        # Inspect existing payload indexes to prevent duplicate creation or unindexed filter failures
         collection_info = await self.client.get_collection(collection_name)
         payload_schema = collection_info.payload_schema or {}
 

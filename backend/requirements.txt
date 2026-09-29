@@ -74,6 +74,7 @@ click-log==0.4.0
 colorama==0.4.6 ; sys_platform == 'win32'
     # via
     #   click
+    #   loguru
     #   pytest
     #   tqdm
     #   typer
@@ -115,10 +116,14 @@ fastar==0.11.0
     # via
     #   fastapi
     #   fastapi-cloud-cli
+fastembed==0.8.1
+    # via -r requirements.in
 fastuuid==0.14.0
     # via unclecode-litellm
 filelock==3.32.3
     # via huggingface-hub
+flatbuffers==25.12.19
+    # via onnxruntime
 frozenlist==1.8.0
     # via
     #   aiohttp
@@ -171,7 +176,9 @@ httpx2==2.10.0
 httpx2-jsfetch==1.0 ; sys_platform == 'emscripten'
     # via httpx2
 huggingface-hub==1.27.0
-    # via tokenizers
+    # via
+    #   fastembed
+    #   tokenizers
 humanize==4.16.0
     # via crawl4ai
 hyperframe==6.1.0
@@ -216,6 +223,8 @@ langsmith==0.11.0
     # via langchain-core
 lark==1.3.1
     # via crawl4ai
+loguru==0.7.3
+    # via fastembed
 lxml==6.1.1
     # via crawl4ai
 mako==1.4.1
@@ -230,6 +239,8 @@ mdurl==0.1.2
     # via markdown-it-py
 ml-dtypes==0.6.0
     # via redisvl
+mmh3==5.3.0
+    # via fastembed
 multidict==6.7.1
     # via
     #   aiohttp
@@ -242,13 +253,17 @@ numpy==2.5.2
     # via
     #   alphashape
     #   crawl4ai
+    #   fastembed
     #   ml-dtypes
+    #   onnxruntime
     #   qdrant-client
     #   rank-bm25
     #   redisvl
     #   scipy
     #   shapely
     #   trimesh
+onnxruntime==1.30.0
+    # via fastembed
 openai==3.1.0
     # via
     #   -r requirements.in
@@ -260,11 +275,14 @@ packaging==26.2
     #   huggingface-hub
     #   langchain-core
     #   langsmith
+    #   onnxruntime
     #   pytest
 patchright==1.61.2
     # via crawl4ai
 pillow==12.3.0
-    # via crawl4ai
+    # via
+    #   crawl4ai
+    #   fastembed
 playwright==1.62.0
     # via
     #   -r requirements.in
@@ -281,11 +299,15 @@ propcache==0.5.2
     #   aiohttp
     #   yarl
 protobuf==7.35.1
-    # via qdrant-client
+    # via
+    #   onnxruntime
+    #   qdrant-client
 psutil==7.2.2
     # via crawl4ai
 pwdlib==0.3.1
     # via -r requirements.in
+py-rust-stemmers==0.1.8
+    # via fastembed
 pyasn1==0.6.4
     # via
     #   pyasn1-modules
@@ -373,6 +395,7 @@ requests==2.34.2
     # via
     #   -r requirements.in
     #   crawl4ai
+    #   fastembed
     #   google-auth
     #   google-genai
     #   langsmith
@@ -434,9 +457,12 @@ tenacity==9.1.4
 tiktoken==0.13.0
     # via unclecode-litellm
 tokenizers==0.22.2
-    # via unclecode-litellm
+    # via
+    #   fastembed
+    #   unclecode-litellm
 tqdm==4.70.0
     # via
+    #   fastembed
     #   huggingface-hub
     #   nltk
     #   openai
@@ -499,6 +525,8 @@ websockets==15.0.1
     #   google-genai
     #   langsmith
     #   uvicorn
+win32-setctime==1.2.0 ; sys_platform == 'win32'
+    # via loguru
 xxhash==3.8.1
     # via
     #   crawl4ai

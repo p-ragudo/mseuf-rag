@@ -1,7 +1,8 @@
 import asyncio
 from datetime import datetime, timezone
 from typing import List
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_text_splitters import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
+from langchain_core.documents import Document
 from sqlalchemy import select, delete
 
 from app.core.database import async_session
@@ -20,8 +21,8 @@ async def process_and_chunk_pages(
 ) -> int:
     """
     Finds COMPLETED pages that have not been chunked yet (chunked_at is NULL).
-    Cleans raw markdown in-memory, splits into chunks, filters UI noise,
-    saves to the chunks table, and timestamps chunked_at on the source page.
+    Cleans raw markdown, performs structural markdown header splitting,
+    breaks into character chunks, and commits valid records to PostgreSQL.
     """
     async with async_session() as session:
         stmt = (
@@ -41,6 +42,17 @@ async def process_and_chunk_pages(
         if not pages:
             return 0
 
+        headers_to_split_on = [
+            ("#", "Header 1"),
+            ("##", "Header 2"),
+            ("###", "Header 3"),
+            ("####", "Header 4"),
+        ]
+        header_splitter = MarkdownHeaderTextSplitter(
+            headers_to_split_on=headers_to_split_on,
+            strip_headers=False,
+        )
+
         text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap,
@@ -58,20 +70,23 @@ async def process_and_chunk_pages(
                 if len(parts) >= 3:
                     cleaned = parts[2].strip()
 
-            split_texts = text_splitter.split_text(cleaned)
+            header_docs = header_splitter.split_text(cleaned)
+            sections = header_docs if header_docs else [Document(page_content=cleaned)]
             valid_chunks: List[Chunk] = []
 
-            for text in split_texts:
-                stripped_chunk = text.strip()
-                if is_substantive_chunk(stripped_chunk):
-                    valid_chunks.append(
-                        Chunk(
-                            page_id=page.id,
-                            content=stripped_chunk,
-                            token_count=estimate_token_count(stripped_chunk),
-                            has_qgen=False,
+            for sec in sections:
+                split_texts = text_splitter.split_text(sec.page_content)
+                for text in split_texts:
+                    stripped_chunk = text.strip()
+                    if is_substantive_chunk(stripped_chunk):
+                        valid_chunks.append(
+                            Chunk(
+                                page_id=page.id,
+                                content=stripped_chunk,
+                                token_count=estimate_token_count(stripped_chunk),
+                                has_qgen=False,
+                            )
                         )
-                    )
 
             await session.execute(delete(Chunk).where(Chunk.page_id == page.id))
 

@@ -3,7 +3,7 @@ from typing import Dict, List, Tuple
 
 from app.core.config import settings
 from app.services.embeddings.factory import get_embedder
-from app.services.ingest_pipeline.orchestrator import compute_simple_sparse_vector
+from app.services.embeddings.sparse_embedder import get_sparse_embedder
 from app.services.llm_qa.factory import get_qa_synthesizer
 from app.services.llm_qa.schema import QARequest, RetrievedContextItem
 from app.services.query_pipeline.schema import (
@@ -19,6 +19,7 @@ class QueryPipeline:
     def __init__(self):
         self.vector_db = get_vector_db()
         self.embedder = get_embedder()
+        self.sparse_embedder = get_sparse_embedder()
         self.qa_synthesizer = get_qa_synthesizer()
         self.semantic_cache = get_semantic_cache()
         self.collection_name = settings.collection_name
@@ -29,11 +30,6 @@ class QueryPipeline:
         sparse_hits: list,
         k: int = 20,
     ) -> List[Tuple[str, float, dict]]:
-        """
-        Merges dense and sparse ranks using RRF with parent-chunk deduplication.
-        Each parent chunk is assigned only its highest-achieved rank per vector space,
-        preventing multiple question variations from artificially stacking scores.
-        """
         chunk_scores: Dict[str, float] = {}
         chunk_payloads: Dict[str, dict] = {}
 
@@ -46,12 +42,11 @@ class QueryPipeline:
                 seen_dense_chunks.add(parent_id)
                 deduped_dense_ranks.append((parent_id, hit.payload))
 
-        # 2. Score Dense Candidates based on true distinct rank
         for rank, (parent_id, payload) in enumerate(deduped_dense_ranks):
             chunk_payloads[parent_id] = payload
             chunk_scores[parent_id] = chunk_scores.get(parent_id, 0.0) + (1.0 / (k + rank + 1))
 
-        # 3. Deduplicate Sparse Hits: Keep only the best rank per parent chunk
+        # 2. Deduplicate Sparse Hits: Keep only the best rank per parent chunk
         seen_sparse_chunks = set()
         deduped_sparse_ranks = []
         for hit in sparse_hits:
@@ -60,13 +55,12 @@ class QueryPipeline:
                 seen_sparse_chunks.add(parent_id)
                 deduped_sparse_ranks.append((parent_id, hit.payload))
 
-        # 4. Score Sparse Candidates based on true distinct rank
         for rank, (parent_id, payload) in enumerate(deduped_sparse_ranks):
             if parent_id not in chunk_payloads:
                 chunk_payloads[parent_id] = payload
             chunk_scores[parent_id] = chunk_scores.get(parent_id, 0.0) + (1.0 / (k + rank + 1))
 
-        # 5. Apply Evergreen / Ephemeral weighting
+        # 3. Apply Evergreen / Ephemeral weighting
         for parent_id, score in chunk_scores.items():
             doc_type = chunk_payloads[parent_id].get("doc_type", "evergreen")
             if doc_type == "evergreen":
@@ -74,19 +68,18 @@ class QueryPipeline:
             elif doc_type == "ephemeral":
                 chunk_scores[parent_id] = score * 0.70
 
-        # 6. Sort descending
         sorted_results = sorted(
             chunk_scores.items(), key=lambda item: item[1], reverse=True
         )
         return [(parent_id, score, chunk_payloads[parent_id]) for parent_id, score in sorted_results]
 
     async def execute(self, req: PipelineQueryRequest) -> PipelineQueryResponse:
-        # Step 1: Precompute dense query vector using RETRIEVAL_QUERY task type
+        # Step 1: Precompute dense query vector
         dense_vec = self.embedder.embed_one(
             req.query, task_type="RETRIEVAL_QUERY"
         ).values
 
-        # Step 2: Semantic Cache Lookup with tenant isolation
+        # Step 2: Semantic Cache Lookup
         cache_entry = None
         try:
             cache_entry = await self.semantic_cache.get(
@@ -97,18 +90,24 @@ class QueryPipeline:
             cache_entry = await self.semantic_cache.get(vector=dense_vec)
 
         if cache_entry:
+            cached_contexts_raw = cache_entry.metadata.extra.get("contexts", [])
+            cached_contexts = [
+                RetrievedContextItem(**item) if isinstance(item, dict) else item
+                for item in cached_contexts_raw
+            ]
             return PipelineQueryResponse(
                 query=req.query,
                 answer=cache_entry.response,
                 is_cached=True,
                 source="cache",
                 sources=cache_entry.metadata.extra.get("sources", []),
+                contexts=cached_contexts,
             )
 
-        # Step 3: Compute sparse query vector with stopwords removed
-        sparse_data = compute_simple_sparse_vector(req.query)
+        # Step 3: Compute sparse query vector with FastEmbed BM25
+        sparse_data = self.sparse_embedder.embed_text(req.query)
 
-        # Step 4: Hybrid Multi-Tenant Retrieval using group_id
+        # Step 4: Hybrid Multi-Tenant Retrieval
         candidate_limit = max(req.top_k * 6, 30)
         tenant_filter = {"group_id": str(req.org_id)}
 
@@ -146,6 +145,7 @@ class QueryPipeline:
                 is_cached=False,
                 source="fallback",
                 sources=[],
+                contexts=[],
             )
 
         # Step 6: QA Context Construction
@@ -169,6 +169,7 @@ class QueryPipeline:
         qa_response = await self.qa_synthesizer.generate_answer(qa_request)
 
         # Step 7: Populate Semantic Cache
+        contexts_dict = [c.model_dump() for c in contexts]
         try:
             await self.semantic_cache.set(
                 query=req.query,
@@ -176,7 +177,11 @@ class QueryPipeline:
                 response=qa_response.answer,
                 org_id=req.org_id,
                 metadata=CacheMetadata(
-                    extra={"sources": qa_response.sources, "org_id": req.org_id}
+                    extra={
+                        "sources": qa_response.sources,
+                        "org_id": req.org_id,
+                        "contexts": contexts_dict,
+                    }
                 ),
             )
         except TypeError:
@@ -185,7 +190,11 @@ class QueryPipeline:
                 vector=dense_vec,
                 response=qa_response.answer,
                 metadata=CacheMetadata(
-                    extra={"sources": qa_response.sources, "org_id": req.org_id}
+                    extra={
+                        "sources": qa_response.sources,
+                        "org_id": req.org_id,
+                        "contexts": contexts_dict,
+                    }
                 ),
             )
 
@@ -195,5 +204,5 @@ class QueryPipeline:
             is_cached=False,
             source="llm",
             sources=qa_response.sources,
-            contexts=contexts
+            contexts=contexts,
         )

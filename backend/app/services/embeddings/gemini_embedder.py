@@ -40,8 +40,8 @@ class GeminiEmbedder(BaseEmbedder):
         max_retries = 5
         base_delay = 3.0
 
-        # Send up to 50 texts per single HTTP request to preserve quota
-        BATCH_SIZE = 50
+        # Maximum batch payload supported by Gemini embed_content is 100
+        BATCH_SIZE = 100
 
         for i in range(0, len(texts), BATCH_SIZE):
             batch = texts[i : i + BATCH_SIZE]
@@ -50,7 +50,7 @@ class GeminiEmbedder(BaseEmbedder):
                 try:
                     response = self.client.models.embed_content(
                         model=self.model_name,
-                        contents=batch,  # Batch passed directly to SDK
+                        contents=batch,
                         config=config,
                     )
                     break

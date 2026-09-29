@@ -1,16 +1,13 @@
 import asyncio
-import hashlib
-from collections import Counter
 from datetime import datetime, timezone
-import math
 import re
 from typing import Dict, List
 from urllib.parse import urlparse
 
 from crawl4ai import AsyncWebCrawler, CrawlerRunConfig, CacheMode
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_text_splitters import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
+from langchain_core.documents import Document
 from sqlalchemy import select, update, delete
-from sqlalchemy.orm import selectinload
 from sqlalchemy.orm import selectinload, joinedload
 
 from app.core.config import settings
@@ -20,6 +17,7 @@ from app.models.generated_question import GeneratedQuestion
 from app.models.scraped_page import PageProcessStatus, ScrapedPage
 from app.models.website import Website, WebsiteScrapeStatus
 from app.services.embeddings.factory import get_embedder
+from app.services.embeddings.sparse_embedder import get_sparse_embedder
 from app.services.ingest_pipeline.clean_markdown import clean_markdown
 from app.services.ingest_pipeline.discovery import run_discovery
 from app.services.llm_qgen.factory import get_question_generator
@@ -28,38 +26,12 @@ from app.services.vector_db.factory import get_vector_db
 from app.services.vector_db.schema import SparseVectorData, VectorPoint
 from app.utils.uuid_generator import generate_chunk_id, generate_doc_id, generate_question_id
 
-STOP_WORDS = {
-    "a", "about", "above", "after", "again", "against", "all", "am", "an", "and",
-    "any", "are", "aren't", "as", "at", "be", "because", "been", "before", "being",
-    "below", "between", "both", "but", "by", "can't", "cannot", "could", "couldn't",
-    "did", "didn't", "do", "does", "doesn't", "doing", "don't", "down", "during",
-    "each", "few", "for", "from", "further", "had", "hadn't", "has", "hasn't",
-    "have", "haven't", "having", "he", "he'd", "he'll", "he's", "her", "here",
-    "here's", "hers", "herself", "him", "himself", "his", "how", "how's", "i",
-    "i'd", "i'll", "i'm", "i've", "if", "in", "into", "is", "isn't", "it", "it's",
-    "its", "itself", "let's", "me", "more", "most", "mustn't", "my", "myself",
-    "no", "nor", "not", "of", "off", "on", "once", "only", "or", "other", "ought",
-    "our", "ours", "ourselves", "out", "over", "own", "same", "shan't", "she",
-    "she'd", "she'll", "she's", "should", "shouldn't", "so", "some", "such", "than",
-    "that", "that's", "the", "their", "theirs", "them", "themselves", "then", "there",
-    "there's", "these", "they", "they'd", "they'll", "they're", "they've", "this",
-    "those", "through", "to", "too", "under", "until", "up", "very", "was", "wasn't",
-    "we", "we'd", "we'll", "we're", "we've", "were", "weren't", "what", "what's",
-    "when", "when's", "where", "where's", "which", "while", "who", "who's", "whom",
-    "why", "why's", "with", "won't", "would", "wouldn't", "you", "you'd", "you'll",
-    "you're", "you've", "your", "yours", "yourself", "yourselves"
-}
-
 
 def estimate_token_count(text: str) -> int:
     return max(1, len(text.split()))
 
 
 def classify_document_type(url: str, text: str = "") -> str:
-    """
-    Classifies content into 'ephemeral' or 'evergreen' based on URL path tokens,
-    archive patterns, and past academic year mentions.
-    """
     path = urlparse(url).path.lower()
     ephemeral_indicators = [
         "/news", "/announcement", "/announcements",
@@ -69,11 +41,9 @@ def classify_document_type(url: str, text: str = "") -> str:
     if any(token in path for token in ephemeral_indicators):
         return "ephemeral"
 
-    # Match past dates or years in path (e.g. /2021/, /2022/, /2023/, /2024/)
     if re.search(r"/(?:19|20)\d{2}/", path):
         return "ephemeral"
 
-    # Flag older academic years if mentioned as past archives
     lower_content = text[:600].lower()
     if re.search(r"a\.?y\.?\s*20(?:1\d|2[0-4])", lower_content):
         return "ephemeral"
@@ -83,66 +53,47 @@ def classify_document_type(url: str, text: str = "") -> str:
 
 def is_substantive_chunk(text: str) -> bool:
     """
-    Filters out UI fragments, link directories, cookie policies, 
-    and chunks with low information density.
+    Validates that a chunk contains informative content.
+    Lowered to 15 words so isolated policies, contacts, and deadlines are preserved.
     """
     words = text.split()
-    if len(words) < 30:
+    if len(words) < 15:
         return False
 
     boilerplate_indicators = [
         "cookie", "privacy policy", "terms of use", "all rights reserved",
         "share on facebook", "share on x", "share on linkedin",
         "agree decline", "_chevron_right_", "navigation", "explore our website",
-        "skip to content", "back to top", "read more", "click here"
+        "skip to content", "back to top", "read more", "click here",
+        "related stories", "featured articles", "trending news", "leave a reply"
     ]
     lower_text = text.lower()
     matches = sum(1 for indicator in boilerplate_indicators if indicator in lower_text)
     if matches >= 2:
         return False
 
-    # Check for excessive markdown markup or punctuation clutter
     symbols_count = len(re.findall(r"[_*\[\]\(\)!|#<>]", text))
-    if symbols_count / max(1, len(text)) > 0.20:
+    if symbols_count / max(1, len(text)) > 0.25:
         return False
 
-    # Ensure chunk contains at least two complete sentences
-    sentences = [s for s in re.split(r"[.!?]+", text) if len(s.strip().split()) >= 4]
-    if len(sentences) < 2:
+    # Ensure chunk contains at least one meaningful sentence or factual statement
+    sentences = [s for s in re.split(r"[.!?\n]+", text) if len(s.strip().split()) >= 3]
+    if len(sentences) < 1:
         return False
 
     return True
-
-
-def compute_simple_sparse_vector(text: str) -> SparseVectorData:
-    """Generates stopword-filtered, log-scaled sparse frequency vectors."""
-    raw_tokens = [w.lower() for w in re.findall(r"\b[a-zA-Z0-9_\-]{2,}\b", text)]
-    filtered_tokens = [t for t in raw_tokens if t not in STOP_WORDS]
-    if not filtered_tokens:
-        return SparseVectorData(indices=[], values=[])
-
-    counts = Counter(filtered_tokens)
-    indices = []
-    values = []
-
-    for word, freq in counts.items():
-        idx = int(hashlib.md5(word.encode("utf-8")).hexdigest()[:8], 16)
-        indices.append(idx)
-        # Apply sublinear TF scaling to prevent dominant repetition
-        values.append(float(1.0 + math.log(freq)))
-
-    sorted_pairs = sorted(zip(indices, values), key=lambda x: x[0])
-    return SparseVectorData(
-        indices=[p[0] for p in sorted_pairs],
-        values=[p[1] for p in sorted_pairs],
-    )
 
 
 async def scraper_worker(web_id: int, is_discovery_done: asyncio.Event, max_retries: int = 3) -> int:
     total_scraped = 0
     config = CrawlerRunConfig(
         cache_mode=CacheMode.BYPASS,
-        excluded_tags=["nav", "footer", "header", "script", "style", "noscript", "aside"],
+        excluded_tags=[
+            "nav", "footer", "header", "script", "style", "noscript",
+            "aside", "form"
+        ],
+        exclude_external_links=True,
+        exclude_social_media_links=True,
         page_timeout=25000,
         wait_until="commit",
     )
@@ -211,6 +162,18 @@ async def chunker_worker(
     chunk_overlap: int = 150,
 ) -> int:
     total_chunks = 0
+
+    headers_to_split_on = [
+        ("#", "Header 1"),
+        ("##", "Header 2"),
+        ("###", "Header 3"),
+        ("####", "Header 4"),
+    ]
+    header_splitter = MarkdownHeaderTextSplitter(
+        headers_to_split_on=headers_to_split_on,
+        strip_headers=False,
+    )
+
     text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
@@ -245,20 +208,23 @@ async def chunker_worker(
                     if len(parts) >= 3:
                         cleaned = parts[2].strip()
 
-                split_texts = text_splitter.split_text(cleaned)
+                header_docs = header_splitter.split_text(cleaned)
+                sections = header_docs if header_docs else [Document(page_content=cleaned)]
                 valid_chunks: List[Chunk] = []
 
-                for text in split_texts:
-                    stripped = text.strip()
-                    if is_substantive_chunk(stripped):
-                        valid_chunks.append(
-                            Chunk(
-                                page_id=page.id,
-                                content=stripped,
-                                token_count=estimate_token_count(stripped),
-                                has_qgen=False,
+                for sec in sections:
+                    split_texts = text_splitter.split_text(sec.page_content)
+                    for text in split_texts:
+                        stripped = text.strip()
+                        if is_substantive_chunk(stripped):
+                            valid_chunks.append(
+                                Chunk(
+                                    page_id=page.id,
+                                    content=stripped,
+                                    token_count=estimate_token_count(stripped),
+                                    has_qgen=False,
+                                )
                             )
-                        )
 
                 await session.execute(delete(Chunk).where(Chunk.page_id == page.id))
                 if valid_chunks:
@@ -273,13 +239,12 @@ async def chunker_worker(
 
 
 async def qgen_worker(web_id: int, is_chunking_done: asyncio.Event) -> int:
-    """Generates synthetic questions for substantive chunks without ORM relationship lazy-loading."""
     total_questions = 0
     generator = get_question_generator()
+    CHUNK_BATCH_SIZE = 10
 
     while True:
         async with async_session() as session:
-            # Query plain scalars instead of ORM objects to prevent lazy loading
             stmt = (
                 select(
                     Chunk.id,
@@ -293,7 +258,7 @@ async def qgen_worker(web_id: int, is_chunking_done: asyncio.Event) -> int:
                     ScrapedPage.web_id == web_id,
                     Chunk.has_qgen.is_(False),
                 )
-                .limit(5)
+                .limit(CHUNK_BATCH_SIZE)
             )
             res = await session.execute(stmt)
             rows = res.all()
@@ -304,60 +269,68 @@ async def qgen_worker(web_id: int, is_chunking_done: asyncio.Event) -> int:
                 await asyncio.sleep(2.0)
                 continue
 
+            chunk_ids = [r[0] for r in rows]
+            raw_chunk_payloads: List[RawChunk] = []
+
             for chunk_id, chunk_content, page_id, page_org_id, page_url in rows:
                 tenant_str = str(page_org_id)
                 doc_id = generate_doc_id(tenant_id=tenant_str, source_url=page_url)
-
-                raw_chunk_payload = RawChunk(
-                    id=str(chunk_id),
-                    doc_id=doc_id,
-                    source_url=page_url,
-                    title=page_url.split("/")[-1] or "Homepage",
-                    content=chunk_content,
-                    tags=[tenant_str],
+                raw_chunk_payloads.append(
+                    RawChunk(
+                        id=str(chunk_id),
+                        doc_id=doc_id,
+                        source_url=page_url,
+                        title=page_url.split("/")[-1] or "Homepage",
+                        content=chunk_content,
+                        tags=[tenant_str],
+                    )
                 )
 
-                try:
-                    generated = await generator.generate_questions(raw_chunk_payload)
-                    new_questions = []
-                    for item in generated:
+            try:
+                generated_map = await generator.generate_questions_batch(raw_chunk_payloads)
+                new_questions = []
+
+                for chunk_payload in raw_chunk_payloads:
+                    q_list = generated_map.get(chunk_payload.id, [])
+                    for item in q_list:
                         q_text = item.content if hasattr(item, "content") else str(item)
                         if q_text.strip():
                             new_questions.append(
                                 GeneratedQuestion(
-                                    chunk_id=chunk_id,
+                                    chunk_id=int(chunk_payload.id),
                                     question=q_text.strip(),
                                     is_synced_qdrant=False,
                                 )
                             )
                             total_questions += 1
 
-                    if new_questions:
-                        session.add_all(new_questions)
+                if new_questions:
+                    session.add_all(new_questions)
 
-                    await session.execute(
-                        update(Chunk).where(Chunk.id == chunk_id).values(has_qgen=True)
+                await session.execute(
+                    update(Chunk).where(Chunk.id.in_(chunk_ids)).values(has_qgen=True)
+                )
+                await session.commit()
+
+            except Exception as e:
+                await session.rollback()
+                print(f"[QGen Batch Error] chunks={chunk_ids}: {e}")
+                async with async_session() as err_sess:
+                    await err_sess.execute(
+                        update(Chunk).where(Chunk.id.in_(chunk_ids)).values(has_qgen=True)
                     )
-                    await session.commit()
-                except Exception as e:
-                    await session.rollback()
-                    print(f"[QGen Error] chunk_id={chunk_id}: {e}")
-                    async with async_session() as err_sess:
-                        await err_sess.execute(
-                            update(Chunk).where(Chunk.id == chunk_id).values(has_qgen=True)
-                        )
-                        await err_sess.commit()
+                    await err_sess.commit()
 
-                await asyncio.sleep(4.5)
+            await asyncio.sleep(4.0)
 
     return total_questions
 
 
 async def qdrant_sync_worker(org_id: int, web_id: int, is_qgen_done: asyncio.Event) -> int:
-    """Batches generated questions, embeds them, and syncs points to Qdrant without ORM lazy-loading."""
     total_synced = 0
     vector_db = get_vector_db()
     embedder = get_embedder()
+    sparse_embedder = get_sparse_embedder()
     target_collection = settings.collection_name
 
     await vector_db.create_collection_if_not_exists(
@@ -367,10 +340,10 @@ async def qdrant_sync_worker(org_id: int, web_id: int, is_qgen_done: asyncio.Eve
     )
 
     tenant_key = str(org_id)
+    EMBED_DB_BATCH_SIZE = 100
 
     while True:
         async with async_session() as session:
-            # Query plain primitive columns: eliminates all ORM relationship proxy overhead
             stmt = (
                 select(
                     GeneratedQuestion.id.label("q_id"),
@@ -386,7 +359,7 @@ async def qdrant_sync_worker(org_id: int, web_id: int, is_qgen_done: asyncio.Eve
                     ScrapedPage.web_id == web_id,
                     GeneratedQuestion.is_synced_qdrant.is_(False),
                 )
-                .limit(25)
+                .limit(EMBED_DB_BATCH_SIZE)
             )
             res = await session.execute(stmt)
             rows = res.all()
@@ -418,7 +391,7 @@ async def qdrant_sync_worker(org_id: int, web_id: int, is_qgen_done: asyncio.Eve
                 doc_type = classify_document_type(page_url, chunk_content)
 
                 if chunk_id not in chunk_sparse_cache:
-                    chunk_sparse_cache[chunk_id] = compute_simple_sparse_vector(chunk_content)
+                    chunk_sparse_cache[chunk_id] = sparse_embedder.embed_text(chunk_content)
                 sparse_data = chunk_sparse_cache[chunk_id]
 
                 chunk_uuid = generate_chunk_id(
@@ -475,21 +448,6 @@ async def run_full_pipeline(website_id: int) -> dict:
 
         website.status = WebsiteScrapeStatus.IN_PROGRESS
         website.error_message = None
-
-        await session.execute(
-            update(ScrapedPage)
-            .where(
-                ScrapedPage.web_id == website_id,
-                ScrapedPage.status.in_([
-                    PageProcessStatus.FAILED, 
-                    PageProcessStatus.IN_PROGRESS
-                ]),
-            )
-            .values(
-                status=PageProcessStatus.PENDING,
-                retries=0,
-            )
-        )
         await session.commit()
 
         org_id = website.org_id
@@ -512,60 +470,24 @@ async def run_full_pipeline(website_id: int) -> dict:
         finally:
             is_scraping_done.set()
 
-    async def _chunker_task():
-        try:
-            return await chunker_worker(web_id=website_id, is_scraping_done=is_scraping_done)
-        finally:
-            is_chunking_done.set()
+    (
+        discovered_urls,
+        scraped_pages,
+        created_chunks,
+        generated_questions,
+        synced_qdrant_points,
+    ) = await asyncio.gather(
+        _discovery_task(),
+        _scraper_task(),
+        chunker_worker(web_id=website_id, is_scraping_done=is_scraping_done),
+        qgen_worker(web_id=website_id, is_chunking_done=is_chunking_done),
+        qdrant_sync_worker(org_id=org_id, web_id=website_id, is_qgen_done=is_qgen_done),
+    )
 
-    async def _qgen_task():
-        try:
-            return await qgen_worker(web_id=website_id, is_chunking_done=is_chunking_done)
-        finally:
-            is_qgen_done.set()
-
-    async def _qdrant_task():
-        return await qdrant_sync_worker(org_id=org_id, web_id=website_id, is_qgen_done=is_qgen_done)
-
-    try:
-        # 1. Run URL discovery first and wait for it to complete
-        discovered_urls = await run_discovery(
-            org_id=org_id, web_id=website_id, base_url=base_url
-        )
-        is_discovery_done.set()
-
-        # 2. Run scraping, chunking, question generation, and Qdrant sync
-        (
-            scraped_pages,
-            created_chunks,
-            generated_questions,
-            synced_qdrant_points,
-        ) = await asyncio.gather(
-            _scraper_task(),
-            _chunker_task(),
-            _qgen_task(),
-            _qdrant_task(),
-        )
-
-        async with async_session() as session:
-            website = await session.get(Website, website_id)
-            website.status = WebsiteScrapeStatus.COMPLETED
-            await session.commit()
-
-        return {
-            "status": "COMPLETED",
-            "discovered_urls": discovered_urls,
-            "scraped_pages": scraped_pages,
-            "created_chunks": created_chunks,
-            "generated_questions": generated_questions,
-            "synced_qdrant_points": synced_qdrant_points,
-        }
-
-    except Exception as e:
-        async with async_session() as session:
-            website = await session.get(Website, website_id)
-            if website:
-                website.status = WebsiteScrapeStatus.FAILED
-                website.error_message = str(e)
-                await session.commit()
-        raise e
+    return {
+        "discovered_urls": discovered_urls,
+        "scraped_pages": scraped_pages,
+        "created_chunks": created_chunks,
+        "generated_questions": generated_questions,
+        "synced_qdrant_points": synced_qdrant_points,
+    }
