@@ -370,18 +370,22 @@ async def qdrant_sync_worker(org_id: int, web_id: int, is_qgen_done: asyncio.Eve
                 await asyncio.sleep(2.0)
                 continue
 
-            q_ids = [r.q_id for r in rows]
             question_texts = [r.q_text for r in rows]
 
             try:
                 print(f"[Qdrant Sync] Embedding batch of {len(question_texts)} questions...")
-                # Async, non-blocking call to Gemini SDK
                 embedded_results = await embedder.embed(
                     question_texts, task_type="RETRIEVAL_DOCUMENT"
                 )
 
+                if len(embedded_results) != len(rows):
+                    raise ValueError(
+                        f"Embedding count mismatch: expected {len(rows)}, got {len(embedded_results)}"
+                    )
+
                 chunk_sparse_cache: Dict[int, SparseVectorData] = {}
                 points_to_upsert: List[VectorPoint] = []
+                synced_q_ids: List[int] = []
 
                 for row, emb_res in zip(rows, embedded_results):
                     q_id = row.q_id
@@ -393,9 +397,12 @@ async def qdrant_sync_worker(org_id: int, web_id: int, is_qgen_done: asyncio.Eve
 
                     doc_type = classify_document_type(page_url, chunk_content)
 
-                    # Non-blocking threadpool sparse tokenization
                     if chunk_id not in chunk_sparse_cache:
-                        chunk_sparse_cache[chunk_id] = await sparse_embedder.embed_text(chunk_content)
+                        sparse_data = await sparse_embedder.embed_text(chunk_content)
+                        if not sparse_data.indices:
+                            sparse_data = SparseVectorData(indices=[0], values=[0.0])
+                        chunk_sparse_cache[chunk_id] = sparse_data
+
                     sparse_data = chunk_sparse_cache[chunk_id]
 
                     chunk_uuid = generate_chunk_id(
@@ -427,6 +434,7 @@ async def qdrant_sync_worker(org_id: int, web_id: int, is_qgen_done: asyncio.Eve
                         },
                     )
                     points_to_upsert.append(point)
+                    synced_q_ids.append(q_id)
 
                 if points_to_upsert:
                     print(f"[Qdrant Sync] Upserting {len(points_to_upsert)} points to {target_collection}...")
@@ -435,7 +443,7 @@ async def qdrant_sync_worker(org_id: int, web_id: int, is_qgen_done: asyncio.Eve
                     )
                     await session.execute(
                         update(GeneratedQuestion)
-                        .where(GeneratedQuestion.id.in_(q_ids))
+                        .where(GeneratedQuestion.id.in_(synced_q_ids))
                         .values(is_synced_qdrant=True)
                     )
                     await session.commit()
@@ -481,6 +489,18 @@ async def run_full_pipeline(website_id: int) -> dict:
         finally:
             is_scraping_done.set()
 
+    async def _chunker_task():
+        try:
+            return await chunker_worker(web_id=website_id, is_scraping_done=is_scraping_done)
+        finally:
+            is_chunking_done.set()
+
+    async def _qgen_task():
+        try:
+            return await qgen_worker(web_id=website_id, is_chunking_done=is_chunking_done)
+        finally:
+            is_qgen_done.set()
+
     (
         discovered_urls,
         scraped_pages,
@@ -490,10 +510,16 @@ async def run_full_pipeline(website_id: int) -> dict:
     ) = await asyncio.gather(
         _discovery_task(),
         _scraper_task(),
-        chunker_worker(web_id=website_id, is_scraping_done=is_scraping_done),
-        qgen_worker(web_id=website_id, is_chunking_done=is_chunking_done),
+        _chunker_task(),
+        _qgen_task(),
         qdrant_sync_worker(org_id=org_id, web_id=website_id, is_qgen_done=is_qgen_done),
     )
+
+    async with async_session() as session:
+        website = await session.get(Website, website_id)
+        if website:
+            website.status = WebsiteScrapeStatus.COMPLETED
+            await session.commit()
 
     return {
         "discovered_urls": discovered_urls,

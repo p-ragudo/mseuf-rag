@@ -2,7 +2,7 @@ import asyncio
 from app.services.query_pipeline.query_pipeline import QueryPipeline
 from app.services.query_pipeline.schema import PipelineQueryRequest
 
-query = "When is the next admissions?"
+query = "Programs offered for tech related courses?"
 
 
 def display_retrieved_chunks(contexts):

@@ -39,18 +39,24 @@ class GeminiEmbedder(BaseEmbedder):
         max_retries = 5
         base_delay = 3.0
 
-        # Maximum batch payload supported by Gemini embed_content is 100
-        BATCH_SIZE = 100
+        # Maximum batch size supported by Gemini embed_content
+        BATCH_SIZE = 50
 
         for i in range(0, len(texts), BATCH_SIZE):
-            batch = texts[i : i + BATCH_SIZE]
+            chunk = texts[i : i + BATCH_SIZE]
+            
+            # Format each text as an independent Content document
+            content_batch = [
+                types.Content(parts=[types.Part.from_text(text=t)])
+                for t in chunk
+            ]
+
             response = None
             for attempt in range(max_retries):
                 try:
-                    # Uses true non-blocking async client
                     response = await self.client.aio.models.embed_content(
                         model=self.model_name,
-                        contents=batch,
+                        contents=content_batch,
                         config=config,
                     )
                     break
@@ -68,12 +74,13 @@ class GeminiEmbedder(BaseEmbedder):
             if response and response.embeddings:
                 for emb in response.embeddings:
                     results.append(EmbeddingResult(values=emb.values))
+            else:
+                raise ValueError(f"Failed to retrieve embeddings for batch {i}..{i+len(chunk)}")
 
         return results
 
     @property
     def dimension(self) -> int:
         if self._cached_dimension is None:
-            # Fallback to configured dimension or standard 3072 / 768 default
             return self.config.output_dimensionality or 3072
         return self._cached_dimension
