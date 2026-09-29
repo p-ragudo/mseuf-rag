@@ -125,3 +125,54 @@ async def add_member_to_organization(
     return AddMemberResponse(
         message=f"User {user_to_add.email} added to organization {org.name}."
     )
+
+# Remove member endpoint can be implemented similarly, ensuring proper role checks and validations are in place.
+@router.delete("/{org_id}/remove-member", response_model=AddMemberResponse, status_code=status.HTTP_200_OK)
+async def remove_member_from_organization(
+    org_id: int,
+    user_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Removes a member from the organization if the current user is an admin."""
+    # Check if the organization exists
+    org = await db.get(Org, org_id)
+    if not org:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Organization not found",
+        )
+
+    # Check if the current user is an admin of the organization
+    membership = await db.execute(
+        select(OrgMember).where(
+            OrgMember.org_id == org_id, OrgMember.user_id == current_user.id
+        )
+    )
+    membership_record = membership.scalar_one_or_none()
+    if not membership_record or "admin" not in membership_record.roles:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to remove members from this organization",
+        )
+
+    # Check if the user to be removed exists and is a member of the organization
+    member_to_remove = await db.execute(
+        select(OrgMember).where(
+            OrgMember.org_id == org_id, OrgMember.user_id == user_id
+        )
+    )
+    member_record = member_to_remove.scalar_one_or_none()
+    if not member_record:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User to remove is not a member of this organization",
+        )
+
+    # Remove the member
+    await db.delete(member_record)
+    await db.commit()
+
+    return AddMemberResponse(
+        message=f"User with ID {user_id} removed from organization {org.name}."
+    )
