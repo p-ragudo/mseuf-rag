@@ -18,6 +18,9 @@ class OrgResponse(BaseModel):
     class Config:
         from_attributes = True
 
+class AddMemberResponse(BaseModel):
+   message: str
+
 
 # --- Website Schemas ---
 class WebsiteCreate(BaseModel):

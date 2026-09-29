@@ -17,3 +17,20 @@ Content-Type: application/json
   "email": "test@mseuf.edu.ph",
   "password": "testpass123"
 }
+
+### Create org
+@token = eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxIiwiZXhwIjoxNzkwNjk1OTY1fQ.S1mgPWu6QUGQwntbTbyJIkAJrz1IWaZHU4q-_vQjrJI
+
+POST http://127.0.0.1:8000/orgs/
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "name": "Test Organization"
+}
+
+### Add member in org
+@token = eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxIiwiZXhwIjoxNzkwNjk2MzgzfQ.XZrZs4JCjlM3TL_c1abxyv8Qiar0FI-5fMNnTHkTr-0
+
+POST http://127.0.0.1:8000/orgs/2/add-member?user_id=2
+Authorization: Bearer {{token}}
