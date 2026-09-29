@@ -33,7 +33,6 @@ class QueryPipeline:
         chunk_scores: Dict[str, float] = {}
         chunk_payloads: Dict[str, dict] = {}
 
-        # 1. Deduplicate Dense Hits: Keep only the best-ranking question variation per parent chunk
         seen_dense_chunks = set()
         deduped_dense_ranks = []
         for hit in dense_hits:
@@ -46,7 +45,6 @@ class QueryPipeline:
             chunk_payloads[parent_id] = payload
             chunk_scores[parent_id] = chunk_scores.get(parent_id, 0.0) + (1.0 / (k + rank + 1))
 
-        # 2. Deduplicate Sparse Hits: Keep only the best rank per parent chunk
         seen_sparse_chunks = set()
         deduped_sparse_ranks = []
         for hit in sparse_hits:
@@ -60,7 +58,6 @@ class QueryPipeline:
                 chunk_payloads[parent_id] = payload
             chunk_scores[parent_id] = chunk_scores.get(parent_id, 0.0) + (1.0 / (k + rank + 1))
 
-        # 3. Apply Evergreen / Ephemeral weighting
         for parent_id, score in chunk_scores.items():
             doc_type = chunk_payloads[parent_id].get("doc_type", "evergreen")
             if doc_type == "evergreen":
@@ -74,12 +71,12 @@ class QueryPipeline:
         return [(parent_id, score, chunk_payloads[parent_id]) for parent_id, score in sorted_results]
 
     async def execute(self, req: PipelineQueryRequest) -> PipelineQueryResponse:
-        # Step 1: Precompute dense query vector
-        dense_vec = self.embedder.embed_one(
+        # Async non-blocking query embedding
+        dense_embed_result = await self.embedder.embed_one(
             req.query, task_type="RETRIEVAL_QUERY"
-        ).values
+        )
+        dense_vec = dense_embed_result.values
 
-        # Step 2: Semantic Cache Lookup
         cache_entry = None
         try:
             cache_entry = await self.semantic_cache.get(
@@ -104,10 +101,9 @@ class QueryPipeline:
                 contexts=cached_contexts,
             )
 
-        # Step 3: Compute sparse query vector with FastEmbed BM25
-        sparse_data = self.sparse_embedder.embed_text(req.query)
+        # Async non-blocking FastEmbed BM25 tokenization
+        sparse_data = await self.sparse_embedder.embed_text(req.query)
 
-        # Step 4: Hybrid Multi-Tenant Retrieval
         candidate_limit = max(req.top_k * 6, 30)
         tenant_filter = {"group_id": str(req.org_id)}
 
@@ -129,7 +125,6 @@ class QueryPipeline:
 
         dense_hits, sparse_hits = await asyncio.gather(dense_task, sparse_task)
 
-        # Step 5: Fusion & Deduplication
         fused_candidates = self._reciprocal_rank_fusion(
             dense_hits=dense_hits,
             sparse_hits=sparse_hits,
@@ -148,7 +143,6 @@ class QueryPipeline:
                 contexts=[],
             )
 
-        # Step 6: QA Context Construction
         contexts: List[RetrievedContextItem] = []
         source_urls: List[str] = []
 
@@ -168,7 +162,6 @@ class QueryPipeline:
         qa_request = QARequest(query=req.query, contexts=contexts)
         qa_response = await self.qa_synthesizer.generate_answer(qa_request)
 
-        # Step 7: Populate Semantic Cache
         contexts_dict = [c.model_dump() for c in contexts]
         try:
             await self.semantic_cache.set(

@@ -1,6 +1,8 @@
 import asyncio
 from datetime import datetime, timezone
+import math
 import re
+import traceback
 from typing import Dict, List
 from urllib.parse import urlparse
 
@@ -8,7 +10,6 @@ from crawl4ai import AsyncWebCrawler, CrawlerRunConfig, CacheMode
 from langchain_text_splitters import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
 from sqlalchemy import select, update, delete
-from sqlalchemy.orm import selectinload, joinedload
 
 from app.core.config import settings
 from app.core.database import async_session
@@ -52,10 +53,6 @@ def classify_document_type(url: str, text: str = "") -> str:
 
 
 def is_substantive_chunk(text: str) -> bool:
-    """
-    Validates that a chunk contains informative content.
-    Lowered to 15 words so isolated policies, contacts, and deadlines are preserved.
-    """
     words = text.split()
     if len(words) < 15:
         return False
@@ -76,7 +73,6 @@ def is_substantive_chunk(text: str) -> bool:
     if symbols_count / max(1, len(text)) > 0.25:
         return False
 
-    # Ensure chunk contains at least one meaningful sentence or factual statement
     sentences = [s for s in re.split(r"[.!?\n]+", text) if len(s.strip().split()) >= 3]
     if len(sentences) < 1:
         return False
@@ -333,16 +329,18 @@ async def qdrant_sync_worker(org_id: int, web_id: int, is_qgen_done: asyncio.Eve
     sparse_embedder = get_sparse_embedder()
     target_collection = settings.collection_name
 
-    # Initializes collection with quantization configuration defined in settings
-    await vector_db.create_collection_if_not_exists(
-        collection_name=target_collection,
-        dense_vector_size=embedder.dimension,
-        distance="Cosine",
-        enable_quantization=settings.quantization_enabled,
-    )
+    try:
+        await vector_db.create_collection_if_not_exists(
+            collection_name=target_collection,
+            dense_vector_size=embedder.dimension,
+            distance="Cosine",
+            enable_quantization=settings.quantization_enabled,
+        )
+    except Exception as e:
+        print(f"[Qdrant Sync Init Notice]: {e}")
 
     tenant_key = str(org_id)
-    EMBED_DB_BATCH_SIZE = 100
+    EMBED_DB_BATCH_SIZE = 50
 
     while True:
         async with async_session() as session:
@@ -369,75 +367,86 @@ async def qdrant_sync_worker(org_id: int, web_id: int, is_qgen_done: asyncio.Eve
             if not rows:
                 if is_qgen_done.is_set():
                     break
-                await asyncio.sleep(1.0)
+                await asyncio.sleep(2.0)
                 continue
 
+            q_ids = [r.q_id for r in rows]
             question_texts = [r.q_text for r in rows]
-            embedded_results = embedder.embed(
-                question_texts, task_type="RETRIEVAL_DOCUMENT"
-            )
-            await asyncio.sleep(1.0)
 
-            chunk_sparse_cache: Dict[int, SparseVectorData] = {}
-            points_to_upsert: List[VectorPoint] = []
-            synced_ids: List[int] = []
-
-            for row, emb_res in zip(rows, embedded_results):
-                q_id = row.q_id
-                q_text = row.q_text
-                chunk_id = row.chunk_id
-                chunk_content = row.chunk_content
-                page_id = row.page_id
-                page_url = row.page_url
-
-                doc_type = classify_document_type(page_url, chunk_content)
-
-                if chunk_id not in chunk_sparse_cache:
-                    chunk_sparse_cache[chunk_id] = sparse_embedder.embed_text(chunk_content)
-                sparse_data = chunk_sparse_cache[chunk_id]
-
-                chunk_uuid = generate_chunk_id(
-                    tenant_id=tenant_key,
-                    source_url=page_url,
-                    chunk_index=chunk_id,
-                    content=chunk_content,
-                )
-                point_uuid = generate_question_id(
-                    chunk_id=chunk_uuid,
-                    question=q_text,
+            try:
+                print(f"[Qdrant Sync] Embedding batch of {len(question_texts)} questions...")
+                # Async, non-blocking call to Gemini SDK
+                embedded_results = await embedder.embed(
+                    question_texts, task_type="RETRIEVAL_DOCUMENT"
                 )
 
-                point = VectorPoint(
-                    id=point_uuid,
-                    vector={
-                        "question_dense": emb_res.values,
-                        "chunk_sparse": sparse_data,
-                    },
-                    payload={
-                        "group_id": tenant_key,
-                        "parent_chunk_id": chunk_uuid,
-                        "question_text": q_text,
-                        "chunk_text": chunk_content,
-                        "source_url": page_url,
-                        "page_id": page_id,
-                        "chunk_id": chunk_id,
-                        "doc_type": doc_type,
-                    },
-                )
-                points_to_upsert.append(point)
-                synced_ids.append(q_id)
+                chunk_sparse_cache: Dict[int, SparseVectorData] = {}
+                points_to_upsert: List[VectorPoint] = []
 
-            if points_to_upsert:
-                await vector_db.upsert_points(
-                    collection_name=target_collection, points=points_to_upsert
-                )
-                await session.execute(
-                    update(GeneratedQuestion)
-                    .where(GeneratedQuestion.id.in_(synced_ids))
-                    .values(is_synced_qdrant=True)
-                )
-                await session.commit()
-                total_synced += len(points_to_upsert)
+                for row, emb_res in zip(rows, embedded_results):
+                    q_id = row.q_id
+                    q_text = row.q_text
+                    chunk_id = row.chunk_id
+                    chunk_content = row.chunk_content
+                    page_id = row.page_id
+                    page_url = row.page_url
+
+                    doc_type = classify_document_type(page_url, chunk_content)
+
+                    # Non-blocking threadpool sparse tokenization
+                    if chunk_id not in chunk_sparse_cache:
+                        chunk_sparse_cache[chunk_id] = await sparse_embedder.embed_text(chunk_content)
+                    sparse_data = chunk_sparse_cache[chunk_id]
+
+                    chunk_uuid = generate_chunk_id(
+                        tenant_id=tenant_key,
+                        source_url=page_url,
+                        chunk_index=chunk_id,
+                        content=chunk_content,
+                    )
+                    point_uuid = generate_question_id(
+                        chunk_id=chunk_uuid,
+                        question=q_text,
+                    )
+
+                    point = VectorPoint(
+                        id=point_uuid,
+                        vector={
+                            "question_dense": emb_res.values,
+                            "chunk_sparse": sparse_data,
+                        },
+                        payload={
+                            "group_id": tenant_key,
+                            "parent_chunk_id": chunk_uuid,
+                            "question_text": q_text,
+                            "chunk_text": chunk_content,
+                            "source_url": page_url,
+                            "page_id": page_id,
+                            "chunk_id": chunk_id,
+                            "doc_type": doc_type,
+                        },
+                    )
+                    points_to_upsert.append(point)
+
+                if points_to_upsert:
+                    print(f"[Qdrant Sync] Upserting {len(points_to_upsert)} points to {target_collection}...")
+                    await vector_db.upsert_points(
+                        collection_name=target_collection, points=points_to_upsert
+                    )
+                    await session.execute(
+                        update(GeneratedQuestion)
+                        .where(GeneratedQuestion.id.in_(q_ids))
+                        .values(is_synced_qdrant=True)
+                    )
+                    await session.commit()
+                    total_synced += len(points_to_upsert)
+                    print(f"[Qdrant Sync] Synced {len(points_to_upsert)} points. (Cumulative: {total_synced})")
+
+            except Exception as e:
+                await session.rollback()
+                print(f"[Qdrant Sync Error] Failed on batch: {e}")
+                traceback.print_exc()
+                await asyncio.sleep(5.0)
 
     return total_synced
 

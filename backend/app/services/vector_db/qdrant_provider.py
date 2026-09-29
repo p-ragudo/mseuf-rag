@@ -124,7 +124,7 @@ class QdrantVectorDB(BaseVectorDB):
                 sparse_vectors_config={
                     "chunk_sparse": rest_models.SparseVectorParams(
                         index=rest_models.SparseIndexParams(on_disk=False),
-                        modifier=rest_models.Modifier.Idf,
+                        modifier=rest_models.Modifier.IDF,
                     )
                 },
             )

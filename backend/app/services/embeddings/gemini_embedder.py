@@ -1,5 +1,4 @@
 import asyncio
-import time
 from typing import List, Optional
 from google import genai
 from google.genai import types
@@ -29,7 +28,7 @@ class GeminiEmbedder(BaseEmbedder):
             output_dimensionality=self.config.output_dimensionality,
         )
 
-    def embed(
+    async def embed(
         self, texts: List[str], task_type: Optional[str] = None
     ) -> List[EmbeddingResult]:
         if not texts:
@@ -48,7 +47,8 @@ class GeminiEmbedder(BaseEmbedder):
             response = None
             for attempt in range(max_retries):
                 try:
-                    response = self.client.models.embed_content(
+                    # Uses true non-blocking async client
+                    response = await self.client.aio.models.embed_content(
                         model=self.model_name,
                         contents=batch,
                         config=config,
@@ -57,10 +57,11 @@ class GeminiEmbedder(BaseEmbedder):
                 except Exception as e:
                     err_msg = str(e)
                     if (
-                        "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg
+                        "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg or "503" in err_msg
                     ) and attempt < max_retries - 1:
                         sleep_time = base_delay * (2 ** attempt)
-                        time.sleep(sleep_time)
+                        print(f"[Gemini Embed Retry] Rate limit hit. Waiting {sleep_time:.1f}s...")
+                        await asyncio.sleep(sleep_time)
                     else:
                         raise e
 
@@ -73,8 +74,6 @@ class GeminiEmbedder(BaseEmbedder):
     @property
     def dimension(self) -> int:
         if self._cached_dimension is None:
-            probe_result = self.embed_one("probe", task_type="RETRIEVAL_QUERY")
-            self._cached_dimension = getattr(
-                probe_result, "dimension", len(probe_result.values)
-            )
+            # Fallback to configured dimension or standard 3072 / 768 default
+            return self.config.output_dimensionality or 3072
         return self._cached_dimension

@@ -8,17 +8,18 @@ class BaseEmbedder(ABC):
         self.config = config
 
     @abstractmethod
-    def embed(
+    async def embed(
         self, texts: List[str], task_type: Optional[str] = None
     ) -> List[EmbeddingResult]:
-        """Embed a list of texts into vectors with an optional task type."""
+        """Embed a list of texts into vectors asynchronously."""
         pass
 
-    def embed_one(
+    async def embed_one(
         self, text: str, task_type: Optional[str] = None
     ) -> EmbeddingResult:
-        """Convenience method to embed a single text string."""
-        return self.embed([text], task_type=task_type)[0]
+        """Convenience method to embed a single text string asynchronously."""
+        res = await self.embed([text], task_type=task_type)
+        return res[0]
 
     @property
     @abstractmethod
