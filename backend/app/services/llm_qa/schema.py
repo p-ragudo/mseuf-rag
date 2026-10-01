@@ -1,11 +1,27 @@
 from typing import List, Optional
 from pydantic import BaseModel, Field
 
+
+class MatchedQuestionDetail(BaseModel):
+    """Telemetry about a question point that matched the user's query."""
+    question: str = Field(..., description="The synthetic question text stored in Qdrant")
+    score: float = Field(..., description="Raw similarity/relevance score returned by the search")
+    method: str = Field(..., description="'dense' for semantic vector match, 'sparse' for BM25 match")
+    rank: int = Field(..., description="0-indexed position within its respective candidate search list")
+
+
 class RetrievedContextItem(BaseModel):
     """A retrieved chunk/document passed as grounding context."""
     title: str = Field(default="", description="Source document or page title")
     content: str = Field(..., description="The relevant passage text")
     source_url: Optional[str] = Field(default=None, description="URL or reference link")
+    campus: Optional[str] = Field(default="main", description="Sub-entity, campus, or branch origin")
+    academic_level: Optional[str] = Field(default="general", description="Target academic or organizational level")
+    matched_questions: List[MatchedQuestionDetail] = Field(
+        default_factory=list,
+        description="Detailed list of questions that triggered this chunk, along with their scores and retrieval source",
+    )
+
 
 class QARequest(BaseModel):
     """The incoming user query along with retrieved passages."""
@@ -14,6 +30,7 @@ class QARequest(BaseModel):
         default_factory=list, 
         description="Ranked chunks retrieved from vector search"
     )
+
 
 class QAResponse(BaseModel):
     """Synthesized final response from the RAG pipeline."""

@@ -1,11 +1,19 @@
 import asyncio
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
+from sqlalchemy import select
 
 from app.core.config import settings
+from app.core.database import async_session
+from app.models.org import Org
 from app.services.embeddings.factory import get_embedder
 from app.services.embeddings.sparse_embedder import get_sparse_embedder
 from app.services.llm_qa.factory import get_qa_synthesizer
-from app.services.llm_qa.schema import QARequest, RetrievedContextItem
+from app.services.llm_qa.schema import (
+    MatchedQuestionDetail,
+    QARequest,
+    RetrievedContextItem,
+)
+from app.services.query_pipeline.intent_classifier import QueryClassifier, QueryIntent
 from app.services.query_pipeline.schema import (
     PipelineQueryRequest,
     PipelineQueryResponse,
@@ -22,59 +30,106 @@ class QueryPipeline:
         self.sparse_embedder = get_sparse_embedder()
         self.qa_synthesizer = get_qa_synthesizer()
         self.semantic_cache = get_semantic_cache()
+        self.classifier = QueryClassifier()
         self.collection_name = settings.collection_name
+
+    async def _resolve_org_details(self, org_id: int) -> Tuple[str, List[str]]:
+        """Dynamically retrieves tenant organization name from DB to prevent cross-tenant leaks."""
+        async with async_session() as session:
+            org = await session.get(Org, org_id)
+            if org:
+                return org.name, []
+        return "the organization", []
 
     def _reciprocal_rank_fusion(
         self,
         dense_hits: list,
         sparse_hits: list,
-        k: int = 20,
-    ) -> List[Tuple[str, float, dict]]:
+        k: int = 60,
+    ) -> List[Tuple[str, float, dict, List[MatchedQuestionDetail]]]:
+        """
+        Pure Reciprocal Rank Fusion (k=60).
+        Dense hits accumulate across multiple question points for the same parent chunk.
+        Sparse hits are deduplicated per chunk.
+        Arbitrary ephemeral/evergreen multipliers are removed.
+        """
         chunk_scores: Dict[str, float] = {}
         chunk_payloads: Dict[str, dict] = {}
+        chunk_matched_questions: Dict[str, List[MatchedQuestionDetail]] = {}
 
-        seen_dense_chunks = set()
-        deduped_dense_ranks = []
-        for hit in dense_hits:
+        # 1. Process Dense Hits: Multi-question accumulation
+        for rank, hit in enumerate(dense_hits):
             parent_id = hit.payload.get("parent_chunk_id") or hit.id
-            if parent_id not in seen_dense_chunks:
-                seen_dense_chunks.add(parent_id)
-                deduped_dense_ranks.append((parent_id, hit.payload))
+            q_text = hit.payload.get("question_text") or ""
 
-        for rank, (parent_id, payload) in enumerate(deduped_dense_ranks):
-            chunk_payloads[parent_id] = payload
+            if parent_id not in chunk_payloads:
+                chunk_payloads[parent_id] = hit.payload
+
+            if parent_id not in chunk_matched_questions:
+                chunk_matched_questions[parent_id] = []
+
+            if q_text:
+                chunk_matched_questions[parent_id].append(
+                    MatchedQuestionDetail(
+                        question=q_text,
+                        score=float(hit.score),
+                        method="dense",
+                        rank=rank,
+                    )
+                )
+
             chunk_scores[parent_id] = chunk_scores.get(parent_id, 0.0) + (1.0 / (k + rank + 1))
 
+        # 2. Process Sparse Hits: Deduplicated BM25 score per parent chunk
         seen_sparse_chunks = set()
-        deduped_sparse_ranks = []
-        for hit in sparse_hits:
+        for rank, hit in enumerate(sparse_hits):
             parent_id = hit.payload.get("parent_chunk_id") or hit.id
+            q_text = hit.payload.get("question_text") or ""
+
+            if parent_id not in chunk_payloads:
+                chunk_payloads[parent_id] = hit.payload
+
+            if parent_id not in chunk_matched_questions:
+                chunk_matched_questions[parent_id] = []
+
+            existing_questions = {m.question for m in chunk_matched_questions[parent_id]}
+            if q_text and q_text not in existing_questions:
+                chunk_matched_questions[parent_id].append(
+                    MatchedQuestionDetail(
+                        question=q_text,
+                        score=float(hit.score),
+                        method="sparse",
+                        rank=rank,
+                    )
+                )
+
             if parent_id not in seen_sparse_chunks:
                 seen_sparse_chunks.add(parent_id)
-                deduped_sparse_ranks.append((parent_id, hit.payload))
-
-        for rank, (parent_id, payload) in enumerate(deduped_sparse_ranks):
-            if parent_id not in chunk_payloads:
-                chunk_payloads[parent_id] = payload
-            chunk_scores[parent_id] = chunk_scores.get(parent_id, 0.0) + (1.0 / (k + rank + 1))
-
-        for parent_id, score in chunk_scores.items():
-            doc_type = chunk_payloads[parent_id].get("doc_type", "evergreen")
-            if doc_type == "evergreen":
-                chunk_scores[parent_id] = score * 1.30
-            elif doc_type == "ephemeral":
-                chunk_scores[parent_id] = score * 0.70
+                chunk_scores[parent_id] = chunk_scores.get(parent_id, 0.0) + (1.0 / (k + rank + 1))
 
         sorted_results = sorted(
             chunk_scores.items(), key=lambda item: item[1], reverse=True
         )
-        return [(parent_id, score, chunk_payloads[parent_id]) for parent_id, score in sorted_results]
+
+        return [
+            (
+                parent_id,
+                score,
+                chunk_payloads[parent_id],
+                chunk_matched_questions.get(parent_id, []),
+            )
+            for parent_id, score in sorted_results
+        ]
 
     async def execute(self, req: PipelineQueryRequest) -> PipelineQueryResponse:
-        # Async non-blocking query embedding
-        dense_embed_result = await self.embedder.embed_one(
-            req.query, task_type="RETRIEVAL_QUERY"
+        org_name, known_locations = await self._resolve_org_details(req.org_id)
+
+        intent_task = self.classifier.classify_intent(
+            req.query, org_name=org_name, known_locations=known_locations
         )
+        dense_embed_task = self.embedder.embed_one(req.query, task_type="RETRIEVAL_QUERY")
+
+        intent, dense_embed_result = await asyncio.gather(intent_task, dense_embed_task)
         dense_vec = dense_embed_result.values
 
         cache_entry = None
@@ -101,11 +156,13 @@ class QueryPipeline:
                 contexts=cached_contexts,
             )
 
-        # Async non-blocking FastEmbed BM25 tokenization
-        sparse_data = await self.sparse_embedder.embed_text(req.query)
+        # Enforce Multi-Tenancy hard filter
+        tenant_filter: Dict[str, str] = {"group_id": str(req.org_id)}
+        if intent.detected_sub_entity and intent.detected_sub_entity != "main":
+            tenant_filter["campus"] = intent.detected_sub_entity
 
+        sparse_data = await self.sparse_embedder.embed_text(req.query)
         candidate_limit = max(req.top_k * 6, 30)
-        tenant_filter = {"group_id": str(req.org_id)}
 
         dense_task = self.vector_db.search(
             collection_name=self.collection_name,
@@ -128,7 +185,7 @@ class QueryPipeline:
         fused_candidates = self._reciprocal_rank_fusion(
             dense_hits=dense_hits,
             sparse_hits=sparse_hits,
-            k=20,
+            k=60,
         )
 
         top_candidates = fused_candidates[: req.top_k]
@@ -146,54 +203,61 @@ class QueryPipeline:
         contexts: List[RetrievedContextItem] = []
         source_urls: List[str] = []
 
-        for _, _, payload in top_candidates:
+        for _, _, payload, matched_questions in top_candidates:
             url = payload.get("source_url") or ""
             text = payload.get("chunk_text") or ""
+            campus = payload.get("campus") or "main"
+            academic_level = payload.get("academic_level") or "general"
+
             if url and url not in source_urls:
                 source_urls.append(url)
+
             contexts.append(
                 RetrievedContextItem(
                     title=url.split("/")[-1] or "Document",
                     content=text,
                     source_url=url,
+                    campus=campus,
+                    academic_level=academic_level,
+                    matched_questions=matched_questions,
                 )
             )
 
         qa_request = QARequest(query=req.query, contexts=contexts)
-        qa_response = await self.qa_synthesizer.generate_answer(qa_request)
+        qa_response = await self.qa_synthesizer.generate_answer(qa_request, org_name=org_name)
+
+        final_answer = qa_response.answer
+        if intent.is_ambiguous and intent.clarification_message:
+            final_answer += f"\n\n---\n*Note*: {intent.clarification_message}"
 
         contexts_dict = [c.model_dump() for c in contexts]
+        cache_metadata = CacheMetadata(
+            extra={
+                "sources": qa_response.sources,
+                "org_id": req.org_id,
+                "contexts": contexts_dict,
+            }
+        )
+
         try:
             await self.semantic_cache.set(
                 query=req.query,
                 vector=dense_vec,
-                response=qa_response.answer,
+                response=final_answer,
                 org_id=req.org_id,
-                metadata=CacheMetadata(
-                    extra={
-                        "sources": qa_response.sources,
-                        "org_id": req.org_id,
-                        "contexts": contexts_dict,
-                    }
-                ),
+                metadata=cache_metadata,
             )
         except TypeError:
             await self.semantic_cache.set(
                 query=req.query,
                 vector=dense_vec,
-                response=qa_response.answer,
-                metadata=CacheMetadata(
-                    extra={
-                        "sources": qa_response.sources,
-                        "org_id": req.org_id,
-                        "contexts": contexts_dict,
-                    }
-                ),
+                response=final_answer,
+                metadata=cache_metadata,
             )
 
         return PipelineQueryResponse(
             query=req.query,
-            answer=qa_response.answer,
+            answer=final_answer,
             is_cached=False,
             source="llm",
             sources=qa_response.sources,

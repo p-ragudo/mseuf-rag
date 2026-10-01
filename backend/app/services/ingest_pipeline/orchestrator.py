@@ -32,6 +32,37 @@ def estimate_token_count(text: str) -> int:
     return max(1, len(text.split()))
 
 
+def extract_sub_entity_from_url(url: str) -> str:
+    """
+    Multi-tenant sub-entity extraction: parses the root sub-path
+    (e.g., 'calauag', 'candelaria', 'law', 'medicine') dynamically without hardcoding.
+    """
+    parsed = urlparse(url)
+    segments = [s.strip().lower() for s in parsed.path.split("/") if s.strip()]
+    if segments:
+        candidate = segments[0]
+        ignored = {
+            "pages", "news", "announcement", "announcements",
+            "events", "about", "article", "posts", "home", "index"
+        }
+        if candidate not in ignored:
+            return candidate
+    return "main"
+
+
+def classify_academic_level(url: str, text: str = "") -> str:
+    path = urlparse(url).path.lower()
+    lower_text = text[:400].lower()
+
+    if "senior-high" in path or "strand" in lower_text or "shs" in path:
+        return "shs"
+    if "basic-education" in path or "elementary" in path or "junior-high" in path:
+        return "basic_ed"
+    if "graduate" in path or "master" in lower_text or "doctor" in lower_text:
+        return "graduate"
+    return "undergraduate"
+
+
 def classify_document_type(url: str, text: str = "") -> str:
     path = urlparse(url).path.lower()
     ephemeral_indicators = [
@@ -373,7 +404,6 @@ async def qdrant_sync_worker(org_id: int, web_id: int, is_qgen_done: asyncio.Eve
             question_texts = [r.q_text for r in rows]
 
             try:
-                print(f"[Qdrant Sync] Embedding batch of {len(question_texts)} questions...")
                 embedded_results = await embedder.embed(
                     question_texts, task_type="RETRIEVAL_DOCUMENT"
                 )
@@ -396,6 +426,8 @@ async def qdrant_sync_worker(org_id: int, web_id: int, is_qgen_done: asyncio.Eve
                     page_url = row.page_url
 
                     doc_type = classify_document_type(page_url, chunk_content)
+                    campus = extract_sub_entity_from_url(page_url)
+                    academic_level = classify_academic_level(page_url, chunk_content)
 
                     if chunk_id not in chunk_sparse_cache:
                         sparse_data = await sparse_embedder.embed_text(chunk_content)
@@ -431,13 +463,14 @@ async def qdrant_sync_worker(org_id: int, web_id: int, is_qgen_done: asyncio.Eve
                             "page_id": page_id,
                             "chunk_id": chunk_id,
                             "doc_type": doc_type,
+                            "campus": campus,
+                            "academic_level": academic_level,
                         },
                     )
                     points_to_upsert.append(point)
                     synced_q_ids.append(q_id)
 
                 if points_to_upsert:
-                    print(f"[Qdrant Sync] Upserting {len(points_to_upsert)} points to {target_collection}...")
                     await vector_db.upsert_points(
                         collection_name=target_collection, points=points_to_upsert
                     )
@@ -448,7 +481,6 @@ async def qdrant_sync_worker(org_id: int, web_id: int, is_qgen_done: asyncio.Eve
                     )
                     await session.commit()
                     total_synced += len(points_to_upsert)
-                    print(f"[Qdrant Sync] Synced {len(points_to_upsert)} points. (Cumulative: {total_synced})")
 
             except Exception as e:
                 await session.rollback()
