@@ -38,5 +38,13 @@ class WebsiteResponse(BaseModel):
     status: WebsiteScrapeStatus
     error_message: Optional[str] = None
 
+# --- Website Scrape Schedule Schemas ---
+class WebsiteScrapeSchedulesResponse(BaseModel):
+    id: int
+    org_id: int
+    url: str
+    interval_days: int
+    time_of_scrape: time
+
     class Config:
         from_attributes = True
