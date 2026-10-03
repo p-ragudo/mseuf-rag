@@ -18,6 +18,8 @@ from app.services.query_pipeline.schema import (
     PipelineQueryRequest,
     PipelineQueryResponse,
 )
+from app.services.reranker.factory import get_reranker
+from app.services.reranker.schema import RerankCandidate
 from app.services.semantic_cache.factory import get_semantic_cache
 from app.services.semantic_cache.schemas import CacheMetadata
 from app.services.vector_db.factory import get_vector_db
@@ -31,6 +33,7 @@ class QueryPipeline:
         self.qa_synthesizer = get_qa_synthesizer()
         self.semantic_cache = get_semantic_cache()
         self.classifier = QueryClassifier()
+        self.reranker = get_reranker()
         self.collection_name = settings.collection_name
 
     async def _resolve_org_details(self, org_id: int) -> Tuple[str, List[str]]:
@@ -51,7 +54,6 @@ class QueryPipeline:
         Pure Reciprocal Rank Fusion (k=60).
         Dense hits accumulate across multiple question points for the same parent chunk.
         Sparse hits are deduplicated per chunk.
-        Arbitrary ephemeral/evergreen multipliers are removed.
         """
         chunk_scores: Dict[str, float] = {}
         chunk_payloads: Dict[str, dict] = {}
@@ -132,14 +134,10 @@ class QueryPipeline:
         intent, dense_embed_result = await asyncio.gather(intent_task, dense_embed_task)
         dense_vec = dense_embed_result.values
 
-        cache_entry = None
-        try:
-            cache_entry = await self.semantic_cache.get(
-                vector=dense_vec,
-                org_id=req.org_id,
-            )
-        except TypeError:
-            cache_entry = await self.semantic_cache.get(vector=dense_vec)
+        cache_entry = await self.semantic_cache.get(
+            vector=dense_vec,
+            org_id=req.org_id,
+        )
 
         if cache_entry:
             cached_contexts_raw = cache_entry.metadata.extra.get("contexts", [])
@@ -182,15 +180,14 @@ class QueryPipeline:
 
         dense_hits, sparse_hits = await asyncio.gather(dense_task, sparse_task)
 
+        # Step 6: Chunk-level RRF fusion across multiple question points
         fused_candidates = self._reciprocal_rank_fusion(
             dense_hits=dense_hits,
             sparse_hits=sparse_hits,
             k=60,
         )
 
-        top_candidates = fused_candidates[: req.top_k]
-
-        if not top_candidates:
+        if not fused_candidates:
             return PipelineQueryResponse(
                 query=req.query,
                 answer="No relevant institutional documents could be found for your query.",
@@ -200,14 +197,47 @@ class QueryPipeline:
                 contexts=[],
             )
 
+        # Step 7: Cross-Encoder Reranking
+        # Prepare candidate objects for the cross-encoder (up to top 25-30 fused chunks)
+        rerank_pool_size = max(req.top_k * 4, 25)
+        candidates_to_rerank = [
+            RerankCandidate(
+                chunk_id=parent_id,
+                content=payload.get("chunk_text") or "",
+                initial_score=rrf_score,
+                payload=payload,
+                matched_questions=matched_qs,
+            )
+            for parent_id, rrf_score, payload, matched_qs in fused_candidates[:rerank_pool_size]
+            if (payload.get("chunk_text") or "").strip()
+        ]
+
+        reranked_results = await self.reranker.rerank(
+            query=req.query,
+            candidates=candidates_to_rerank,
+            top_k=req.top_k,
+            score_threshold=getattr(settings, "reranker_score_threshold", None),
+        )
+
+        # If reranker filtered out all candidates based on score_threshold
+        if not reranked_results:
+            return PipelineQueryResponse(
+                query=req.query,
+                answer="No sufficiently relevant institutional information was found to answer your inquiry.",
+                is_cached=False,
+                source="fallback",
+                sources=[],
+                contexts=[],
+            )
+
         contexts: List[RetrievedContextItem] = []
         source_urls: List[str] = []
 
-        for _, _, payload, matched_questions in top_candidates:
-            url = payload.get("source_url") or ""
-            text = payload.get("chunk_text") or ""
-            campus = payload.get("campus") or "main"
-            academic_level = payload.get("academic_level") or "general"
+        for item in reranked_results:
+            url = item.payload.get("source_url") or ""
+            text = item.content
+            campus = item.payload.get("campus") or "main"
+            academic_level = item.payload.get("academic_level") or "general"
 
             if url and url not in source_urls:
                 source_urls.append(url)
@@ -219,7 +249,7 @@ class QueryPipeline:
                     source_url=url,
                     campus=campus,
                     academic_level=academic_level,
-                    matched_questions=matched_questions,
+                    matched_questions=item.matched_questions,
                 )
             )
 
@@ -239,21 +269,13 @@ class QueryPipeline:
             }
         )
 
-        try:
-            await self.semantic_cache.set(
-                query=req.query,
-                vector=dense_vec,
-                response=final_answer,
-                org_id=req.org_id,
-                metadata=cache_metadata,
-            )
-        except TypeError:
-            await self.semantic_cache.set(
-                query=req.query,
-                vector=dense_vec,
-                response=final_answer,
-                metadata=cache_metadata,
-            )
+        await self.semantic_cache.set(
+            query=req.query,
+            vector=dense_vec,
+            response=final_answer,
+            org_id=req.org_id,
+            metadata=cache_metadata,
+        )
 
         return PipelineQueryResponse(
             query=req.query,

@@ -105,6 +105,14 @@ class Settings(BaseSettings):
         case_sensitive=False,  # Reads uppercase .env keys into lowercase attributes
     )
 
+    # Reranker Settings
+    reranker_provider: str = "fastembed"
+    reranker_model_name: str = "Xenova/ms-marco-MiniLM-L-12-v2"
+    reranker_top_k: int = 5
+    reranker_score_threshold: Optional[float] = None  # e.g., 0.05 or 0.1 for out-of-scope gating
+    reranker_batch_size: int = 16
+    reranker_max_length: int = 512
+
     @computed_field
     @property
     def active_qdrant_endpoint(self) -> Optional[str]:
