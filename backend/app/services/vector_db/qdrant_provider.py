@@ -155,6 +155,15 @@ class QdrantVectorDB(BaseVectorDB):
                 ),
             )
 
+        if "campus" not in payload_schema:
+            await self.client.create_payload_index(
+                collection_name=collection_name,
+                field_name="campus",
+                field_schema=rest_models.KeywordIndexParams(
+                    type="keyword",
+                ),
+            )
+
     async def upsert_points(
         self, collection_name: str, points: List[VectorPoint]
     ) -> None:
