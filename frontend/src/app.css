@@ -2,12 +2,20 @@
 
 html,
 body {
+  font-family: "Inter", sans-serif;
   height: 100%;
   margin: 0;
   overflow: hidden; /* prevents page-level scroll, forces inner div to handle it */
 }
 
+#app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
 @theme {
-  --font-sans: "Inter", sans-serif;
-  --font-heading: "Poppins", sans-serif;
+  --color-primary: #760a15;
+  --color-outline: #dce2e9;
+  --color-accent: #fce5e4;
 }
