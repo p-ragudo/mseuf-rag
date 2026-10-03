@@ -1,3 +1,4 @@
+import asyncio
 from typing import List, Optional
 from google import genai
 from google.genai import types
@@ -16,39 +17,63 @@ class GeminiEmbedder(BaseEmbedder):
             model_id = f"models/{model_id}"
         self.model_name = model_id
 
-    def _build_config(self) -> Optional[types.EmbedContentConfig]:
-        task_type = self.config.task_type or "RETRIEVAL_QUERY"
-        if not task_type and not self.config.output_dimensionality:
+    def _build_config(
+        self, task_type: Optional[str] = None
+    ) -> Optional[types.EmbedContentConfig]:
+        target_task_type = task_type or self.config.task_type or "RETRIEVAL_QUERY"
+        if not target_task_type and not self.config.output_dimensionality:
             return None
         return types.EmbedContentConfig(
-            task_type=task_type,
+            task_type=target_task_type,
             output_dimensionality=self.config.output_dimensionality,
         )
 
-    def embed(self, texts: List[str]) -> List[EmbeddingResult]:
+    async def embed(
+        self, texts: List[str], task_type: Optional[str] = None
+    ) -> List[EmbeddingResult]:
         if not texts:
             return []
 
-        config = self._build_config()
+        config = self._build_config(task_type=task_type)
         results: List[EmbeddingResult] = []
+        max_retries = 5
+        base_delay = 3.0
 
-        for text in texts:
-            response = self.client.models.embed_content(
-                model=self.model_name,
-                contents=text,
-                config=config,
-            )
-            # Each call yields a list with exactly one ContentEmbedding for that text
-            for emb in response.embeddings:
-                results.append(EmbeddingResult(values=emb.values))
+        # Maximum batch payload supported by Gemini embed_content is 100
+        BATCH_SIZE = 100
+
+        for i in range(0, len(texts), BATCH_SIZE):
+            batch = texts[i : i + BATCH_SIZE]
+            response = None
+            for attempt in range(max_retries):
+                try:
+                    # Uses true non-blocking async client
+                    response = await self.client.aio.models.embed_content(
+                        model=self.model_name,
+                        contents=batch,
+                        config=config,
+                    )
+                    break
+                except Exception as e:
+                    err_msg = str(e)
+                    if (
+                        "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg or "503" in err_msg
+                    ) and attempt < max_retries - 1:
+                        sleep_time = base_delay * (2 ** attempt)
+                        print(f"[Gemini Embed Retry] Rate limit hit. Waiting {sleep_time:.1f}s...")
+                        await asyncio.sleep(sleep_time)
+                    else:
+                        raise e
+
+            if response and response.embeddings:
+                for emb in response.embeddings:
+                    results.append(EmbeddingResult(values=emb.values))
 
         return results
 
     @property
     def dimension(self) -> int:
         if self._cached_dimension is None:
-            probe_result = self.embed_one("probe")
-            self._cached_dimension = getattr(
-                probe_result, "dimension", len(probe_result.values)
-            )
+            # Fallback to configured dimension or standard 3072 / 768 default
+            return self.config.output_dimensionality or 3072
         return self._cached_dimension

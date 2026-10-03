@@ -1,117 +1,101 @@
 import asyncio
-import re
-from typing import List, Tuple
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+from datetime import datetime, timezone
+from typing import List
+from langchain_text_splitters import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
+from langchain_core.documents import Document
+from sqlalchemy import select, delete
 
-from app.services.sql_db.base import DatabaseRepository
-from app.services.sql_db.schema import DocumentChunk, ScrapedPageStatus
-
-
-def clean_markdown_content(text: str) -> str:
-    """Strips unnecessary HTML tags and excess markdown formatting noise."""
-    text = re.sub(r"<[^>]+>", " ", text)
-    text = re.sub(r"\[([^\]]+)\]\([^\)]+\)", r"\1", text)
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    return text.strip()
-
-
-def extract_metadata_and_body(raw_markdown: str, fallback_url: str) -> Tuple[str, str]:
-    """Extracts frontmatter if present, deriving title and content."""
-    content = raw_markdown
-    title = fallback_url.split("/")[-1].replace("-", " ").replace("_", " ").title() or "Untitled"
-
-    if content.startswith("---"):
-        parts = content.split("---", 2)
-        if len(parts) >= 3:
-            for line in parts[1].split("\n"):
-                if line.startswith("title:"):
-                    title = line.replace("title:", "").strip()
-            content = parts[2]
-
-    return title, clean_markdown_content(content)
+from app.core.database import async_session
+from app.models.scraped_page import ScrapedPage, PageProcessStatus
+from app.models.chunk import Chunk
+from app.services.ingest_pipeline.clean_markdown import clean_markdown
+from app.services.ingest_pipeline.orchestrator import is_substantive_chunk, estimate_token_count
 
 
 async def process_and_chunk_pages(
-    tenant_id: str,
-    repo: DatabaseRepository,
+    org_id: int,
+    web_id: int,
+    batch_size: int = 50,
     chunk_size: int = 800,
     chunk_overlap: int = 150,
-) -> List[DocumentChunk]:
+) -> int:
     """
-    Fetches SCRAPED pages from the database, splits them into DocumentChunks,
-    stores them into Postgres immediately per page, and marks each source page PROCESSED.
+    Finds COMPLETED pages that have not been chunked yet (chunked_at is NULL).
+    Cleans raw markdown, performs structural markdown header splitting,
+    breaks into character chunks, and commits valid records to PostgreSQL.
     """
-    unprocessed_pages = await repo.list_pages_by_status(
-        tenant_id=tenant_id,
-        status=ScrapedPageStatus.SCRAPED,
-    )
+    async with async_session() as session:
+        stmt = (
+            select(ScrapedPage)
+            .where(
+                ScrapedPage.org_id == org_id,
+                ScrapedPage.web_id == web_id,
+                ScrapedPage.status == PageProcessStatus.COMPLETED,
+                ScrapedPage.chunked_at.is_(None),
+                ScrapedPage.markdown_content.is_not(None),
+            )
+            .limit(batch_size)
+        )
+        res = await session.execute(stmt)
+        pages = list(res.scalars().all())
 
-    if not unprocessed_pages:
-        print(f"[{tenant_id}] No unprocessed scraped pages found.")
-        return []
+        if not pages:
+            return 0
 
-    print(f"[{tenant_id}] Processing {len(unprocessed_pages)} pages for chunking...")
+        headers_to_split_on = [
+            ("#", "Header 1"),
+            ("##", "Header 2"),
+            ("###", "Header 3"),
+            ("####", "Header 4"),
+        ]
+        header_splitter = MarkdownHeaderTextSplitter(
+            headers_to_split_on=headers_to_split_on,
+            strip_headers=False,
+        )
 
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=chunk_size,
-        chunk_overlap=chunk_overlap,
-        separators=["\n\n", "\n", ". ", " ", ""],
-    )
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            separators=["\n\n", "\n", ". ", " ", ""],
+        )
 
-    all_chunks: List[DocumentChunk] = []
+        total_chunks_created = 0
 
-    for page in unprocessed_pages:
-        try:
-            title, clean_content = extract_metadata_and_body(page.raw_markdown, page.source_url)
-            if not clean_content:
-                await repo.update_page_status(page.id, ScrapedPageStatus.FAILED)
-                continue
+        for page in pages:
+            raw_text = page.markdown_content or ""
+            cleaned = clean_markdown(raw_text)
 
-            split_texts = text_splitter.split_text(clean_content)
-            page_chunks: List[DocumentChunk] = []
+            if cleaned.startswith("---"):
+                parts = cleaned.split("---", 2)
+                if len(parts) >= 3:
+                    cleaned = parts[2].strip()
 
-            for idx, text_chunk in enumerate(split_texts):
-                cleaned_text = text_chunk.strip()
-                if len(cleaned_text) > 40:  # Skip trivial fragments
-                    page_chunks.append(
-                        DocumentChunk(
-                            scraped_page_id=page.id,
-                            tenant_id=tenant_id,
-                            source_url=page.source_url,
-                            title=title,
-                            chunk_index=idx,
-                            content=cleaned_text,
+            header_docs = header_splitter.split_text(cleaned)
+            sections = header_docs if header_docs else [Document(page_content=cleaned)]
+            valid_chunks: List[Chunk] = []
+
+            for sec in sections:
+                split_texts = text_splitter.split_text(sec.page_content)
+                for text in split_texts:
+                    stripped_chunk = text.strip()
+                    if is_substantive_chunk(stripped_chunk):
+                        valid_chunks.append(
+                            Chunk(
+                                page_id=page.id,
+                                content=stripped_chunk,
+                                token_count=estimate_token_count(stripped_chunk),
+                                has_qgen=False,
+                            )
                         )
-                    )
 
-            if page_chunks:
-                # Immediate atomic write to Postgres for this page's chunks
-                await repo.delete_chunks_for_page(page.id)
-                saved = await repo.save_chunks(page_chunks)
-                all_chunks.extend(saved)
-                await repo.update_page_status(page.id, ScrapedPageStatus.PROCESSED)
-                print(f"[{tenant_id}] Checkpointed {len(saved)} chunks for: {page.source_url}")
-            else:
-                await repo.update_page_status(page.id, ScrapedPageStatus.FAILED)
+            await session.execute(delete(Chunk).where(Chunk.page_id == page.id))
 
-        except Exception as e:
-            print(f"[{tenant_id}] Error chunking page {page.source_url}: {e}")
-            await repo.update_page_status(page.id, ScrapedPageStatus.FAILED)
+            if valid_chunks:
+                session.add_all(valid_chunks)
+                total_chunks_created += len(valid_chunks)
 
-    print(f"[{tenant_id}] Successfully persisted {len(all_chunks)} chunks (status=PENDING_QGEN).")
-    return all_chunks
+            page.chunked_at = datetime.now(timezone.utc)
 
+        await session.commit()
 
-if __name__ == "__main__":
-    from app.core.config import settings
-    from app.services.sql_db.postgres_provider import PostgresDatabaseRepository
-
-    async def standalone_chunk():
-        repo = PostgresDatabaseRepository(dsn=settings.database_url)
-        await repo.connect()
-        try:
-            await process_and_chunk_pages(tenant_id="mseuf", repo=repo)
-        finally:
-            await repo.close()
-
-    asyncio.run(standalone_chunk())
+    return total_chunks_created

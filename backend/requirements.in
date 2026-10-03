@@ -18,9 +18,11 @@ google-auth
 # --- Scraping & Ingestion ---
 crawl4ai
 langchain-text-splitters
+playwright
 
 # --- LLM, Embedding API & Cache ---
 google-genai
 openai
 redis
 redisvl
+fastembed

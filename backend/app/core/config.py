@@ -3,7 +3,6 @@ from typing import Optional
 from pydantic import HttpUrl, computed_field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-
 class Settings(BaseSettings):
     # App & Server Configuration
     development: bool = True
@@ -50,6 +49,8 @@ class Settings(BaseSettings):
     sparse_collection_name: str = "sparse_collection"
     chunk_collection_name: str = "chunks_collection"
 
+    collection_name: str = "mseuf_rag_test"
+
     # Retrieval Constraints
     default_top_k: int = 5
     min_top_k: int = 1
@@ -71,6 +72,13 @@ class Settings(BaseSettings):
     embedding_api_key: str
     embedding_dimension: Optional[int] = None
     embedding_task_type: Optional[str] = None
+
+    # Quantization Settings
+    quantization_enabled: bool = True
+    quantization_type: str = "scalar"  # "scalar" or "binary"
+    quantization_always_ram: bool = True
+    quantization_rescore: bool = True
+    quantization_oversampling: float = 2.0
 
     vector_dim: int
 
