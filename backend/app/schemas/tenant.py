@@ -18,6 +18,9 @@ class OrgResponse(BaseModel):
     class Config:
         from_attributes = True
 
+class AddMemberResponse(BaseModel):
+   message: str
+
 
 # --- Website Schemas ---
 class WebsiteCreate(BaseModel):
@@ -34,6 +37,14 @@ class WebsiteResponse(BaseModel):
     url: str
     status: WebsiteScrapeStatus
     error_message: Optional[str] = None
+
+# --- Website Scrape Schedule Schemas ---
+class WebsiteScrapeSchedulesResponse(BaseModel):
+    id: int
+    org_id: int
+    url: str
+    interval_days: int
+    time_of_scrape: time
 
     class Config:
         from_attributes = True

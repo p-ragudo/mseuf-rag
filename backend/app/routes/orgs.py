@@ -6,7 +6,7 @@ from app.core.database import get_db
 from app.models.org import Org
 from app.models.org_member import OrgMember
 from app.models.user import User
-from app.schemas.tenant import OrgCreate, OrgResponse
+from app.schemas.tenant import OrgCreate, OrgResponse, AddMemberResponse
 from app.routes.auth import get_current_user  # Adjust import to match your auth user dependency
 
 router = APIRouter(prefix="/orgs", tags=["Organizations"])
@@ -60,3 +60,119 @@ async def list_user_organizations(
     )
     res = await db.execute(stmt)
     return res.scalars().all()
+
+# Adding members in an organization and other endpoints can be implemented similarly, ensuring proper role checks and validations are in place.
+
+@router.post("/{org_id}/add-member", response_model=AddMemberResponse, status_code=status.HTTP_201_CREATED)
+async def add_member_to_organization(
+    org_id: int,
+    user_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Adds a member to the organization if the current user is an admin."""
+    # Check if the organization exists
+    org = await db.get(Org, org_id)
+    if not org:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Organization not found",
+        )
+
+    # Check if the current user is an admin of the organization
+    membership = await db.execute(
+        select(OrgMember).where(
+            OrgMember.org_id == org_id, OrgMember.user_id == current_user.id
+        )
+    )
+    membership_record = membership.scalar_one_or_none()
+    if not membership_record or "admin" not in membership_record.roles:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to add members to this organization",
+        )
+
+    # Check if the user to be added exists
+    user_to_add = await db.get(User, user_id)
+    if not user_to_add:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User to add not found",
+        )
+
+    # Check if the user is already a member of the organization
+    existing_member = await db.execute(
+        select(OrgMember).where(
+            OrgMember.org_id == org_id, OrgMember.user_id == user_id
+        )
+    )
+    if existing_member.scalar_one_or_none():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="User is already a member of this organization",
+        )
+
+    # Add the new member with default role (e.g., "member")
+    new_membership = OrgMember(
+        user_id=user_id,
+        org_id=org_id,
+        roles="member",  # Default role for new members
+    )
+    db.add(new_membership)
+    await db.commit()
+    await db.refresh(new_membership)
+
+    return AddMemberResponse(
+        message=f"User {user_to_add.email} added to organization {org.name}."
+    )
+
+# Remove member endpoint can be implemented similarly, ensuring proper role checks and validations are in place.
+@router.delete("/{org_id}/remove-member", response_model=AddMemberResponse, status_code=status.HTTP_200_OK)
+async def remove_member_from_organization(
+    org_id: int,
+    user_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Removes a member from the organization if the current user is an admin."""
+    # Check if the organization exists
+    org = await db.get(Org, org_id)
+    if not org:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Organization not found",
+        )
+
+    # Check if the current user is an admin of the organization
+    membership = await db.execute(
+        select(OrgMember).where(
+            OrgMember.org_id == org_id, OrgMember.user_id == current_user.id
+        )
+    )
+    membership_record = membership.scalar_one_or_none()
+    if not membership_record or "admin" not in membership_record.roles:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to remove members from this organization",
+        )
+
+    # Check if the user to be removed exists and is a member of the organization
+    member_to_remove = await db.execute(
+        select(OrgMember).where(
+            OrgMember.org_id == org_id, OrgMember.user_id == user_id
+        )
+    )
+    member_record = member_to_remove.scalar_one_or_none()
+    if not member_record:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User to remove is not a member of this organization",
+        )
+
+    # Remove the member
+    await db.delete(member_record)
+    await db.commit()
+
+    return AddMemberResponse(
+        message=f"User with ID {user_id} removed from organization {org.name}."
+    )
