@@ -348,7 +348,8 @@ async def qdrant_sync_worker(org_id: int, web_id: int, is_qgen_done: asyncio.Eve
     )
 
     tenant_key = str(org_id)
-    EMBED_DB_BATCH_SIZE = 50
+    # Pull 100 questions at a time to match embedder BATCH_SIZE
+    EMBED_DB_BATCH_SIZE = 100
     consecutive_failures = 0
 
     while True:
@@ -460,21 +461,38 @@ async def qdrant_sync_worker(org_id: int, web_id: int, is_qgen_done: asyncio.Eve
                     total_synced += len(points_to_upsert)
                     consecutive_failures = 0
 
+                    # Pacing delay: avoid bursting past Gemini free-tier RPM limits
+                    await asyncio.sleep(2.0)
+
                 except Exception as e:
                     await session.rollback()
                     consecutive_failures += 1
+                    err_msg = str(e)
                     logger.error(
-                        f"[Qdrant Sync Error] ({consecutive_failures}/{SYNC_MAX_CONSECUTIVE_FAILURES}): {e}"
+                        f"[Qdrant Sync Error] attempt {consecutive_failures}: {err_msg[:200]}"
                     )
                     traceback.print_exc()
-                    if consecutive_failures >= SYNC_MAX_CONSECUTIVE_FAILURES:
-                        raise
-                    await asyncio.sleep(5.0)
+
+                    # Never crash the worker. Back off and wait for quota/rate limits to recover.
+                    if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg:
+                        logger.warning(
+                            "[Qdrant Sync Rate Limit] Quota hit. Sleeping 30s before retrying batch..."
+                        )
+                        await asyncio.sleep(30.0)
+                        consecutive_failures = 0
+                    elif consecutive_failures >= SYNC_MAX_CONSECUTIVE_FAILURES:
+                        logger.warning(
+                            "[Qdrant Sync Backoff] Consecutive errors reached threshold. Sleeping 15s..."
+                        )
+                        await asyncio.sleep(15.0)
+                        consecutive_failures = 0
+                    else:
+                        await asyncio.sleep(4.0)
 
         except Exception as loop_e:
-            logger.error(f"[Qdrant Sync Worker Exception]: {loop_e}")
+            logger.error(f"[Qdrant Sync Worker Loop Exception]: {loop_e}")
             traceback.print_exc()
-            await asyncio.sleep(3.0)
+            await asyncio.sleep(5.0)
 
     return total_synced
 

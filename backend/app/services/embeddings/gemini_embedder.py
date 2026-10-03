@@ -40,7 +40,7 @@ class GeminiEmbedder(BaseEmbedder):
         base_delay = 3.0
 
         # Maximum batch size supported by Gemini embed_content
-        BATCH_SIZE = 50
+        BATCH_SIZE = 100
 
         for i in range(0, len(texts), BATCH_SIZE):
             chunk = texts[i : i + BATCH_SIZE]
