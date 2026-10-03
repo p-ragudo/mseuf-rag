@@ -1,10 +1,15 @@
+import asyncio
 import json
+import logging
+import random
 from typing import List, Optional
 from google import genai
 from google.genai import types
 from pydantic import BaseModel, Field
 
 from app.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 class QueryIntent(BaseModel):
@@ -30,7 +35,9 @@ class QueryClassifier:
     def __init__(self):
         api_key = settings.llm_qa_api_key or settings.llm_qgen_api_key
         self.client = genai.Client(api_key=api_key)
-        self.model_name = "gemini-3.8-flash"
+        self.model_name = "gemini-2.5-flash"
+        self.max_retries = 3
+        self.base_delay = 1.5
 
     async def classify_intent(
         self,
@@ -56,24 +63,49 @@ class QueryClassifier:
 
         prompt = f"User Query: {query}"
 
-        try:
-            response = await self.client.aio.models.generate_content(
-                model=self.model_name,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    system_instruction=system_instruction,
-                    response_mime_type="application/json",
-                    response_schema=QueryIntent,
-                    temperature=0.0,
-                    max_output_tokens=300,
-                ),
-            )
-            data = json.loads(response.text)
-            return QueryIntent(**data)
-        except Exception as e:
-            print(f"[QueryClassifier Warning] Intent classification bypassed: {e}")
-            return QueryIntent(
-                is_ambiguous=False,
-                detected_sub_entity=None,
-                detected_academic_level=None,
-            )
+        for attempt in range(self.max_retries):
+            try:
+                response = await self.client.aio.models.generate_content(
+                    model=self.model_name,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        system_instruction=system_instruction,
+                        response_mime_type="application/json",
+                        response_schema=QueryIntent,
+                        temperature=0.0,
+                        max_output_tokens=300,
+                    ),
+                )
+                data = json.loads(response.text)
+                return QueryIntent(**data)
+            except Exception as e:
+                err_text = str(e)
+                transient_indicators = (
+                    "503",
+                    "UNAVAILABLE",
+                    "high demand",
+                    "overloaded",
+                    "429",
+                    "RESOURCE_EXHAUSTED",
+                )
+                is_transient = any(indicator in err_text for indicator in transient_indicators)
+
+                if is_transient and attempt < self.max_retries - 1:
+                    sleep_time = (self.base_delay * (2 ** attempt)) + random.uniform(0.1, 0.5)
+                    logger.warning(
+                        "[QueryClassifier] Hit transient error (%s). Retrying %d/%d in %.2fs...",
+                        err_text[:120],
+                        attempt + 1,
+                        self.max_retries,
+                        sleep_time,
+                    )
+                    await asyncio.sleep(sleep_time)
+                else:
+                    logger.warning("[QueryClassifier Warning] Intent classification bypassed: %s", e)
+                    break
+
+        return QueryIntent(
+            is_ambiguous=False,
+            detected_sub_entity=None,
+            detected_academic_level=None,
+        )

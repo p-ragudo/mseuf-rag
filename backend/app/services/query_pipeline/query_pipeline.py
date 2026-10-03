@@ -198,7 +198,6 @@ class QueryPipeline:
             )
 
         # Step 7: Cross-Encoder Reranking
-        # Prepare candidate objects for the cross-encoder (up to top 25-30 fused chunks)
         rerank_pool_size = max(req.top_k * 4, 25)
         candidates_to_rerank = [
             RerankCandidate(
@@ -249,6 +248,8 @@ class QueryPipeline:
                     source_url=url,
                     campus=campus,
                     academic_level=academic_level,
+                    initial_score=item.initial_score,
+                    rerank_score=item.rerank_score,
                     matched_questions=item.matched_questions,
                 )
             )

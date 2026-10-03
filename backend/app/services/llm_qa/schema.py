@@ -17,6 +17,8 @@ class RetrievedContextItem(BaseModel):
     source_url: Optional[str] = Field(default=None, description="URL or reference link")
     campus: Optional[str] = Field(default="main", description="Sub-entity, campus, or branch origin")
     academic_level: Optional[str] = Field(default="general", description="Target academic or organizational level")
+    initial_score: Optional[float] = Field(default=None, description="Upstream RRF score before reranking")
+    rerank_score: Optional[float] = Field(default=None, description="Cross-encoder relevance score")
     matched_questions: List[MatchedQuestionDetail] = Field(
         default_factory=list,
         description="Detailed list of questions that triggered this chunk, along with their scores and retrieval source",

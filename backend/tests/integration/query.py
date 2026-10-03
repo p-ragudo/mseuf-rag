@@ -2,7 +2,7 @@ import asyncio
 from app.services.query_pipeline.query_pipeline import QueryPipeline
 from app.services.query_pipeline.schema import PipelineQueryRequest
 
-query = "requirements for admissions"
+query = "i took admissions exam. what to do next?"
 
 
 def display_retrieved_chunks(contexts):
@@ -19,6 +19,11 @@ def display_retrieved_chunks(contexts):
         print(f"      Source: {ctx.source_url}")
         print(f"      Branch/Entity: {ctx.campus.upper()} | Level: {ctx.academic_level.upper()}")
         print(f"      Length: {len(ctx.content)} chars")
+
+        ce_score_str = f"{ctx.rerank_score:.4f}" if ctx.rerank_score is not None else "N/A"
+        rrf_score_str = f"{ctx.initial_score:.4f}" if ctx.initial_score is not None else "N/A"
+        print(f"      Cross-Encoder Score: {ce_score_str} | Upstream RRF Score: {rrf_score_str}")
+
         print("      Matched Question(s) & Similarity Scores:")
         if ctx.matched_questions:
             for q_info in ctx.matched_questions:
@@ -42,7 +47,7 @@ async def main():
     )
 
     print("\n" + "=" * 80)
-    print("--- TEST 1: Cold Execution (Expecting Pure Multi-Vector RRF + Intent Clarity) ---")
+    print("--- TEST 1: Cold Execution (Expecting Multi-Vector RRF + Cross-Encoder Rerank) ---")
     print("=" * 80)
     res_1 = await pipeline.execute(request_data)
     print(f"Query:     {query}")
@@ -50,7 +55,7 @@ async def main():
     print(f"Source:    {res_1.source}")
     print(f"Is Cached: {res_1.is_cached}")
     print(f"Sources:   {res_1.sources}")
-    print("\n--- Retrieved Chunks (Grounding Context & Matched Question Metrics) ---")
+    print("\n--- Retrieved Chunks (Reranked Contexts with Scores) ---")
     display_retrieved_chunks(res_1.contexts)
 
     print("\n" + "=" * 80)
