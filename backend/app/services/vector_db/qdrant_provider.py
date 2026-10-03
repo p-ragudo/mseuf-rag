@@ -124,6 +124,7 @@ class QdrantVectorDB(BaseVectorDB):
         limit: int = 5,
         filters: Optional[Dict[str, Any]] = None,
         with_payload: bool = True,
+        using: Optional[str] = "question_dense",  # <--- Added using parameter
     ) -> List[SearchResult]:
         qdrant_filter = None
         if filters:
@@ -148,6 +149,7 @@ class QdrantVectorDB(BaseVectorDB):
         response = await self.client.query_points(
             collection_name=collection_name,
             query=query_vector,
+            using=using,                          # <--- Pass using to Qdrant
             limit=limit,
             query_filter=qdrant_filter,
             with_payload=with_payload,

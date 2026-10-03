@@ -11,9 +11,10 @@ class GeminiEmbedder(BaseEmbedder):
         self.client = genai.Client(api_key=config.api_key)
         self._cached_dimension: Optional[int] = config.output_dimensionality
 
+        # Strip 'models/' prefix if present so the SDK resolves it cleanly
         model_id = config.model_name
-        if not model_id.startswith("models/"):
-            model_id = f"models/{model_id}"
+        if model_id.startswith("models/"):
+            model_id = model_id.replace("models/", "", 1)
         self.model_name = model_id
 
     def _build_config(self) -> Optional[types.EmbedContentConfig]:
@@ -30,19 +31,15 @@ class GeminiEmbedder(BaseEmbedder):
             return []
 
         config = self._build_config()
-        results: List[EmbeddingResult] = []
 
-        for text in texts:
-            response = self.client.models.embed_content(
-                model=self.model_name,
-                contents=text,
-                config=config,
-            )
-            # Each call yields a list with exactly one ContentEmbedding for that text
-            for emb in response.embeddings:
-                results.append(EmbeddingResult(values=emb.values))
+        # Pass texts list directly to leverage batch embedding
+        response = self.client.models.embed_content(
+            model=self.model_name,
+            contents=texts,
+            config=config,
+        )
 
-        return results
+        return [EmbeddingResult(values=emb.values) for emb in response.embeddings]
 
     @property
     def dimension(self) -> int:
