@@ -39,7 +39,7 @@ class GeminiQuestionGenerator(BaseQuestionGenerator):
 
         api_key = settings.llm_qgen_api_key
         if not api_key:
-            raise ValueError("No API key found. Please set LLM_API_KEY in your .env file.")
+            raise ValueError("No API key found. Please set LLM_QGEN_API_KEY in your .env file.")
 
         self.client = genai.Client(api_key=api_key)
 
@@ -89,7 +89,7 @@ class GeminiQuestionGenerator(BaseQuestionGenerator):
                         system_instruction=SYSTEM_INSTRUCTION,
                         response_mime_type="application/json",
                         temperature=self.temperature,
-                        max_output_tokens=6000,
+                        max_output_tokens=8000,
                         automatic_function_calling=types.AutomaticFunctionCallingConfig(
                             disable=True
                         ),
@@ -98,13 +98,7 @@ class GeminiQuestionGenerator(BaseQuestionGenerator):
                 break
             except Exception as e:
                 err_text = str(e)
-                retryable_errors = (
-                    "429",
-                    "RESOURCE_EXHAUSTED",
-                    "503",
-                    "UNAVAILABLE",
-                    "high demand",
-                )
+                retryable_errors = ("429", "RESOURCE_EXHAUSTED", "503", "UNAVAILABLE", "high demand")
                 if any(err in err_text for err in retryable_errors) and attempt < max_retries - 1:
                     wait_sec = base_delay * (2 ** attempt)
                     print(
@@ -113,35 +107,39 @@ class GeminiQuestionGenerator(BaseQuestionGenerator):
                     )
                     await asyncio.sleep(wait_sec)
                 else:
-                    raise e
+                    raise
 
-        raw_text = response.text or "" if response else "{}"
-        json_str = extract_clean_json(raw_text)
+        raw_text = (response.text or "") if response else ""
+        if not raw_text.strip():
+            raise ValueError("QGen returned an empty response (possibly truncated by thinking tokens).")
 
-        parsed_map: Dict[str, List[str]] = {}
+        # Parse failures RAISE. The old code swallowed them and returned {}, which made
+        # the worker mark every chunk of the batch as done with zero questions.
         try:
-            parsed = json.loads(json_str)
-            if isinstance(parsed, dict):
-                if "chunks" in parsed and isinstance(parsed["chunks"], dict):
-                    parsed_map = parsed["chunks"]
-                else:
-                    parsed_map = parsed
+            parsed = json.loads(extract_clean_json(raw_text))
         except Exception as e:
-            print(f"[QGen Batch Parse Error]: {e}. Raw response: {raw_text[:200]}")
-            parsed_map = {}
+            raise ValueError(f"QGen JSON parse error: {e}. Raw: {raw_text[:200]}") from e
+
+        if not isinstance(parsed, dict):
+            raise ValueError("QGen response is not a JSON object keyed by chunk id.")
+        parsed_map: Dict[str, List[str]] = (
+            parsed["chunks"] if isinstance(parsed.get("chunks"), dict) else parsed
+        )
 
         output_map: Dict[str, List[GeneratedQuestion]] = {}
         for c in chunks:
-            q_strings = parsed_map.get(str(c.id), [])
+            key = str(c.id)
+            if key not in parsed_map:
+                continue  # not answered -> caller retries; do NOT treat as "no questions"
+            q_strings = parsed_map[key]
             chunk_questions: List[GeneratedQuestion] = []
             if isinstance(q_strings, list):
                 for q_text in q_strings:
                     clean_text = str(q_text).strip()
                     if clean_text:
-                        q_id = generate_question_id(chunk_id=c.id, question=clean_text)
                         chunk_questions.append(
                             GeneratedQuestion(
-                                id=q_id,
+                                id=generate_question_id(chunk_id=c.id, question=clean_text),
                                 chunk_id=c.id,
                                 content=clean_text,
                                 tags=c.tags,

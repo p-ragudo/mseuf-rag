@@ -10,7 +10,7 @@ from sqlalchemy.dialects.postgresql import insert
 from app.core.database import async_session
 from app.models.scraped_page import ScrapedPage, PageProcessStatus
 
-DEFAULT_USER_AGENT = "Mozilla/5.0 (compatible; ResearchBot/1.0)"
+DEFAULT_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
 
 
 def _normalize_url(url: str) -> str:
@@ -18,12 +18,36 @@ def _normalize_url(url: str) -> str:
     return parsed._replace(fragment="").geturl().rstrip("/")
 
 
+def _is_crawl_trap(url: str) -> bool:
+    """
+    Blocks infinite calendar query loops, filters, and dynamic pagination traps.
+    e.g. /events?view=2025-05, /calendar?month=...
+    """
+    parsed = urlparse(url)
+    query = parsed.query.lower()
+    path = parsed.path.lower()
+
+    # Block recursive calendar/events queries
+    trap_params = ["view=", "month=", "year=", "date=", "filter=", "calendar_"]
+    if any(param in query for param in trap_params):
+        return True
+
+    # Block media / binary downloads discovered accidentally
+    ignored_extensions = (
+        ".pdf", ".jpg", ".jpeg", ".png", ".gif", ".webp", ".zip",
+        ".docx", ".xlsx", ".pptx", ".mp4", ".svg"
+    )
+    if any(path.endswith(ext) for ext in ignored_extensions):
+        return True
+
+    return False
+
+
 async def _fetch_sitemap_urls(
     client: httpx.AsyncClient,
     sitemap_url: str,
     visited_sitemaps: Set[str],
 ) -> Set[str]:
-    """Recursively parses XML sitemaps and sitemap indexes with cycle prevention."""
     clean_sitemap_url = _normalize_url(sitemap_url)
     if clean_sitemap_url in visited_sitemaps:
         return set()
@@ -39,7 +63,7 @@ async def _fetch_sitemap_urls(
         root = ET.fromstring(resp.text)
         namespace = {"ns": root.tag.split("}")[0].strip("{")} if "}" in root.tag else {}
 
-        # Nested sitemaps (sitemap index)
+        # Sitemap index
         sitemap_tags = (
             root.findall(".//ns:sitemap/ns:loc", namespace)
             if namespace
@@ -62,7 +86,9 @@ async def _fetch_sitemap_urls(
         )
         for tag in url_tags:
             if tag.text:
-                discovered.add(_normalize_url(tag.text.strip()))
+                norm = _normalize_url(tag.text.strip())
+                if not _is_crawl_trap(norm):
+                    discovered.add(norm)
 
     except Exception:
         pass
@@ -74,7 +100,6 @@ async def _discover_from_sitemaps(
     base_url: str,
     robot_parser: Optional[RobotFileParser] = None,
 ) -> Set[str]:
-    """Parses robots.txt sitemaps and common fallback paths without premature breaks."""
     parsed = urlparse(base_url)
     root_origin = f"{parsed.scheme}://{parsed.netloc}"
     discovered: Set[str] = set()
@@ -115,7 +140,6 @@ async def _discover_from_internal_links(
     base_url: str,
     robot_parser: Optional[RobotFileParser] = None,
 ) -> Set[str]:
-    """Fallback crawl using crawl4ai when sitemaps do not exist."""
     domain = urlparse(base_url).netloc
     found: Set[str] = set()
 
@@ -130,8 +154,9 @@ async def _discover_from_internal_links(
                 full_url = urljoin(base_url, href)
                 if urlparse(full_url).netloc == domain:
                     clean = _normalize_url(full_url)
-                    if not robot_parser or robot_parser.can_fetch(DEFAULT_USER_AGENT, clean):
-                        found.add(clean)
+                    if not _is_crawl_trap(clean):
+                        if not robot_parser or robot_parser.can_fetch(DEFAULT_USER_AGENT, clean):
+                            found.add(clean)
 
     return found
 
@@ -158,29 +183,23 @@ async def run_discovery(
     org_id: int, 
     web_id: int, 
     base_url: str,
-    max_pages: Optional[int] = None,  # None means unlimited discovery
+    max_pages: Optional[int] = None,
 ) -> int:
-    """Discovers all website URLs and writes them to PostgreSQL in safe transactional chunks."""
     clean_base = _normalize_url(base_url)
     robot_parser = await _get_robot_parser(clean_base)
 
-    # 1. Discover via sitemaps
     urls = await _discover_from_sitemaps(clean_base, robot_parser=robot_parser)
-    
-    # 2. Fall back to internal link crawling if no sitemaps are present
     if not urls:
         urls = await _discover_from_internal_links(clean_base, robot_parser=robot_parser)
 
-    # Always ensure the root landing page is included
     if robot_parser.can_fetch(DEFAULT_USER_AGENT, clean_base):
         urls.add(clean_base)
 
-    if not urls:
+    filtered_urls = [u for u in urls if not _is_crawl_trap(u)]
+    if not filtered_urls:
         return 0
 
-    sorted_urls = sorted(urls)
-
-    # Only apply cap if explicitly provided as an integer > 0
+    sorted_urls = sorted(filtered_urls)
     if max_pages and max_pages > 0 and len(sorted_urls) > max_pages:
         sorted_urls = [clean_base] + [u for u in sorted_urls if u != clean_base][:max_pages - 1]
 
@@ -197,7 +216,6 @@ async def run_discovery(
     ]
 
     total_inserted = 0
-    # Safe chunk size: 200 records = 1,200 bound parameters per execute
     BATCH_SIZE = 200
 
     async with async_session() as session:
@@ -212,7 +230,6 @@ async def run_discovery(
             res = await session.execute(stmt)
             inserted_ids = res.scalars().all()
             total_inserted += len(inserted_ids)
-            # Commit after each batch so downstream workers can pick up pending links immediately
             await session.commit()
 
     return total_inserted

@@ -3,10 +3,11 @@ from pydantic import BaseModel, Field
 
 from app.services.llm_qa.schema import RetrievedContextItem
 
+
 class PipelineQueryRequest(BaseModel):
     query: str = Field(..., min_length=2, max_length=1000, description="User question")
-    org_id: int = Field(default=1, description="Tenant organization ID")
-    top_k: int = Field(default=5, description="Number of context passages to retrieve")
+    org_id: int = Field(..., description="Tenant organization ID (required, no default tenant)")
+    top_k: int = Field(default=5, ge=1, le=20, description="Number of context passages to retrieve")
     session_id: Optional[str] = Field(None, description="Optional chat session identifier")
 
 

@@ -1,5 +1,5 @@
 from typing import TYPE_CHECKING
-from sqlalchemy import ForeignKey, Text, Boolean
+from sqlalchemy import Boolean, ForeignKey, Index, Integer, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.database import Base
 
@@ -19,3 +19,7 @@ class GeneratedQuestion(Base):
 
     # Relationships
     chunk: Mapped["Chunk"] = relationship(back_populates="questions")
+
+    __table_args__ = (
+        Index("ix_generated_questions_is_synced", "is_synced_qdrant"),
+    )
