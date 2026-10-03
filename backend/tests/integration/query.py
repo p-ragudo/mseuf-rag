@@ -2,7 +2,7 @@ import asyncio
 from app.services.query_pipeline.query_pipeline import QueryPipeline
 from app.services.query_pipeline.schema import PipelineQueryRequest
 
-query = "i took admissions exam. what to do next?"
+query = "general courses offered"
 
 
 def display_retrieved_chunks(contexts):

@@ -35,7 +35,7 @@ class QueryClassifier:
     def __init__(self):
         api_key = settings.llm_qa_api_key or settings.llm_qgen_api_key
         self.client = genai.Client(api_key=api_key)
-        self.model_name = "gemini-2.5-flash"
+        self.model_name = "gemini-3.5-flash-lite"
         self.max_retries = 3
         self.base_delay = 1.5
 
