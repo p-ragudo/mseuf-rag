@@ -80,3 +80,17 @@ or
 ```
 uv run fastapi run app/main.py
 ```
+
+## Embedding models
+
+### Install Ollama
+```bash
+# 1. Install Ollama inside Codespace
+curl -fsSL https://ollama.com/install.sh | sh
+
+# 2. Start server in background
+ollama serve &
+
+# 3. Pull a top-tier multilingual embedding model (e.g. bge-m3 or nomic-embed-text)
+ollama pull bge-m3
+```

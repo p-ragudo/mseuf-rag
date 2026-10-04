@@ -113,6 +113,9 @@ class Settings(BaseSettings):
     reranker_batch_size: int = 16
     reranker_max_length: int = 512
 
+    # Huggingface Token
+    hf_token: Optional[str] = None
+
     @computed_field
     @property
     def active_qdrant_endpoint(self) -> Optional[str]:

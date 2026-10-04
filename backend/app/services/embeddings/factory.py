@@ -33,6 +33,10 @@ class EmbedderFactory:
                 from app.services.embeddings.sentence_transformer_embedder import SentenceTransformerEmbedder
                 cls.register_provider("sentence_transformers", SentenceTransformerEmbedder)
                 embedder_class = SentenceTransformerEmbedder
+            elif provider_key == "ollama":
+                from app.services.embeddings.ollama_embedder import OllamaEmbedder
+                cls.register_provider("ollama", OllamaEmbedder)
+                embedder_class = OllamaEmbedder
             else:
                 available = list(cls._registry.keys()) + ["gemini", "fastembed"]
                 raise ValueError(
