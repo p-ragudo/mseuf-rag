@@ -1,0 +1,44 @@
+services:
+  # Main FastAPI Service
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: mseuf_rag_api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - ./backend/.env
+    environment:
+      - HOST=0.0.0.0
+      - PORT=8000
+    volumes:
+      # Persistent cache for FastEmbed ONNX weights and Hugging Face models
+      - fastembed_cache:/root/.cache
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/docs || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  # Telegram Bot Worker
+  telegram_worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: mseuf_rag_bot
+    restart: unless-stopped
+    env_file:
+      - ./backend/.env
+    command: >
+      python -c "import asyncio; from app.utils.telegram_bot import start_telegram_bot_listener; asyncio.run(start_telegram_bot_listener())"
+    volumes:
+      - fastembed_cache:/root/.cache
+    depends_on:
+      - api
+
+volumes:
+  fastembed_cache:
+    name: mseuf_rag_fastembed_cache
