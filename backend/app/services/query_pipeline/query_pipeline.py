@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 
 def _normalize_campus(value: Optional[str]) -> Optional[str]:
-    """Payload campus values are lowercase URL slugs; make the classifier output match."""
+    """Payload campus values are lowercase URL slugs; make classifier output match."""
     if not value:
         return None
     slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
@@ -38,11 +38,7 @@ def _normalize_campus(value: Optional[str]) -> Optional[str]:
 
 
 def _cache_scope(org_id: int, campus: Optional[str]) -> str:
-    """
-    Tenant tag used for the semantic cache. A campus-specific question gets its own
-    scope so "...Calauag campus" can never be answered from a "...Candelaria campus"
-    entry. (Underscores only: safe inside a RedisVL tag.)
-    """
+    """Tenant tag used for the semantic cache."""
     if campus:
         return f"{org_id}_{campus.replace('-', '_')}"
     return str(org_id)
@@ -58,7 +54,11 @@ class QueryPipeline:
         self.classifier = QueryClassifier()
         self.reranker = get_reranker()
         self.expander = ContextExpander(window=1, expand_top_n=3, max_chars=16000)
-        self.collection_name = settings.collection_name
+
+    @property
+    def collection_name(self) -> str:
+        """Always resolves dynamically from settings."""
+        return settings.collection_name
 
     async def _resolve_org_details(self, org_id: int) -> Tuple[str, List[str]]:
         async with async_session() as session:
@@ -73,15 +73,6 @@ class QueryPipeline:
         sparse_hits: list,
         k: int = 60,
     ) -> List[Tuple[str, float, dict, List[MatchedQuestionDetail]]]:
-        """
-        Chunk-level Reciprocal Rank Fusion (k=60).
-        Dense: hits accumulate across all matching question points of the same chunk
-               (thesis variable: accumulate vs max-pool).
-        Sparse: every question point of a chunk carries the identical chunk BM25 vector,
-               so duplicates are an artifact. The RRF rank is the position among DISTINCT
-               chunks (the old code used the position among points, which inflated ranks).
-               MatchedQuestionDetail.rank keeps the raw point position for telemetry.
-        """
         chunk_scores: Dict[str, float] = {}
         chunk_payloads: Dict[str, dict] = {}
         chunk_matched: Dict[str, List[MatchedQuestionDetail]] = {}
@@ -134,7 +125,7 @@ class QueryPipeline:
         )
 
         async def _sparse():
-            if not sparse_data.indices:  # e.g. a query made only of stop-words
+            if not sparse_data.indices:
                 return []
             return await self.vector_db.search_sparse(
                 collection_name=self.collection_name,
@@ -150,20 +141,13 @@ class QueryPipeline:
     async def execute(self, req: PipelineQueryRequest) -> PipelineQueryResponse:
         top_k = max(settings.min_top_k, min(req.top_k, settings.max_top_k))
 
-        # 1. Intent classifier (in parallel with the dense query embedding)
-        org_name, known_locations = await self._resolve_org_details(req.org_id)
-        intent, dense_embed = await asyncio.gather(
-            self.classifier.classify_intent(
-                req.query, org_name=org_name, known_locations=known_locations
-            ),
-            self.embedder.embed_one(req.query, task_type="RETRIEVAL_QUERY"),
-        )
+        # 1. Compute dense vector (768-dim)
+        dense_embed = await self.embedder.embed_one(req.query, task_type="RETRIEVAL_QUERY")
         dense_vec = dense_embed.values
-        campus = _normalize_campus(intent.detected_sub_entity)
-        cache_scope = _cache_scope(req.org_id, campus)
 
-        # 2. Semantic cache -> hit: return and exit
-        cache_entry = await self.semantic_cache.get(vector=dense_vec, org_id=cache_scope)
+        # 2. Semantic cache fast-path check FIRST (tenant default scope)
+        base_cache_scope = str(req.org_id)
+        cache_entry = await self.semantic_cache.get(vector=dense_vec, org_id=base_cache_scope)
         if cache_entry:
             cached_contexts = [
                 RetrievedContextItem(**item) if isinstance(item, dict) else item
@@ -178,25 +162,53 @@ class QueryPipeline:
                 contexts=cached_contexts,
             )
 
-        # 3. Miss: top-k dense (questions) + sparse (chunk BM25), tenant filter is mandatory
+        # 3. Cache MISS: Run classifier & sparse BM25 encoding
+        org_name, known_locations = await self._resolve_org_details(req.org_id)
+        intent, sparse_data = await asyncio.gather(
+            self.classifier.classify_intent(
+                req.query, org_name=org_name, known_locations=known_locations
+            ),
+            self.sparse_embedder.embed_query(req.query),
+        )
+
+        campus = _normalize_campus(intent.detected_sub_entity)
+        final_cache_scope = _cache_scope(req.org_id, campus)
+
+        # If campus is detected, check campus-specific cache scope
+        if campus and final_cache_scope != base_cache_scope:
+            cache_entry = await self.semantic_cache.get(vector=dense_vec, org_id=final_cache_scope)
+            if cache_entry:
+                cached_contexts = [
+                    RetrievedContextItem(**item) if isinstance(item, dict) else item
+                    for item in cache_entry.metadata.extra.get("contexts", [])
+                ]
+                return PipelineQueryResponse(
+                    query=req.query,
+                    answer=cache_entry.response,
+                    is_cached=True,
+                    source="cache",
+                    sources=cache_entry.metadata.extra.get("sources", []),
+                    contexts=cached_contexts,
+                )
+
+        # 4. Hybrid Retrieval in Active Collection
         tenant_filter: Dict[str, str] = {"group_id": str(req.org_id)}
         if campus:
             tenant_filter["campus"] = campus
 
-        sparse_data = await self.sparse_embedder.embed_query(req.query)
         candidate_limit = max(top_k * 6, 30)
-
         dense_hits, sparse_hits = await self._hybrid_search(
             dense_vec, sparse_data, tenant_filter, candidate_limit
         )
+
+        # If campus filter returned nothing, fallback to tenant-wide
         if not dense_hits and not sparse_hits and campus:
-            # A hard campus filter drops institution-wide pages; retry tenant-wide.
             logger.info("No hits with campus=%s, retrying tenant-wide", campus)
             dense_hits, sparse_hits = await self._hybrid_search(
                 dense_vec, sparse_data, {"group_id": str(req.org_id)}, candidate_limit
             )
 
-        # 4. RRF (chunk level)
+        # 5. RRF Fusion
         fused = self._reciprocal_rank_fusion(dense_hits, sparse_hits, k=60)
         if not fused:
             return PipelineQueryResponse(
@@ -206,7 +218,7 @@ class QueryPipeline:
                 source="fallback",
             )
 
-        # 5. Cross-encoder rerank
+        # 6. Cross-Encoder Reranking
         rerank_pool_size = max(top_k * 4, 25)
         candidates = [
             RerankCandidate(
@@ -233,14 +245,14 @@ class QueryPipeline:
                 source="fallback",
             )
 
-        # 6. Complete the context: all parts of a section + neighbouring chunks
+        # 7. Context Expansion (Postgres small-to-big)
         contexts = await self.expander.expand(req.org_id, reranked)
         source_urls: List[str] = []
         for c in contexts:
             if c.source_url and c.source_url not in source_urls:
                 source_urls.append(c.source_url)
 
-        # 7. Query + context -> LLM
+        # 8. LLM QA Answer Synthesis
         qa_response = await self.qa_synthesizer.generate_answer(
             QARequest(query=req.query, contexts=contexts), org_name=org_name
         )
@@ -248,12 +260,12 @@ class QueryPipeline:
         if intent.is_ambiguous and intent.clarification_message:
             final_answer += f"\n\n---\n*Note*: {intent.clarification_message}"
 
-        # 8. Save to cache (same scope that was looked up)
+        # 9. Store in Semantic Cache
         await self.semantic_cache.set(
             query=req.query,
             vector=dense_vec,
             response=final_answer,
-            org_id=cache_scope,
+            org_id=final_cache_scope,
             metadata=CacheMetadata(
                 extra={
                     "sources": qa_response.sources,
@@ -263,7 +275,6 @@ class QueryPipeline:
             ),
         )
 
-        # 9. Answer
         return PipelineQueryResponse(
             query=req.query,
             answer=final_answer,
