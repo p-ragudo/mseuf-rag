@@ -14,7 +14,7 @@ services:
       - HOST=0.0.0.0
       - PORT=8000
     volumes:
-      # Persistent cache for FastEmbed ONNX weights and Hugging Face tokens
+      # Persistent cache for FastEmbed ONNX weights and Hugging Face models
       - fastembed_cache:/root/.cache
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8000/docs || exit 1"]
@@ -23,7 +23,7 @@ services:
       retries: 3
       start_period: 15s
 
-  # Optional Telegram Bot / Ingestion Worker (Runs standalone alongside API)
+  # Telegram Bot Worker
   telegram_worker:
     build:
       context: ./backend

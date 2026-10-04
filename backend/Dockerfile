@@ -1,14 +1,12 @@
 # syntax=docker/dockerfile:1
 FROM python:3.12-slim-bookworm
 
-# Avoid prompts and ensure unbuffered stdout/stderr logging
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    UV_SYSTEM_PYTHON=0 \
-    UV_LINK_MODE=copy
+    UV_SYSTEM_PYTHON=1
 
-# Install essential system dependencies, build tools, and SSL certificates
+# 1. Install base OS build and database packages
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     ca-certificates \
@@ -17,32 +15,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     && rm -rf /var/lib/apt/lists/*
 
-# Install uv from the official Astral binary
+# 2. Grab the uv binary
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
 WORKDIR /app
 
-# Copy dependency specifications first to leverage Docker layer caching
-COPY pyproject.toml uv.lock ./
+# 3. Copy requirements first to leverage Docker layer caching
+COPY requirements.txt ./
 
-# Install project dependencies into the virtual environment (.venv)
-RUN uv sync --frozen --no-install-project
+# 4. Install all Python dependencies via uv directly to system site-packages
+RUN uv pip install -r requirements.txt
 
-# Install Playwright browser dependencies required by Crawl4AI
+# 5. Install Crawl4AI Playwright browser binaries and system libs
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
-RUN . .venv/bin/activate && \
-    python -m playwright install --with-deps chromium
+RUN python -m playwright install --with-deps chromium
 
-# Copy application source code
+# 6. Copy the rest of the backend codebase
 COPY . .
-
-# Final sync to install the current project package in editable/wheel mode
-RUN uv sync --frozen
-
-# Ensure the virtualenv's binaries are primary in PATH
-ENV PATH="/app/.venv/bin:$PATH"
 
 EXPOSE 8000
 
-# Default command launches FastAPI via uvicorn
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
