@@ -2,7 +2,7 @@ name: Deploy backend
 
 on:
   push:
-    branches: [main]            # was [deploy]
+    branches: [deploy]
     paths:
       - "backend/**"
       - "docker-compose.yml"
@@ -15,7 +15,7 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'     # was refs/heads/deploy
+    if: github.ref == 'refs/heads/deploy'
     steps:
       - uses: actions/checkout@v4
 
@@ -26,20 +26,22 @@ jobs:
           chmod 600 ~/.ssh/deploy_key
           ssh-keyscan -H ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts
 
-      - name: Sync backend/ to server
+      - name: Sync repo (without frontend)
         run: |
           rsync -az --delete \
-            --exclude '.venv' --exclude '.env' \
-            --exclude '__pycache__' --exclude '.pytest_cache' \
+            --exclude '.git' --exclude '/.github' --exclude '/frontend' \
+            --exclude '/backend/.env' --exclude '.venv' \
+            --exclude '__pycache__' --exclude 'node_modules' \
             -e "ssh -i ~/.ssh/deploy_key" \
-            backend/ ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}:~/app/
+            ./ ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}:~/app/
 
-      - name: Install deps, migrate, restart
+      - name: Build, migrate, restart
         run: |
           ssh -i ~/.ssh/deploy_key ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} '
             set -e
             cd ~/app
-            ~/.local/bin/uv pip sync requirements.txt
-            .venv/bin/alembic upgrade head
-            sudo systemctl restart fastapi
+            docker compose build
+            docker compose run --rm api alembic upgrade head
+            docker compose up -d
+            docker image prune -f
           '
