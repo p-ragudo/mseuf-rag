@@ -29,4 +29,5 @@ class GeneratedQuestion(Base):
     __table_args__ = (
         Index("ix_gen_questions_bge_m3", "is_synced_bge_m3"),
         Index("ix_gen_questions_gemini", "is_synced_gemini"),
+        Index("ix_gen_questions_gemini_768", "is_synced_gemini_768"),
     )
