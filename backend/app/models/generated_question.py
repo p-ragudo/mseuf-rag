@@ -20,7 +20,8 @@ class GeneratedQuestion(Base):
     is_synced_qdrant: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     
     # Model-specific tracking flags for multi-model benchmarking
-    is_synced_gemini: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    is_synced_gemini: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False) # 3072-dim run
+    is_synced_gemini_768: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False) # New 768-dim run
     is_synced_bge_m3: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     chunk: Mapped["Chunk"] = relationship(back_populates="questions")
