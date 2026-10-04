@@ -10,6 +10,8 @@ from app.models.scraped_page import ScrapedPage, PageProcessStatus
 from app.models.chunk import Chunk
 from app.models.generated_question import GeneratedQuestion
 from app.services.ingest_pipeline.orchestrator import run_full_pipeline, get_active_sync_column
+from app.services.query_pipeline.query_pipeline import QueryPipeline
+from app.services.query_pipeline.schema import PipelineQueryRequest
 
 
 def _build_progress_bar(current: int, total: int, length: int = 10) -> str:
@@ -21,7 +23,7 @@ def _build_progress_bar(current: int, total: int, length: int = 10) -> str:
     return f"{bar} ({int(pct * 100)}%)"
 
 
-async def send_reply(chat_id: int | str, text: str):
+async def send_reply(chat_id: int | str, text: str, parse_mode: Optional[str] = "Markdown"):
     if not settings.telegram_bot_token:
         return
 
@@ -29,23 +31,66 @@ async def send_reply(chat_id: int | str, text: str):
     payload = {
         "chat_id": chat_id,
         "text": text,
-        "parse_mode": "Markdown",
         "disable_web_page_preview": True,
     }
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
+
     async with httpx.AsyncClient() as client:
         try:
-            await client.post(url, json=payload, timeout=10.0)
+            resp = await client.post(url, json=payload, timeout=10.0)
+            # If Telegram rejects Markdown entities, re-send as clean plain text
+            if resp.status_code == 400 and parse_mode:
+                payload.pop("parse_mode", None)
+                await client.post(url, json=payload, timeout=10.0)
         except Exception as e:
             print(f"[Telegram] Failed to send message to {chat_id}: {e}")
 
 
 def _get_model_telemetry():
-    """Extracts dense and sparse model configurations from runtime settings."""
     sync_col = get_active_sync_column()
     dim = getattr(settings, "embedding_dimension", None) or getattr(settings, "vector_dim", 768)
     dense_model = f"{settings.embedding_provider} / {settings.embedding_model} ({dim}d)"
     sparse_model = "fastembed / Qdrant/bm25"
     return sync_col, dense_model, sparse_model
+
+
+async def handle_query_command(chat_id: int | str, org_id: int, query_text: str):
+    """Executes the full hybrid retrieval + cross-encoder + QA pipeline for a specific org."""
+    if not query_text:
+        await send_reply(
+            chat_id,
+            "⚠️ *Usage:* `/query <org_id> <your question>`\n"
+            "Example: `/query 1 What are the admission requirements for BSCS?`",
+        )
+        return
+
+    await send_reply(
+        chat_id, 
+        f"🔍 *[Org #{org_id}] Searching knowledge base for:*\n_{query_text[:120]}_..."
+    )
+
+    try:
+        pipeline = QueryPipeline()
+        req = PipelineQueryRequest(query=query_text, org_id=org_id, top_k=5)
+        response = await pipeline.execute(req)
+
+        source_icon = "⚡" if response.is_cached else "🤖"
+        msg = f"{source_icon} Answer:\n\n{response.answer}\n"
+
+        if response.sources:
+            msg += "\n🔗 Sources:\n"
+            for s in response.sources[:4]:
+                msg += f"• {s}\n"
+
+        msg += f"\n---\nOrg: #{org_id} | Source: {response.source.upper()} | Collection: {pipeline.collection_name}"
+        
+        # Sent with None parse_mode to ensure raw LLM formatting doesn't trigger Telegram 400 Bad Request
+        await send_reply(chat_id, msg, parse_mode=None)
+
+    except Exception as e:
+        print(f"[Telegram Query Error]: {e}")
+        await send_reply(chat_id, f"❌ Query Failed:\n{str(e)[:300]}", parse_mode=None)
 
 
 async def run_pipeline_with_notifications(website_id: int, chat_id: Optional[int | str] = None):
@@ -101,7 +146,6 @@ async def handle_status_command(chat_id: int | str, website_id: int):
             await send_reply(chat_id, f"⚠️ Website ID `{website_id}` not found.")
             return
 
-        # 1. Page status breakdown
         page_stats = await session.execute(
             select(
                 func.count(ScrapedPage.id).label("total"),
@@ -118,7 +162,6 @@ async def handle_status_command(chat_id: int | str, website_id: int):
         pages_pending = p.pending or 0
         pages_failed = p.failed or 0
 
-        # 2. Chunk stats
         chunk_stats = await session.execute(
             select(
                 func.count(Chunk.id).label("total_chunks"),
@@ -133,7 +176,6 @@ async def handle_status_command(chat_id: int | str, website_id: int):
         total_tokens = c.total_tokens or 0
         chunks_qgen_done = c.qgen_processed_chunks or 0
 
-        # 3. Dynamic Model Sync Stats
         sync_col, dense_info, sparse_info = _get_model_telemetry()
 
         q_stats = await session.execute(
@@ -220,12 +262,12 @@ async def start_telegram_bot_listener():
                     offset = update["update_id"] + 1
                     message = update.get("message", {})
                     chat_id = message.get("chat", {}).get("id")
-                    text = message.get("text", "").strip()
+                    raw_text = message.get("text", "").strip()
 
-                    if not chat_id or not text:
+                    if not chat_id or not raw_text:
                         continue
 
-                    cmd_parts = text.split()
+                    cmd_parts = raw_text.split()
                     command = cmd_parts[0].split("@")[0].lower()
 
                     if command == "/scrape":
@@ -254,13 +296,30 @@ async def start_telegram_bot_listener():
                         web_id = int(cmd_parts[1])
                         asyncio.create_task(handle_status_command(chat_id, web_id))
 
+                    elif command == "/query":
+                        # Requires: /query <org_id> <question>
+                        if len(cmd_parts) < 3 or not cmd_parts[1].isdigit():
+                            await send_reply(
+                                chat_id,
+                                "⚠️ *Invalid Format!*\n"
+                                "Usage: `/query <org_id> <your question>`\n"
+                                "Example: `/query 1 What are the admission requirements for BSCS?`",
+                            )
+                            continue
+
+                        org_id = int(cmd_parts[1])
+                        # Slice off "/query" and "<org_id>"
+                        user_query = " ".join(cmd_parts[2:]).strip()
+                        asyncio.create_task(handle_query_command(chat_id, org_id, user_query))
+
                     elif command in ["/help", "/start"]:
                         await send_reply(
                             chat_id,
-                            "🤖 *Knowledge Base Ingestion Bot*\n\n"
+                            "🤖 *Knowledge Base Assistant Bot*\n\n"
                             "*Commands:*\n"
-                            "• `/scrape <website_id>` - Runs discovery, scraping, chunking, and Qdrant sync\n"
-                            "• `/status <website_id>` - Check checkpoint progress in PostgreSQL\n"
+                            "• `/query <org_id> <question>` - Ask anything about the organization\n"
+                            "• `/scrape <website_id>` - Runs discovery, chunking, and vector indexing\n"
+                            "• `/status <website_id>` - Check pipeline progress\n"
                             "• `/help` - Show instructions",
                         )
 

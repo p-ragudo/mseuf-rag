@@ -88,4 +88,5 @@ When you stop the fastapi application, it may not always stop the other backgrou
 ```bash
 pkill -9 -f "python" || true
 pkill -9 -f "uvicorn" || true
+pkill -9 -f "telegram_bot" || true
 ```
