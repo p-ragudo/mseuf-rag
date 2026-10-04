@@ -2,6 +2,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 
+from app.core.config import settings
 from app.core.database import get_db
 from app.models.user import User
 from app.models.org_member import OrgMember
@@ -9,7 +10,7 @@ from app.models.website import Website, WebsiteScrapeStatus
 from app.models.scraped_page import ScrapedPage, PageProcessStatus
 from app.models.chunk import Chunk
 from app.models.generated_question import GeneratedQuestion
-from app.services.ingest_pipeline.orchestrator import run_full_pipeline
+from app.services.ingest_pipeline.orchestrator import run_full_pipeline, get_active_sync_column
 from app.routes.auth import get_current_user
 
 router = APIRouter(prefix="/ingest", tags=["Ingest Pipeline"])
@@ -26,7 +27,6 @@ async def trigger_ingestion(
     Triggers discovery, scraping, chunking, question generation,
     and Qdrant indexing for a website in the background.
     """
-    # Join Website with OrgMember to ensure the user belongs to the owning org
     stmt = (
         select(Website)
         .join(OrgMember, Website.org_id == OrgMember.org_id)
@@ -67,7 +67,6 @@ async def get_ingestion_status(
     db: AsyncSession = Depends(get_db),
 ):
     """Returns database checkpoint stats across all 5 ingestion stages."""
-    # Ensure user has access to the organization that owns this website
     stmt = (
         select(Website)
         .join(OrgMember, Website.org_id == OrgMember.org_id)
@@ -102,23 +101,31 @@ async def get_ingestion_status(
     )
     total_chunks = chunks_count_res.scalar_one() or 0
 
-    # 3. Question & Qdrant sync stats
+    # 3. Dynamic Model Sync Column Check
+    sync_col = get_active_sync_column()
+
     q_stats_res = await db.execute(
         select(
             func.count(GeneratedQuestion.id),
-            func.count(GeneratedQuestion.id).filter(GeneratedQuestion.is_synced_qdrant.is_(True)),
+            func.count(GeneratedQuestion.id).filter(sync_col.is_(True)),
         )
         .join(Chunk, GeneratedQuestion.chunk_id == Chunk.id)
         .join(ScrapedPage, Chunk.page_id == ScrapedPage.id)
         .where(ScrapedPage.web_id == website_id)
     )
-    total_questions, synced_qdrant_count = q_stats_res.one()
+    total_questions, synced_model_count = q_stats_res.one()
 
     return {
         "website_id": website.id,
         "url": website.url,
         "status": website.status,
         "error_message": website.error_message,
+        "active_target": {
+            "collection_name": settings.collection_name,
+            "sync_column": sync_col.key,
+            "provider": settings.embedding_provider,
+            "dimension": getattr(settings, "embedding_dimension", settings.vector_dim),
+        },
         "checkpoints": {
             "pages": {
                 "total_discovered": total_pages,
@@ -132,7 +139,7 @@ async def get_ingestion_status(
             },
             "questions": {
                 "total_generated": total_questions or 0,
-                "synced_qdrant": synced_qdrant_count or 0,
+                "synced_active_model": synced_model_count or 0,
             },
         },
     }
