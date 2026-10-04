@@ -80,3 +80,13 @@ or
 ```
 uv run fastapi run app/main.py
 ```
+
+## Stopping background processes in the backend
+When you stop the fastapi application, it may not always stop the other background processes.
+
+(this is on linux)
+```bash
+pkill -9 -f "python" || true
+pkill -9 -f "uvicorn" || true
+pkill -9 -f "telegram_bot" || true
+```

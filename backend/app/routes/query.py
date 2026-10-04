@@ -10,7 +10,10 @@ from app.services.query_pipeline.schema import PipelineQueryRequest, PipelineQue
 from app.services.query_pipeline.query_pipeline import QueryPipeline
 
 router = APIRouter(prefix="/query", tags=["Query Pipeline"])
-pipeline = QueryPipeline()
+
+
+def get_query_pipeline() -> QueryPipeline:
+    return QueryPipeline()
 
 
 @router.post("/", response_model=PipelineQueryResponse)
@@ -18,6 +21,7 @@ async def execute_query(
     payload: PipelineQueryRequest,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    pipeline: QueryPipeline = Depends(get_query_pipeline),
 ):
     # Enforce organization access permission
     stmt = select(OrgMember).where(

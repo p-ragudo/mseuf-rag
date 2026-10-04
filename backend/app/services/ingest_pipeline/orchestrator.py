@@ -35,6 +35,25 @@ QGEN_MAX_ATTEMPTS = 3
 SYNC_MAX_CONSECUTIVE_FAILURES = 5
 
 
+def get_active_sync_column():
+    """
+    Dynamically maps current environment settings to the corresponding
+    tracking column on GeneratedQuestion. Avoids manual code edits when
+    switching models in .env.
+    """
+    provider = (settings.embedding_provider or "").strip().lower()
+    dim = getattr(settings, "embedding_dimension", None) or getattr(settings, "vector_dim", 768)
+
+    if provider == "gemini":
+        col_name = "is_synced_gemini_768" if dim == 768 else "is_synced_gemini"
+    elif "bge" in provider or "bge" in (settings.embedding_model or "").lower():
+        col_name = "is_synced_bge_m3"
+    else:
+        col_name = "is_synced_qdrant"
+
+    return getattr(GeneratedQuestion, col_name, GeneratedQuestion.is_synced_qdrant)
+
+
 def extract_sub_entity_from_url(url: str) -> str:
     """
     Parses the root sub-path (e.g. 'calauag', 'candelaria') as the sub-entity.
@@ -153,7 +172,7 @@ async def scraper_worker(web_id: int, is_discovery_done: asyncio.Event, max_retr
                             if page.retries >= max_retries
                             else PageProcessStatus.PENDING
                         )
-                    
+
                     # Polite pacing to avoid triggering Cloudflare / Nginx TCP reset triggers
                     await asyncio.sleep(1.0)
 
@@ -320,6 +339,7 @@ async def qgen_worker(web_id: int, is_chunking_done: asyncio.Event) -> int:
 
 
 async def _has_pending_sync_questions(web_id: int) -> bool:
+    sync_col = get_active_sync_column()
     async with async_session() as session:
         count = await session.scalar(
             select(func.count(GeneratedQuestion.id))
@@ -327,7 +347,7 @@ async def _has_pending_sync_questions(web_id: int) -> bool:
             .join(ScrapedPage, Chunk.page_id == ScrapedPage.id)
             .where(
                 ScrapedPage.web_id == web_id,
-                GeneratedQuestion.is_synced_qdrant.is_(False),
+                sync_col.is_(False),
             )
         )
         return (count or 0) > 0
@@ -339,7 +359,9 @@ async def qdrant_sync_worker(org_id: int, web_id: int, is_qgen_done: asyncio.Eve
     embedder = get_embedder()
     sparse_embedder = get_sparse_embedder()
     target_collection = settings.collection_name
+    sync_col = get_active_sync_column()
 
+    # Initializes Qdrant collection matching embedder dimensions (768)
     await vector_db.create_collection_if_not_exists(
         collection_name=target_collection,
         dense_vector_size=embedder.dimension,
@@ -348,7 +370,7 @@ async def qdrant_sync_worker(org_id: int, web_id: int, is_qgen_done: asyncio.Eve
     )
 
     tenant_key = str(org_id)
-    # Pull 100 questions at a time to match embedder BATCH_SIZE
+    # Pull 100 questions per batch to maximize API throughput and reduce cost
     EMBED_DB_BATCH_SIZE = 100
     consecutive_failures = 0
 
@@ -373,7 +395,7 @@ async def qdrant_sync_worker(org_id: int, web_id: int, is_qgen_done: asyncio.Eve
                     .join(ScrapedPage, Chunk.page_id == ScrapedPage.id)
                     .where(
                         ScrapedPage.web_id == web_id,
-                        GeneratedQuestion.is_synced_qdrant.is_(False),
+                        sync_col.is_(False),
                     )
                     .order_by(GeneratedQuestion.id)
                     .limit(EMBED_DB_BATCH_SIZE)
@@ -388,6 +410,7 @@ async def qdrant_sync_worker(org_id: int, web_id: int, is_qgen_done: asyncio.Eve
                     continue
 
                 try:
+                    # Embeds all 100 questions in a single API batch call
                     embedded_results = await embedder.embed(
                         [r.q_text for r in rows], task_type="RETRIEVAL_DOCUMENT"
                     )
@@ -452,17 +475,22 @@ async def qdrant_sync_worker(org_id: int, web_id: int, is_qgen_done: asyncio.Eve
                     await vector_db.upsert_points(
                         collection_name=target_collection, points=points_to_upsert
                     )
+
+                    # Dynamically updates active model sync flag and legacy flag
                     await session.execute(
                         update(GeneratedQuestion)
                         .where(GeneratedQuestion.id.in_(synced_q_ids))
-                        .values(is_synced_qdrant=True)
+                        .values({
+                            sync_col.key: True,
+                            GeneratedQuestion.is_synced_qdrant: True,
+                        })
                     )
                     await session.commit()
                     total_synced += len(points_to_upsert)
                     consecutive_failures = 0
 
-                    # Pacing delay: avoid bursting past Gemini free-tier RPM limits
-                    await asyncio.sleep(2.0)
+                    # Standard pacing on paid tier to avoid network bursts
+                    await asyncio.sleep(0.5)
 
                 except Exception as e:
                     await session.rollback()
@@ -473,21 +501,20 @@ async def qdrant_sync_worker(org_id: int, web_id: int, is_qgen_done: asyncio.Eve
                     )
                     traceback.print_exc()
 
-                    # Never crash the worker. Back off and wait for quota/rate limits to recover.
                     if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg:
                         logger.warning(
-                            "[Qdrant Sync Rate Limit] Quota hit. Sleeping 30s before retrying batch..."
-                        )
-                        await asyncio.sleep(30.0)
-                        consecutive_failures = 0
-                    elif consecutive_failures >= SYNC_MAX_CONSECUTIVE_FAILURES:
-                        logger.warning(
-                            "[Qdrant Sync Backoff] Consecutive errors reached threshold. Sleeping 15s..."
+                            "[Qdrant Sync Rate Limit] Quota hit. Sleeping 15s before retrying batch..."
                         )
                         await asyncio.sleep(15.0)
                         consecutive_failures = 0
+                    elif consecutive_failures >= SYNC_MAX_CONSECUTIVE_FAILURES:
+                        logger.warning(
+                            "[Qdrant Sync Backoff] Consecutive errors reached threshold. Sleeping 10s..."
+                        )
+                        await asyncio.sleep(10.0)
+                        consecutive_failures = 0
                     else:
-                        await asyncio.sleep(4.0)
+                        await asyncio.sleep(3.0)
 
         except Exception as loop_e:
             logger.error(f"[Qdrant Sync Worker Loop Exception]: {loop_e}")
