@@ -69,7 +69,7 @@ class Settings(BaseSettings):
     # Embedding Service Settings
     embedding_provider: str
     embedding_model: str
-    embedding_api_key: str
+    embedding_api_key: Optional[str] = None
     embedding_dimension: Optional[int] = None
     embedding_task_type: Optional[str] = None
 

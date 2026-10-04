@@ -15,11 +15,17 @@ class GeneratedQuestion(Base):
         ForeignKey("chunks.id", ondelete="CASCADE"), index=True
     )
     question: Mapped[str] = mapped_column(Text, nullable=False)
+    
+    # Legacy flag (kept for backwards compatibility)
     is_synced_qdrant: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    
+    # Model-specific tracking flags for multi-model benchmarking
+    is_synced_gemini: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    is_synced_bge_m3: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
-    # Relationships
     chunk: Mapped["Chunk"] = relationship(back_populates="questions")
 
     __table_args__ = (
-        Index("ix_generated_questions_is_synced", "is_synced_qdrant"),
+        Index("ix_gen_questions_bge_m3", "is_synced_bge_m3"),
+        Index("ix_gen_questions_gemini", "is_synced_gemini"),
     )

@@ -26,3 +26,4 @@ openai
 redis
 redisvl
 fastembed
+sentence-transformers

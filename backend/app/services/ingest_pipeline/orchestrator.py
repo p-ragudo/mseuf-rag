@@ -338,7 +338,14 @@ async def qdrant_sync_worker(org_id: int, web_id: int, is_qgen_done: asyncio.Eve
     vector_db = get_vector_db()
     embedder = get_embedder()
     sparse_embedder = get_sparse_embedder()
-    target_collection = settings.collection_name
+
+    # Determine which sync column to check and update based on current config
+    if "bge-m3" in settings.embedding_model.lower():
+        sync_column = GeneratedQuestion.is_synced_bge_m3
+        target_collection = "mseuf_rag_bge_m3"
+    elif "gemini-embedding-2":
+        sync_column = GeneratedQuestion.is_synced_gemini
+        target_collection = "mseuf_rag_test"
 
     await vector_db.create_collection_if_not_exists(
         collection_name=target_collection,
@@ -373,7 +380,7 @@ async def qdrant_sync_worker(org_id: int, web_id: int, is_qgen_done: asyncio.Eve
                     .join(ScrapedPage, Chunk.page_id == ScrapedPage.id)
                     .where(
                         ScrapedPage.web_id == web_id,
-                        GeneratedQuestion.is_synced_qdrant.is_(False),
+                        sync_column.is_(False),
                     )
                     .order_by(GeneratedQuestion.id)
                     .limit(EMBED_DB_BATCH_SIZE)
@@ -455,7 +462,7 @@ async def qdrant_sync_worker(org_id: int, web_id: int, is_qgen_done: asyncio.Eve
                     await session.execute(
                         update(GeneratedQuestion)
                         .where(GeneratedQuestion.id.in_(synced_q_ids))
-                        .values(is_synced_qdrant=True)
+                        .values({sync_column.key: True, GeneratedQuestion.is_synced_qdrant: True})
                     )
                     await session.commit()
                     total_synced += len(points_to_upsert)
