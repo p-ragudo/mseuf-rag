@@ -11,6 +11,7 @@ class FastEmbedSparseEmbedder:
         self.model = SparseTextEmbedding(model_name=model_name)
 
     def _sync_embed_text(self, text: str) -> SparseVectorData:
+        """Document-side embedding (used at ingestion for chunk text)."""
         clean_text = text.strip()
         if not clean_text:
             return SparseVectorData(indices=[], values=[])
@@ -21,9 +22,24 @@ class FastEmbedSparseEmbedder:
             values=result.values.tolist(),
         )
 
+    def _sync_embed_query(self, text: str) -> SparseVectorData:
+        """Query-side BM25 embedding (no document-length normalisation)."""
+        clean_text = text.strip()
+        if not clean_text:
+            return SparseVectorData(indices=[], values=[])
+
+        result = list(self.model.query_embed(clean_text))[0]
+        return SparseVectorData(
+            indices=result.indices.tolist(),
+            values=result.values.tolist(),
+        )
+
     async def embed_text(self, text: str) -> SparseVectorData:
         """Executes in a threadpool worker to keep the async event loop responsive."""
         return await asyncio.to_thread(self._sync_embed_text, text)
+
+    async def embed_query(self, text: str) -> SparseVectorData:
+        return await asyncio.to_thread(self._sync_embed_query, text)
 
     def _sync_embed_batch(self, texts: List[str]) -> List[SparseVectorData]:
         if not texts:
