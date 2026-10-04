@@ -49,7 +49,7 @@ class Settings(BaseSettings):
     sparse_collection_name: str = "sparse_collection"
     chunk_collection_name: str = "chunks_collection"
 
-    collection_name: str = "mseuf_rag_test"
+    collection_name: str
 
     # Retrieval Constraints
     default_top_k: int = 5
@@ -70,7 +70,7 @@ class Settings(BaseSettings):
     embedding_provider: str
     embedding_model: str
     embedding_api_key: Optional[str] = None
-    embedding_dimension: Optional[int] = None
+    embedding_dimension: Optional[int]
     embedding_task_type: Optional[str] = None
 
     # Quantization Settings
@@ -99,7 +99,7 @@ class Settings(BaseSettings):
     telegram_bot_fastapi_key: str
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=None,
         env_file_encoding="utf-8",
         extra="ignore",
         case_sensitive=False,  # Reads uppercase .env keys into lowercase attributes

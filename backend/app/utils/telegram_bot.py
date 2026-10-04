@@ -1,7 +1,5 @@
 import asyncio
 import httpx
-import logging
-import traceback
 from typing import Optional
 from sqlalchemy import select, func, case
 
@@ -11,21 +9,7 @@ from app.models.website import Website, WebsiteScrapeStatus
 from app.models.scraped_page import ScrapedPage, PageProcessStatus
 from app.models.chunk import Chunk
 from app.models.generated_question import GeneratedQuestion
-from app.services.ingest_pipeline.orchestrator import run_full_pipeline
-from app.services.query_pipeline.query_pipeline import QueryPipeline
-from app.services.query_pipeline.schema import PipelineQueryRequest
-
-logger = logging.getLogger(__name__)
-
-# Reusable pipeline instance for Telegram query requests
-_query_pipeline: Optional[QueryPipeline] = None
-
-
-def get_telegram_query_pipeline() -> QueryPipeline:
-    global _query_pipeline
-    if _query_pipeline is None:
-        _query_pipeline = QueryPipeline()
-    return _query_pipeline
+from app.services.ingest_pipeline.orchestrator import run_full_pipeline, get_active_sync_column
 
 
 def _build_progress_bar(current: int, total: int, length: int = 10) -> str:
@@ -37,48 +21,31 @@ def _build_progress_bar(current: int, total: int, length: int = 10) -> str:
     return f"{bar} ({int(pct * 100)}%)"
 
 
-def _split_message(text: str, max_length: int = 4000) -> list[str]:
-    """Splits messages exceeding Telegram's 4096-character limit."""
-    if len(text) <= max_length:
-        return [text]
-    chunks = []
-    while text:
-        if len(text) <= max_length:
-            chunks.append(text)
-            break
-        split_at = text.rfind("\n", 0, max_length)
-        if split_at == -1:
-            split_at = max_length
-        chunks.append(text[:split_at])
-        text = text[split_at:].lstrip("\n")
-    return chunks
-
-
-async def send_reply(chat_id: int | str, text: str, parse_mode: Optional[str] = "Markdown"):
+async def send_reply(chat_id: int | str, text: str):
     if not settings.telegram_bot_token:
         return
 
     url = f"https://api.telegram.org/bot{settings.telegram_bot_token}/sendMessage"
-    messages = _split_message(text)
-
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "Markdown",
+        "disable_web_page_preview": True,
+    }
     async with httpx.AsyncClient() as client:
-        for chunk in messages:
-            payload = {
-                "chat_id": chat_id,
-                "text": chunk,
-                "disable_web_page_preview": True,
-            }
-            if parse_mode:
-                payload["parse_mode"] = parse_mode
+        try:
+            await client.post(url, json=payload, timeout=10.0)
+        except Exception as e:
+            print(f"[Telegram] Failed to send message to {chat_id}: {e}")
 
-            try:
-                res = await client.post(url, json=payload, timeout=12.0)
-                # If Telegram fails due to malformed Markdown formatting, fallback to plain text
-                if res.status_code == 400 and parse_mode:
-                    payload.pop("parse_mode", None)
-                    await client.post(url, json=payload, timeout=12.0)
-            except Exception as e:
-                logger.error(f"[Telegram] Failed to send message to {chat_id}: {e}")
+
+def _get_model_telemetry():
+    """Extracts dense and sparse model configurations from runtime settings."""
+    sync_col = get_active_sync_column()
+    dim = getattr(settings, "embedding_dimension", None) or getattr(settings, "vector_dim", 768)
+    dense_model = f"{settings.embedding_provider} / {settings.embedding_model} ({dim}d)"
+    sparse_model = "fastembed / Qdrant/bm25"
+    return sync_col, dense_model, sparse_model
 
 
 async def run_pipeline_with_notifications(website_id: int, chat_id: Optional[int | str] = None):
@@ -91,13 +58,19 @@ async def run_pipeline_with_notifications(website_id: int, chat_id: Optional[int
         target_url = website.url
         org_id = website.org_id
 
+    sync_col, dense_info, sparse_info = _get_model_telemetry()
+
     if chat_id:
         await send_reply(
             chat_id,
             f"🚀 *Ingestion Started*\n"
             f"• *Website ID:* `{website_id}`\n"
             f"• *Org ID:* `{org_id}`\n"
-            f"• *Target URL:* {target_url}",
+            f"• *Target URL:* {target_url}\n"
+            f"• *Target Collection:* `{settings.collection_name}`\n"
+            f"• *Dense Model:* `{dense_info}`\n"
+            f"• *Sparse Model:* `{sparse_info}`\n"
+            f"• *Active Sync Flag:* `{sync_col.key}`",
         )
 
     try:
@@ -106,14 +79,17 @@ async def run_pipeline_with_notifications(website_id: int, chat_id: Optional[int
             await send_reply(
                 chat_id,
                 f"✅ *Pipeline Completed Successfully!*\n"
+                f"• *Target Collection:* `{settings.collection_name}`\n"
+                f"• *Dense Model:* `{dense_info}`\n"
+                f"• *Sparse Model:* `{sparse_info}`\n"
                 f"• *URLs Discovered:* `{results['discovered_urls']}`\n"
                 f"• *Pages Scraped:* `{results['scraped_pages']}`\n"
                 f"• *Chunks Created:* `{results['created_chunks']}`\n"
                 f"• *Questions Generated:* `{results['generated_questions']}`\n"
-                f"• *Qdrant Points Synced:* `{results['synced_qdrant_points']}`",
+                f"• *Points Synced ({sync_col.key}):* `{results['synced_qdrant_points']}`",
             )
     except Exception as e:
-        logger.error(f"[Website {website_id}] Pipeline error: {e}")
+        print(f"[Website {website_id}] Pipeline error: {e}")
         if chat_id:
             await send_reply(chat_id, f"❌ *Pipeline Failed:*\n`{str(e)[:300]}`")
 
@@ -125,6 +101,7 @@ async def handle_status_command(chat_id: int | str, website_id: int):
             await send_reply(chat_id, f"⚠️ Website ID `{website_id}` not found.")
             return
 
+        # 1. Page status breakdown
         page_stats = await session.execute(
             select(
                 func.count(ScrapedPage.id).label("total"),
@@ -141,6 +118,7 @@ async def handle_status_command(chat_id: int | str, website_id: int):
         pages_pending = p.pending or 0
         pages_failed = p.failed or 0
 
+        # 2. Chunk stats
         chunk_stats = await session.execute(
             select(
                 func.count(Chunk.id).label("total_chunks"),
@@ -155,10 +133,13 @@ async def handle_status_command(chat_id: int | str, website_id: int):
         total_tokens = c.total_tokens or 0
         chunks_qgen_done = c.qgen_processed_chunks or 0
 
+        # 3. Dynamic Model Sync Stats
+        sync_col, dense_info, sparse_info = _get_model_telemetry()
+
         q_stats = await session.execute(
             select(
                 func.count(GeneratedQuestion.id).label("total_q"),
-                func.count(case((GeneratedQuestion.is_synced_qdrant.is_(True), 1))).label("synced_q"),
+                func.count(case((sync_col.is_(True), 1))).label("synced_q"),
             )
             .join(Chunk, GeneratedQuestion.chunk_id == Chunk.id)
             .join(ScrapedPage, Chunk.page_id == ScrapedPage.id)
@@ -166,7 +147,7 @@ async def handle_status_command(chat_id: int | str, website_id: int):
         )
         q = q_stats.one()
         total_questions = q.total_q or 0
-        synced_qdrant = q.synced_q or 0
+        synced_active = q.synced_q or 0
 
         status_icons = {
             WebsiteScrapeStatus.PENDING: "⏳ PENDING",
@@ -178,12 +159,16 @@ async def handle_status_command(chat_id: int | str, website_id: int):
 
         page_bar = _build_progress_bar(pages_done, total_pages)
         qgen_bar = _build_progress_bar(chunks_qgen_done, total_chunks)
-        sync_bar = _build_progress_bar(synced_qdrant, total_questions)
+        sync_bar = _build_progress_bar(synced_active, total_questions)
 
         msg = (
             f"📊 *Ingestion Status — Site #{website_id}*\n"
             f"🌐 `{website.url}`\n"
             f"• *Status:* {status_label}\n"
+            f"• *Target Collection:* `{settings.collection_name}`\n"
+            f"• *Dense Embedder:* `{dense_info}`\n"
+            f"• *Sparse Embedder:* `{sparse_info}`\n"
+            f"• *Tracking Column:* `{sync_col.key}`\n"
         )
         if website.error_message:
             msg += f"• *Error:* `{website.error_message[:200]}`\n"
@@ -203,66 +188,10 @@ async def handle_status_command(chat_id: int | str, website_id: int):
             f"• Synthetic Qs Created: `{total_questions}`\n"
             f"\n⚡ *Stage 4: Vector Indexing (Qdrant)*\n"
             f"{sync_bar}\n"
-            f"• Points Synced: `{synced_qdrant}/{total_questions}`\n"
+            f"• Active Model Synced: `{synced_active}/{total_questions}`\n"
         )
 
         await send_reply(chat_id, msg)
-
-
-async def handle_query_command(chat_id: int | str, org_id: int, user_query: str):
-    """Executes the RAG query pipeline and reports the answer or specific API errors."""
-    await send_reply(chat_id, f"🔍 *Running query for Org #{org_id}...*\n_\"{user_query}\"_")
-
-    try:
-        pipeline = get_telegram_query_pipeline()
-        request_payload = PipelineQueryRequest(
-            org_id=org_id,
-            query=user_query,
-            top_k=5,
-        )
-
-        response = await pipeline.execute(request_payload)
-
-        # Build response layout
-        sources_str = "\n".join([f"• {s}" for s in response.sources]) if response.sources else "None"
-        source_badge = "⚡ Cached" if response.is_cached else f"🤖 {response.source.upper()}"
-
-        reply_text = (
-            f"💡 *Answer* ({source_badge}):\n\n"
-            f"{response.answer}\n\n"
-            f"🔗 *Sources:*\n{sources_str}"
-        )
-        await send_reply(chat_id, reply_text)
-
-    except Exception as e:
-        err_msg = str(e)
-        logger.error(f"[Telegram Query Error] org_id={org_id}: {err_msg}")
-        traceback.print_exc()
-
-        # Specific actionable error messages
-        if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg:
-            user_facing_error = (
-                "⚠️ *Rate Limit / Quota Exceeded (429)*\n\n"
-                "Google Gemini reached its request limit. If this is a burst limit, "
-                "please wait 30–60 seconds. If daily quota is depleted, replace the API key."
-            )
-        elif "503" in err_msg or "UNAVAILABLE" in err_msg:
-            user_facing_error = (
-                "⚠️ *Service Unavailable (503)*\n\n"
-                "Gemini models are experiencing high demand. Please try again shortly."
-            )
-        elif "Connection" in err_msg or "Qdrant" in err_msg:
-            user_facing_error = (
-                "⚠️ *Vector Database Error*\n\n"
-                f"Failed to query Qdrant. Verify your cluster endpoint and status:\n`{err_msg[:200]}`"
-            )
-        else:
-            user_facing_error = (
-                f"❌ *Query Execution Failed*\n\n"
-                f"Error: `{err_msg[:300]}`"
-            )
-
-        await send_reply(chat_id, user_facing_error)
 
 
 async def start_telegram_bot_listener():
@@ -325,34 +254,14 @@ async def start_telegram_bot_listener():
                         web_id = int(cmd_parts[1])
                         asyncio.create_task(handle_status_command(chat_id, web_id))
 
-                    elif command == "/query":
-                        # Syntax: /query <org_id> <user question here>
-                        if len(cmd_parts) < 3 or not cmd_parts[1].isdigit():
-                            await send_reply(
-                                chat_id,
-                                "⚠️ *Invalid Format!*\n\n"
-                                "*Usage:* `/query <org_id> <your question>`\n"
-                                "*Example:* `/query 1 What are the admission requirements for Senior High School?`",
-                            )
-                            continue
-
-                        org_id = int(cmd_parts[1])
-                        # Slice off "/query" and "<org_id>" to extract the query text
-                        user_query = text.split(None, 2)[2].strip()
-
-                        asyncio.create_task(
-                            handle_query_command(chat_id=chat_id, org_id=org_id, user_query=user_query)
-                        )
-
                     elif command in ["/help", "/start"]:
                         await send_reply(
                             chat_id,
-                            "🤖 *Knowledge Base Ingestion & Query Bot*\n\n"
+                            "🤖 *Knowledge Base Ingestion Bot*\n\n"
                             "*Commands:*\n"
-                            "• `/scrape <website_id>` — Runs discovery, scraper, chunker, QGen, and Qdrant sync\n"
-                            "• `/status <website_id>` — Check checkpoint progress in PostgreSQL\n"
-                            "• `/query <org_id> <query>` — Run retrieval & synthesis against tenant knowledge base\n"
-                            "• `/help` — Show instructions",
+                            "• `/scrape <website_id>` - Runs discovery, scraping, chunking, and Qdrant sync\n"
+                            "• `/status <website_id>` - Check checkpoint progress in PostgreSQL\n"
+                            "• `/help` - Show instructions",
                         )
 
             except asyncio.CancelledError:
