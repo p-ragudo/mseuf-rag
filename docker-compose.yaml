@@ -4,15 +4,20 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+      args:
+        GIT_SHA: ${GIT_SHA:-unknown}
+    image: mseuf-rag-backend                 # added: names the image so the bot can share it
     container_name: mseuf_rag_api
     restart: unless-stopped
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"                # changed: only the proxy on the server can reach it
     env_file:
       - ./backend/.env
     environment:
       - HOST=0.0.0.0
       - PORT=8000
+      - FASTEMBED_CACHE_PATH=/root/.cache/fastembed   # added: otherwise it caches in /tmp and re-downloads
+    shm_size: "1gb"                          # added: Chromium crashes with the default 64 MB
     volumes:
       # Persistent cache for FastEmbed ONNX weights and Hugging Face models
       - fastembed_cache:/root/.cache
@@ -21,17 +26,17 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 15s
+      start_period: 60s                      # changed: models take longer than 15s to load
 
   # Telegram Bot Worker
   telegram_worker:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
+    image: mseuf-rag-backend                 # changed: reuse the api image, no separate build
     container_name: mseuf_rag_bot
     restart: unless-stopped
     env_file:
       - ./backend/.env
+    environment:
+      - FASTEMBED_CACHE_PATH=/root/.cache/fastembed
     command: >
       python -c "import asyncio; from app.utils.telegram_bot import start_telegram_bot_listener; asyncio.run(start_telegram_bot_listener())"
     volumes:

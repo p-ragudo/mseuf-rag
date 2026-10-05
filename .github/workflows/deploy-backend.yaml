@@ -40,12 +40,31 @@ jobs:
             -e "ssh -i ~/.ssh/deploy_key" \
             ./ ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}:~/app/
 
-      - name: Build and restart
+      - name: Build, restart and verify
         run: |
-          ssh -i ~/.ssh/deploy_key ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} '
-            set -e
-            cd ~/app
-            docker compose build
-            docker compose up -d
-            docker image prune -f
-          '
+          ssh -i ~/.ssh/deploy_key ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} \
+            "GIT_SHA=${{ github.sha }} bash -s" <<'EOF'
+          set -Eeuo pipefail
+          cd ~/app
+          trap 'echo "--- deploy failed, recent logs ---"; docker compose logs --tail 80 || true' ERR
+
+          # Fail if the old non-Docker service is back
+          if systemctl is-active --quiet fastapi; then
+            echo "Legacy fastapi systemd service is running. Disable it." >&2
+            exit 1
+          fi
+
+          export GIT_SHA
+          docker compose build
+          docker compose up -d --force-recreate --remove-orphans --wait --wait-timeout 180
+
+          # The running container must be this exact commit
+          running=$(docker inspect mseuf_rag_api --format '{{index .Config.Labels "git.sha"}}')
+          if [ "$running" != "$GIT_SHA" ]; then
+            echo "Running image is $running, expected $GIT_SHA" >&2
+            exit 1
+          fi
+
+          curl -fsS http://127.0.0.1:8000/openapi.json > /dev/null
+          docker image prune -f
+          EOF

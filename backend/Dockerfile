@@ -33,6 +33,10 @@ RUN python -m playwright install --with-deps chromium
 # 6. Copy the rest of the backend codebase
 COPY . .
 
+# 7. Record which commit this image was built from (checked by the deploy workflow)
+ARG GIT_SHA=unknown
+LABEL git.sha=$GIT_SHA
+
 EXPOSE 8000
 
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
