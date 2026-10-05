@@ -10,9 +10,12 @@
     error?: boolean;
   };
 
+  // Gets :id from the svelte-spa-router route
   let { params = {} }: { params?: { id?: string } } = $props();
 
   const API_URL = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
+
+  // Route ID
   const orgId = $derived(params.id);
 
   let messages = $state<Message[]>([]);
@@ -22,20 +25,28 @@
   let listEl = $state<HTMLDivElement>();
   let inputEl = $state<HTMLTextAreaElement>();
 
-  // Reset the conversation whenever the org changes.
+  // Reset the conversation whenever the organization changes.
   $effect(() => {
     if (!orgId) return;
+
+    console.log("Current organization ID:", orgId);
+
     messages = [];
     sessionId = getSessionId(orgId);
   });
 
   function getSessionId(org: string): string {
     const key = `chat-session:${org}`;
+
     try {
       const existing = localStorage.getItem(key);
+
       if (existing) return existing;
+
       const created = crypto.randomUUID();
+
       localStorage.setItem(key, created);
+
       return created;
     } catch {
       return crypto.randomUUID();
@@ -44,48 +55,76 @@
 
   function newChat() {
     if (!orgId) return;
+
     try {
       localStorage.removeItem(`chat-session:${orgId}`);
     } catch {}
+
     messages = [];
     sessionId = getSessionId(orgId);
+
     inputEl?.focus();
   }
 
   async function scrollToBottom() {
     await tick();
-    listEl?.scrollTo({ top: listEl.scrollHeight, behavior: "smooth" });
+
+    listEl?.scrollTo({
+      top: listEl.scrollHeight,
+      behavior: "smooth",
+    });
   }
 
   function resizeInput() {
     if (!inputEl) return;
+
     inputEl.style.height = "auto";
     inputEl.style.height = `${Math.min(inputEl.scrollHeight, 160)}px`;
   }
 
   async function send() {
     const content = input.trim();
+
     if (!content || loading || !orgId) return;
 
+    // Save the organization ID used for this request.
     const currentOrg = orgId;
 
-    messages.push({ id: crypto.randomUUID(), role: "user", content });
+    messages.push({
+      id: crypto.randomUUID(),
+      role: "user",
+      content,
+    });
+
     input = "";
     loading = true;
+
     await tick();
+
     resizeInput();
     scrollToBottom();
 
     try {
       const res = await fetch(`${API_URL}/chat/${currentOrg}`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: content, session_id: sessionId }),
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          message: content,
+          session_id: sessionId,
+        }),
       });
-      if (!res.ok) throw new Error(`Request failed (${res.status})`);
+
+      if (!res.ok) {
+        throw new Error(`Request failed (${res.status})`);
+      }
+
       const data = await res.json();
 
-      if (currentOrg !== orgId) return; // org changed mid-request
+      // Don't update the old chat if the user changed organizations.
+      if (currentOrg !== orgId) return;
+
       messages.push({
         id: crypto.randomUUID(),
         role: "assistant",
@@ -94,6 +133,7 @@
       });
     } catch {
       if (currentOrg !== orgId) return;
+
       messages.push({
         id: crypto.randomUUID(),
         role: "assistant",
@@ -123,8 +163,15 @@
       <h2 class="text-xs font-bold uppercase tracking-wider text-primary">
         Admissions Intelligence Hub
       </h2>
+
       <h1 class="text-xl font-semibold">Chat Assistant</h1>
+
+      <!-- Optional: show the current route ID -->
+      <span class="text-xs text-gray-500">
+        Organization ID: {orgId ?? "Unknown"}
+      </span>
     </div>
+
     <button
       type="button"
       class="flex flex-row items-center gap-2 rounded-lg border border-outline bg-[#F5F8FB] px-3 py-2 text-sm font-semibold shadow-sm transition-colors duration-200 hover:cursor-pointer hover:bg-accent hover:text-primary"
@@ -144,7 +191,9 @@
           >
             AI
           </div>
+
           <h2 class="mt-4 text-2xl font-bold">How can I help you today?</h2>
+
           <p class="mt-1 text-sm text-gray-500">
             Ask me anything and I'll find the answer for you.
           </p>
@@ -182,6 +231,7 @@
                 <p class="mb-1 font-bold uppercase tracking-wider text-primary">
                   Sources
                 </p>
+
                 <ul class="space-y-0.5">
                   {#each message.sources as source}
                     <li>
@@ -213,15 +263,18 @@
           >
             AI
           </div>
+
           <div
             class="flex gap-1 rounded-xl border border-outline bg-white px-4 py-3 shadow-sm"
           >
             <span
               class="h-2 w-2 animate-bounce rounded-full bg-primary opacity-60"
             ></span>
+
             <span
               class="h-2 w-2 animate-bounce rounded-full bg-primary opacity-60 [animation-delay:150ms]"
             ></span>
+
             <span
               class="h-2 w-2 animate-bounce rounded-full bg-primary opacity-60 [animation-delay:300ms]"
             ></span>
@@ -243,6 +296,7 @@
         placeholder="Type your question..."
         class="flex-1 resize-none rounded-md border border-outline px-4 py-2.5 text-sm outline-none focus:border-primary"
       ></textarea>
+
       <button
         type="button"
         onclick={send}
@@ -252,6 +306,7 @@
         Send
       </button>
     </div>
+
     <p class="mx-auto mt-2 max-w-3xl text-xs text-gray-500">
       Press Enter to send, Shift + Enter for a new line.
     </p>

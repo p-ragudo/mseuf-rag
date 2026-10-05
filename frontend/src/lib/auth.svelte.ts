@@ -129,7 +129,6 @@ export async function register(payload: RegisterPayload): Promise<boolean> {
     auth.loading = false;
   }
 
-  // Auto-login after a successful registration
   return true;
 }
 
