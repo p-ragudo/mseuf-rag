@@ -1,4 +1,4 @@
-from datetime import time
+from datetime import datetime, time
 from typing import Optional
 from pydantic import BaseModel, HttpUrl
 
@@ -18,8 +18,14 @@ class OrgResponse(BaseModel):
     class Config:
         from_attributes = True
 
-class AddMemberResponse(BaseModel):
-   message: str
+
+class PublicOrgResponse(BaseModel):
+    """Publicly visible metadata used by the frontend chat page without requiring auth."""
+    id: int
+    name: str
+
+    class Config:
+        from_attributes = True
 
 
 # --- Website Schemas ---
@@ -38,13 +44,17 @@ class WebsiteResponse(BaseModel):
     status: WebsiteScrapeStatus
     error_message: Optional[str] = None
 
-# --- Website Scrape Schedule Schemas ---
+    class Config:
+        from_attributes = True
+
+
 class WebsiteScrapeSchedulesResponse(BaseModel):
     id: int
-    org_id: int
-    url: str
+    web_id: int
     interval_days: int
     time_of_scrape: time
+    last_scraped_at: Optional[datetime] = None
+    next_scraped_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True
