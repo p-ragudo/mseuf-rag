@@ -16,6 +16,7 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main'
+
     steps:
       - uses: actions/checkout@v4
 
@@ -29,19 +30,22 @@ jobs:
       - name: Sync repo (without frontend)
         run: |
           rsync -az --delete \
-            --exclude '.git' --exclude '/.github' --exclude '/frontend' \
-            --exclude '/backend/.env' --exclude '.venv' \
-            --exclude '__pycache__' --exclude 'node_modules' \
+            --exclude '.git' \
+            --exclude '/.github' \
+            --exclude '/frontend' \
+            --exclude '/backend/.env' \
+            --exclude '.venv' \
+            --exclude '__pycache__' \
+            --exclude 'node_modules' \
             -e "ssh -i ~/.ssh/deploy_key" \
             ./ ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}:~/app/
 
-      - name: Build, migrate, restart
+      - name: Build and restart
         run: |
           ssh -i ~/.ssh/deploy_key ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} '
             set -e
             cd ~/app
             docker compose build
-            docker compose run --rm api alembic upgrade head
             docker compose up -d
             docker image prune -f
           '
