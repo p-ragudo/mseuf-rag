@@ -6,7 +6,7 @@ on:
     paths:
       - "backend/**"
       - "docker-compose.yml"
-      - ".github/workflows/deploy-backend.yml"
+      - ".github/workflows/deploy-backend.yaml"
   workflow_dispatch:
 
 concurrency:
