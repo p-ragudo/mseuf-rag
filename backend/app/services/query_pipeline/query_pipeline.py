@@ -139,7 +139,9 @@ class QueryPipeline:
         return await asyncio.gather(dense_task, _sparse())
 
     async def execute(self, req: PipelineQueryRequest) -> PipelineQueryResponse:
-        top_k = max(settings.min_top_k, min(req.top_k, settings.max_top_k))
+        # Server-enforced top_k resolution
+        chosen_top_k = req.top_k or settings.default_top_k
+        top_k = max(settings.min_top_k, min(chosen_top_k, settings.max_top_k))
 
         # 1. Compute dense vector (768-dim)
         dense_embed = await self.embedder.embed_one(req.query, task_type="RETRIEVAL_QUERY")
