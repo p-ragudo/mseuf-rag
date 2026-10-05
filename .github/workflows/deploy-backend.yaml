@@ -31,7 +31,7 @@ jobs:
           rsync -az --delete \
             --exclude '.git' --exclude '/.github' --exclude '/frontend' \
             --exclude '/backend/.env' --exclude '.venv' \
-            --exclude '_pycache_' --exclude 'node_modules' \
+            --exclude '__pycache__' --exclude 'node_modules' \
             -e "ssh -i ~/.ssh/deploy_key" \
             ./ ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}:~/app/
 
