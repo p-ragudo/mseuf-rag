@@ -6,7 +6,7 @@ on:
     paths:
       - "backend/**"
       - "docker-compose.yml"
-      - ".github/workflows/deploy-backend.yaml"
+      - ".github/workflows/deploy-backend.yml"
   workflow_dispatch:
 
 concurrency:
@@ -35,12 +35,13 @@ jobs:
             -e "ssh -i ~/.ssh/deploy_key" \
             ./ ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}:~/app/
 
-      - name: Build and restart
+      - name: Build, migrate, restart
         run: |
           ssh -i ~/.ssh/deploy_key ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} '
             set -e
             cd ~/app
             docker compose build
+            docker compose run --rm api alembic upgrade head
             docker compose up -d
             docker image prune -f
           '
