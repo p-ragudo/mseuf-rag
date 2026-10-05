@@ -11,6 +11,7 @@
   import TopicsBarList from "../components/TopicsBarlist.svelte";
   import KnowledgeAssetsTable from "../components/KnowledgeAssestTable.svelte";
   import HumanHandoffCard from "../components/HumanHandOffCard.svelte";
+  import { auth, logout } from "../auth.svelte";
   import { fade } from "svelte/transition";
   import { push } from "svelte-spa-router";
 

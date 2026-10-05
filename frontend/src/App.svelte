@@ -1,6 +1,17 @@
 <script lang="ts">
-  import Router from "svelte-spa-router";
+  import { onMount } from "svelte";
+  import Router, { replace } from "svelte-spa-router";
   import routes from "./routes";
+  import { auth, initAuth } from "./lib/auth.svelte";
+
+  onMount(() => {
+    initAuth();
+  });
+
+  // Send the user to /login whenever the token disappears (logout or a 401)
+  $effect(() => {
+    if (!auth.token) replace("/login");
+  });
 </script>
 
 <Router {routes} />

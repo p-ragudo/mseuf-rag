@@ -1,5 +1,6 @@
 <script lang="ts">
   import { fly } from "svelte/transition";
+  import { auth, login, register } from "../auth.svelte";
 
   type Mode = "login" | "register";
 
@@ -13,6 +14,7 @@
 
   let isSubmitting = $state(false);
   let errorMessage = $state("");
+  let successMessage = $state("");
 
   let passwordsMatch = $derived(
     mode === "login" || password === confirmPassword,
@@ -21,11 +23,14 @@
   function switchMode(next: Mode) {
     mode = next;
     errorMessage = "";
+    successMessage = "";
+    auth.error = null;
   }
 
   async function handleSubmit(e: Event) {
     e.preventDefault();
     errorMessage = "";
+    successMessage = "";
 
     if (mode === "register" && !passwordsMatch) {
       errorMessage = "Passwords do not match.";
@@ -35,13 +40,34 @@
     isSubmitting = true;
     try {
       if (mode === "login") {
-        // TODO: call your auth endpoint
-        console.log("login", { email, password });
+        const ok = await login({ email, password });
+        if (!ok) {
+          errorMessage =
+            auth.error ?? "Something went wrong. Please try again.";
+        }
+        // On success auth.token is set, so App.svelte swaps this page out.
       } else {
-        // TODO: call your registration endpoint
-        console.log("register", { firstName, lastName, email, password });
+        const ok = await register({
+          email,
+          password,
+          first_name: firstName,
+          last_name: lastName,
+        });
+
+        if (ok) {
+          // Back to login, keep the email so they only need to type the password
+          mode = "login";
+          password = "";
+          confirmPassword = "";
+          firstName = "";
+          lastName = "";
+          successMessage = "Account created! You can now log in.";
+        } else {
+          errorMessage =
+            auth.error ?? "Something went wrong. Please try again.";
+        }
       }
-    } catch (err) {
+    } catch {
       errorMessage = "Something went wrong. Please try again.";
     } finally {
       isSubmitting = false;
@@ -180,6 +206,28 @@
           >
             Forgot password?
           </button>
+        </div>
+      {/if}
+
+      {#if successMessage}
+        <div
+          transition:fly={{ y: -8, duration: 150 }}
+          role="status"
+          class="flex flex-row items-center gap-2 rounded-md border border-green-200 bg-green-50 px-4 py-3 text-sm font-semibold text-green-700"
+        >
+          <svg
+            class="h-4 w-4 shrink-0"
+            viewBox="0 0 20 20"
+            fill="currentColor"
+            aria-hidden="true"
+          >
+            <path
+              fill-rule="evenodd"
+              d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.7-9.3a1 1 0 00-1.4-1.4L9 10.6 7.7 9.3a1 1 0 00-1.4 1.4l2 2a1 1 0 001.4 0l4-4z"
+              clip-rule="evenodd"
+            />
+          </svg>
+          {successMessage}
         </div>
       {/if}
 
