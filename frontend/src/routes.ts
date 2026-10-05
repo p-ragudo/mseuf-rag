@@ -7,6 +7,7 @@ import KnowledgeBase from "./lib/routes/KnowledgeBase.svelte";
 import Escalation from "./lib/routes/Escalation.svelte";
 import Login from "./lib/routes/Login.svelte";
 import NotFound from "./lib/routes/NotFound.svelte";
+import Chat from "./lib/routes/Chat.svelte";
 
 function requireAuth(): boolean {
   if (auth.token) return true;
@@ -24,11 +25,11 @@ const protectedRoute = (component: any) =>
   wrap({ component, conditions: [requireAuth] });
 
 const routes: RouteDefinition = {
-  "/": protectedRoute(Overview),
   "/overview": protectedRoute(Overview),
   "/knowledge-base": protectedRoute(KnowledgeBase),
   "/escalation": protectedRoute(Escalation),
   "/login": wrap({ component: Login, conditions: [requireGuest] }),
+  "/chat/:id": Chat,
   "*": NotFound,
 };
 
