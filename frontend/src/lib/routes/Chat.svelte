@@ -1,7 +1,13 @@
 <script lang="ts">
   import { tick } from "svelte";
+  import { marked } from "marked";
+  import DOMPurify from "dompurify";
 
-  type Source = { title?: string; url?: string };
+  type Source = {
+    title?: string;
+    url?: string;
+  };
+
   type Message = {
     id: string;
     role: "user" | "assistant";
@@ -10,12 +16,21 @@
     error?: boolean;
   };
 
+  type QueryResponse = {
+    query: string;
+    answer: string;
+    is_cached?: boolean;
+    source?: string;
+    sources?: Source[];
+    contexts?: unknown[];
+  };
+
   // Gets :id from the svelte-spa-router route
   let { params = {} }: { params?: { id?: string } } = $props();
 
   const API_URL = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
 
-  // Route ID
+  // Organization ID from the route
   const orgId = $derived(params.id);
 
   let messages = $state<Message[]>([]);
@@ -41,7 +56,9 @@
     try {
       const existing = localStorage.getItem(key);
 
-      if (existing) return existing;
+      if (existing) {
+        return existing;
+      }
 
       const created = crypto.randomUUID();
 
@@ -82,21 +99,36 @@
     inputEl.style.height = `${Math.min(inputEl.scrollHeight, 160)}px`;
   }
 
+  function renderMarkdown(content: string): string {
+    const html = marked.parse(content, {
+      breaks: true,
+      gfm: true,
+    });
+
+    return DOMPurify.sanitize(html as string);
+  }
+
   async function send() {
     const content = input.trim();
 
     if (!content || loading || !orgId) return;
 
-    // Save the organization ID used for this request.
+    // Keep the values used by this request.
+    // This prevents an old request from updating a new organization chat.
     const currentOrg = orgId;
+    const currentSession = sessionId;
 
+    // Add user's message immediately.
     messages.push({
       id: crypto.randomUUID(),
       role: "user",
       content,
     });
 
+    // Clear input.
     input = "";
+
+    // Start loading state.
     loading = true;
 
     await tick();
@@ -105,22 +137,40 @@
     scrollToBottom();
 
     try {
-      const res = await fetch(`${API_URL}/chat/${currentOrg}`, {
+      const response = await fetch(`${API_URL}/query/${currentOrg}`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          message: content,
-          session_id: sessionId,
+          query: content,
+          org_1: Number(currentOrg),
+          top_k: 5,
+          session_id: currentSession,
         }),
       });
 
-      if (!res.ok) {
-        throw new Error(`Request failed (${res.status})`);
+      if (!response.ok) {
+        let errorMessage = `Request failed (${response.status})`;
+
+        try {
+          const errorData = await response.json();
+
+          if (typeof errorData.detail === "string") {
+            errorMessage = errorData.detail;
+          } else if (Array.isArray(errorData.detail)) {
+            errorMessage = errorData.detail
+              .map((error: { msg?: string }) => error.msg ?? "Validation error")
+              .join(", ");
+          }
+        } catch {
+          // Response wasn't JSON.
+        }
+
+        throw new Error(errorMessage);
       }
 
-      const data = await res.json();
+      const data: QueryResponse = await response.json();
 
       // Don't update the old chat if the user changed organizations.
       if (currentOrg !== orgId) return;
@@ -131,18 +181,23 @@
         content: data.answer,
         sources: data.sources,
       });
-    } catch {
+    } catch (error) {
+      // Don't update the old chat if the user changed organizations.
       if (currentOrg !== orgId) return;
 
       messages.push({
         id: crypto.randomUUID(),
         role: "assistant",
-        content: "Sorry, something went wrong. Please try again.",
+        content:
+          error instanceof Error
+            ? error.message
+            : "Sorry, something went wrong. Please try again.",
         error: true,
       });
     } finally {
       loading = false;
-      scrollToBottom();
+
+      await scrollToBottom();
     }
   }
 
@@ -166,7 +221,6 @@
 
       <h1 class="text-xl font-semibold">Chat Assistant</h1>
 
-      <!-- Optional: show the current route ID -->
       <span class="text-xs text-gray-500">
         Organization ID: {orgId ?? "Unknown"}
       </span>
@@ -215,14 +269,22 @@
           {/if}
 
           <div
-            class="max-w-[85%] whitespace-pre-wrap rounded-xl px-4 py-2.5 text-sm leading-relaxed
+            class="max-w-[85%] rounded-xl px-4 py-3 text-sm leading-relaxed
               {message.role === 'user'
               ? 'bg-primary text-white'
               : message.error
                 ? 'border border-red-200 bg-red-50 text-red-700'
                 : 'border border-outline bg-white text-gray-800 shadow-sm'}"
           >
-            {message.content}
+            {#if message.role === "assistant" && !message.error}
+              <div class="markdown-content">
+                {@html renderMarkdown(message.content)}
+              </div>
+            {:else}
+              <div class="whitespace-pre-wrap">
+                {message.content}
+              </div>
+            {/if}
 
             {#if message.sources?.length}
               <div
@@ -300,7 +362,7 @@
       <button
         type="button"
         onclick={send}
-        disabled={loading || !input.trim()}
+        disabled={loading || !input.trim() || !orgId}
         class="rounded-md bg-primary px-4 py-2.5 text-sm font-semibold text-white transition-opacity duration-200 hover:cursor-pointer disabled:cursor-not-allowed disabled:opacity-60"
       >
         Send
@@ -312,3 +374,100 @@
     </p>
   </footer>
 </div>
+
+<style>
+  :global(.markdown-content) {
+    line-height: 1.7;
+  }
+
+  :global(.markdown-content p) {
+    margin: 0 0 0.75rem;
+  }
+
+  :global(.markdown-content p:last-child) {
+    margin-bottom: 0;
+  }
+
+  :global(.markdown-content h1) {
+    margin: 1rem 0 0.5rem;
+    font-size: 1.25rem;
+    font-weight: 700;
+  }
+
+  :global(.markdown-content h2) {
+    margin: 1rem 0 0.5rem;
+    font-size: 1.125rem;
+    font-weight: 700;
+  }
+
+  :global(.markdown-content h3) {
+    margin: 1rem 0 0.5rem;
+    font-size: 1rem;
+    font-weight: 700;
+    color: #7a1f2b;
+  }
+
+  :global(.markdown-content ul) {
+    margin: 0.5rem 0 0.75rem;
+    padding-left: 1.5rem;
+    list-style-type: disc;
+  }
+
+  :global(.markdown-content ol) {
+    margin: 0.5rem 0 0.75rem;
+    padding-left: 1.5rem;
+    list-style-type: decimal;
+  }
+
+  :global(.markdown-content li) {
+    margin: 0.25rem 0;
+  }
+
+  :global(.markdown-content strong) {
+    font-weight: 700;
+  }
+
+  :global(.markdown-content em) {
+    font-style: italic;
+  }
+
+  :global(.markdown-content code) {
+    border-radius: 0.25rem;
+    background: #f1f3f5;
+    padding: 0.125rem 0.35rem;
+    font-family: monospace;
+    font-size: 0.85em;
+  }
+
+  :global(.markdown-content pre) {
+    margin: 0.75rem 0;
+    overflow-x: auto;
+    border-radius: 0.5rem;
+    background: #f1f3f5;
+    padding: 0.75rem;
+  }
+
+  :global(.markdown-content pre code) {
+    background: transparent;
+    padding: 0;
+  }
+
+  :global(.markdown-content blockquote) {
+    margin: 0.75rem 0;
+    border-left: 3px solid #7a1f2b;
+    padding-left: 0.75rem;
+    color: #59616e;
+  }
+
+  :global(.markdown-content hr) {
+    margin: 1rem 0;
+    border: 0;
+    border-top: 1px solid #e5e7eb;
+  }
+
+  :global(.markdown-content a) {
+    color: #7a1f2b;
+    font-weight: 600;
+    text-decoration: underline;
+  }
+</style>
