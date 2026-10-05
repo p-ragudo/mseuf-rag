@@ -5,7 +5,11 @@
   import ProfileMenu from "./ProfileMenu.svelte";
   import { auth, logout } from "../auth.svelte";
 
-  type Profile = { id: string; name: string; initials: string };
+  type Profile = {
+    id: string;
+    name: string;
+    initials: string;
+  };
 
   let open = $state(false);
   let container: HTMLDivElement | undefined = $state();
@@ -15,17 +19,31 @@
       ? `${auth.user.first_name} ${auth.user.last_name}`
       : "User Profile",
   );
+
   let initials = $derived(
     auth.user
       ? `${auth.user.first_name[0] ?? ""}${auth.user.last_name[0] ?? ""}`.toUpperCase()
       : "UP",
   );
+
   let subtitle = $derived(auth.user?.email ?? "Role");
 
   const profiles: Profile[] = [
-    { id: "1", name: "User Profile 1", initials: "UP" },
-    { id: "2", name: "User Profile 2", initials: "UP" },
-    { id: "3", name: "User Profile 3", initials: "UP" },
+    {
+      id: "1",
+      name: "MSEUF",
+      initials: "MS",
+    },
+    {
+      id: "2",
+      name: "UNI Org",
+      initials: "UN",
+    },
+    {
+      id: "3",
+      name: "Test Organization",
+      initials: "TO",
+    },
   ];
 
   function handleSelect(profile: Profile) {
@@ -57,6 +75,7 @@
 >
   <div class="flex flex-col justify-center">
     <h2 class="text-primary">UNI ORG</h2>
+
     <h1 class="text-xl font-semibold">
       Admissions Intelligence Hub
       <span class="font-normal text-[#59616E]">/ Rooney Admin</span>
@@ -76,12 +95,15 @@
       >
         {initials}
       </div>
+
       <div class="flex min-w-0 max-w-40 flex-col items-start">
         <span class="w-full truncate text-sm font-bold">{displayName}</span>
+
         <span class="w-full truncate text-sm font-normal text-[#59616E]">
           {subtitle}
         </span>
       </div>
+
       <DropDownIcon />
     </button>
 
@@ -116,6 +138,7 @@
               <polyline points="16 17 21 12 16 7" />
               <line x1="21" y1="12" x2="9" y2="12" />
             </svg>
+
             Log out
           </button>
         </div>

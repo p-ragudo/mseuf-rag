@@ -70,6 +70,31 @@ export async function getOrg(
   }
 }
 
+export async function listUserOrganizations(): Promise<Organization[]> {
+  orgState.loading = true;
+  orgState.error = null;
+
+  try {
+    const response = await fetch(`${API_URL}/orgs/`, {
+      credentials: "include",
+    });
+
+    if (!response.ok) {
+      orgState.error = await parseError(response);
+      return [];
+    }
+
+    const data: Organization[] = await response.json();
+
+    return data;
+  } catch {
+    orgState.error = "Cannot reach the server. Is the backend running?";
+    return [];
+  } finally {
+    orgState.loading = false;
+  }
+}
+
 export function clearOrg(): void {
   orgState.org = null;
   orgState.error = null;
