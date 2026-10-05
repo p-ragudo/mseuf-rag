@@ -2,6 +2,7 @@
   import NavItem from "./NavItem.svelte";
   import EscalationIcon from "../icons/EscalationIcon.svelte";
   import KnowledgeBaseIcon from "../icons/KnowledgeBaseIcon.svelte";
+  import MascotIcon from "../icons/MascotIcon.svelte";
   import OverviewIcon from "../icons/OverviewIcon.svelte";
 
   interface Props {
@@ -31,13 +32,14 @@
     <h3>WORKSPACE</h3>
 
     <ul class="space-y-1">
-      <NavItem href="/" text="Overview" icon={OverviewIcon} />
+      <NavItem href="/overview" text="Overview" icon={OverviewIcon} />
       <NavItem
         href="/knowledge-base"
         text="Knowledge Base"
         icon={KnowledgeBaseIcon}
       />
       <NavItem href="/escalation" text="Escalation" icon={EscalationIcon} />
+      <NavItem href="/mascot" text="Mascot" icon={MascotIcon} />
     </ul>
   </nav>
 
