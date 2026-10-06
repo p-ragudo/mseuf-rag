@@ -17,7 +17,7 @@ def get_query_pipeline() -> QueryPipeline:
     return QueryPipeline()
 
 
-@router.post("/{org_id}/", response_model=PipelineQueryResponse)
+@router.post("/{org_id}", response_model=PipelineQueryResponse)
 async def execute_query(
     org_id: int,
     body: QueryBodyRequest,
