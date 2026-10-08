@@ -2,6 +2,7 @@ import xml.etree.ElementTree as ET
 from typing import List, Optional, Set
 from urllib.parse import urljoin, urlparse
 from urllib.robotparser import RobotFileParser
+from datetime import datetime, timezone
 
 import httpx
 from crawl4ai import AsyncWebCrawler, CrawlerRunConfig, CacheMode
@@ -215,21 +216,22 @@ async def run_discovery(
         for target_url in sorted_urls
     ]
 
-    total_inserted = 0
+    now = datetime.now(timezone.utc)
     BATCH_SIZE = 200
 
     async with async_session() as session:
         for i in range(0, len(records), BATCH_SIZE):
-            batch = records[i:i + BATCH_SIZE]
+            batch = [{**r, "last_seen_at": now} for r in records[i:i + BATCH_SIZE]]
             stmt = (
                 insert(ScrapedPage)
                 .values(batch)
-                .on_conflict_do_nothing(index_elements=["org_id", "web_id", "url"])
-                .returning(ScrapedPage.id)
+                .on_conflict_do_update(
+                    index_elements=["org_id", "web_id", "url"],
+                    set_={"last_seen_at": now},
+                )
             )
-            res = await session.execute(stmt)
-            inserted_ids = res.scalars().all()
-            total_inserted += len(inserted_ids)
+            await session.execute(stmt)
             await session.commit()
 
-    return total_inserted
+    # total URLs discovered this run (used by the purge safety guard), not only new ones
+    return len(sorted_urls)

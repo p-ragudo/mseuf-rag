@@ -1,13 +1,14 @@
 from datetime import datetime, timezone
 from typing import List, Optional
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 
 from app.core.database import async_session
 from app.models.chunk import Chunk
 from app.models.scraped_page import PageProcessStatus, ScrapedPage
 from app.services.ingest_pipeline.chunker import chunk_markdown, estimate_token_count
 from app.services.ingest_pipeline.clean_markdown import clean_markdown
+from app.utils.temporal import extract_doc_period
 
 
 def _page_title_from_url(url: str) -> str:
@@ -23,13 +24,13 @@ async def process_and_chunk_pages(
     batch_size: int = 20,
 ) -> int:
     """
-    Single implementation used by BOTH the orchestrator's chunker_worker and
-    any standalone script (the two used to be duplicated copies).
+    Takes COMPLETED pages with chunked_at IS NULL, cleans them, chunks them,
+    replaces the page's old chunks and stamps chunked_at.
 
-    Takes COMPLETED pages with chunked_at IS NULL, cleans them, chunks them
-    with the structure-aware chunker, replaces the page's old chunks and
-    stamps chunked_at. Returns the number of chunks created (0 when there
-    is no pending page).
+    NEW: when a page already had chunks, its old Qdrant points are now orphans
+    (new chunk rows get new ids), so the page is flagged `qdrant_cleanup_pending`
+    and swept by the orchestrator once the new points are synced.
+    Also records the page-level academic period.
     """
     async with async_session() as session:
         conditions = [
@@ -51,6 +52,12 @@ async def process_and_chunk_pages(
             cleaned = clean_markdown(page.markdown_content or "")
             drafts = chunk_markdown(cleaned, page_title=_page_title_from_url(page.url))
 
+            had_old_chunks = (
+                await session.scalar(
+                    select(func.count(Chunk.id)).where(Chunk.page_id == page.id)
+                )
+                or 0
+            ) > 0
             await session.execute(delete(Chunk).where(Chunk.page_id == page.id))
 
             new_chunks: List[Chunk] = [
@@ -71,6 +78,9 @@ async def process_and_chunk_pages(
                 session.add_all(new_chunks)
                 total_created += len(new_chunks)
 
+            page.doc_period = extract_doc_period(cleaned, url=page.url)
+            if had_old_chunks:
+                page.qdrant_cleanup_pending = True
             page.chunked_at = datetime.now(timezone.utc)
 
         await session.commit()

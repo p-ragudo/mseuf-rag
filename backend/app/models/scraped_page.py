@@ -1,7 +1,9 @@
 import enum
 from datetime import datetime
 from typing import TYPE_CHECKING
-from sqlalchemy import String, Text, ForeignKey, Enum, Integer, DateTime, UniqueConstraint
+from sqlalchemy import (
+    Boolean, DateTime, Enum, ForeignKey, Integer, String, Text, UniqueConstraint, false,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.database import Base
 
@@ -34,10 +36,23 @@ class ScrapedPage(Base):
         default=PageProcessStatus.PENDING,
         nullable=False,
     )
-    chunked_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    chunked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     retries: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+    # --- Freshness / change tracking ---
+    # sha256 of whitespace-normalised cleaned markdown; unchanged hash => skip re-chunk/qgen/embed
+    content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # start year of the academic period this page is about (2025 => AY 2025-2026), if detectable
+    doc_period: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # when WE first saw this version of the content
+    content_changed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_scraped_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # stamped by discovery; pages not seen in a later successful discovery are purged
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # True when old Qdrant points of this page may exist and must be swept
+    qdrant_cleanup_pending: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=false(), nullable=False
+    )
 
     # Relationships
     org: Mapped["Org"] = relationship()

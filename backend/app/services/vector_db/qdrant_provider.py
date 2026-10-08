@@ -31,24 +31,27 @@ class QdrantVectorDB(BaseVectorDB):
 
         self.client = AsyncQdrantClient(url=cluster_endpoint, api_key=api_key)
 
-    def _build_filter(self, filters: Optional[Dict[str, Any]]) -> Optional[rest_models.Filter]:
-        if not filters:
+    def _build_filter(
+        self,
+        filters: Optional[Dict[str, Any]],
+        must_not: Optional[Dict[str, Any]] = None,
+    ) -> Optional[rest_models.Filter]:
+        if not filters and not must_not:
             return None
-        conditions = []
-        for key, val in filters.items():
-            if isinstance(val, list):
-                conditions.append(
-                    rest_models.FieldCondition(
-                        key=key, match=rest_models.MatchAny(any=val)
-                    )
-                )
-            else:
-                conditions.append(
-                    rest_models.FieldCondition(
-                        key=key, match=rest_models.MatchValue(value=val)
-                    )
-                )
-        return rest_models.Filter(must=conditions)
+
+        def _conds(d: Optional[Dict[str, Any]]) -> List[rest_models.FieldCondition]:
+            out: List[rest_models.FieldCondition] = []
+            for key, val in (d or {}).items():
+                if isinstance(val, list):
+                    out.append(rest_models.FieldCondition(key=key, match=rest_models.MatchAny(any=val)))
+                else:
+                    out.append(rest_models.FieldCondition(key=key, match=rest_models.MatchValue(value=val)))
+            return out
+
+        return rest_models.Filter(
+            must=_conds(filters) or None,
+            must_not=_conds(must_not) or None,
+        )
 
     def _get_quantization_config(self) -> Optional[rest_models.QuantizationConfig]:
         if not settings.quantization_enabled:
@@ -162,6 +165,13 @@ class QdrantVectorDB(BaseVectorDB):
                 field_schema=rest_models.KeywordIndexParams(
                     type="keyword",
                 ),
+            )
+
+        if "page_id" not in payload_schema:
+            await self.client.create_payload_index(
+                collection_name=collection_name,
+                field_name="page_id",
+                field_schema=rest_models.PayloadSchemaType.INTEGER,
             )
 
     async def upsert_points(
@@ -308,6 +318,23 @@ class QdrantVectorDB(BaseVectorDB):
             )
             for hit in response.points
         ]
+
+    async def delete_points(
+        self,
+        collection_name: str,
+        filters: Dict[str, Any],
+        must_not: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        # Convention: never touch Qdrant without the tenant identifier.
+        if not filters or "group_id" not in filters:
+            raise ValueError("delete_points requires a group_id (tenant) filter.")
+        await self.client.delete(
+            collection_name=collection_name,
+            points_selector=rest_models.FilterSelector(
+                filter=self._build_filter(filters, must_not)
+            ),
+            wait=True,
+        )
 
     async def close(self) -> None:
         if hasattr(self, "client") and self.client is not None:

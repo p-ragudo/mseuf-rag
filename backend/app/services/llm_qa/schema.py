@@ -17,6 +17,9 @@ class RetrievedContextItem(BaseModel):
     source_url: Optional[str] = Field(default=None, description="URL or reference link")
     campus: Optional[str] = Field(default="main", description="Sub-entity, campus, or branch origin")
     academic_level: Optional[str] = Field(default="general", description="Target academic or organizational level")
+    doc_type: Optional[str] = Field(default=None, description="'ephemeral' or 'evergreen'")
+    doc_period: Optional[str] = Field(default=None, description="Academic period covered, e.g. '2025-2026'")
+    last_updated: Optional[str] = Field(default=None, description="YYYY-MM-DD the indexed content last changed")
     initial_score: Optional[float] = Field(default=None, description="Upstream RRF score before reranking")
     rerank_score: Optional[float] = Field(default=None, description="Cross-encoder relevance score")
     matched_questions: List[MatchedQuestionDetail] = Field(

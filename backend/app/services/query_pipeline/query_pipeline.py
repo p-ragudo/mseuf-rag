@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import re
+import time
 from typing import Dict, List, Optional, Tuple
 
 from app.core.config import settings
@@ -20,6 +21,7 @@ from app.services.query_pipeline.schema import (
     PipelineQueryRequest,
     PipelineQueryResponse,
 )
+from app.services.query_pipeline.temporal_resolver import resolve_temporal_conflicts
 from app.services.reranker.factory import get_reranker
 from app.services.reranker.schema import RerankCandidate
 from app.services.semantic_cache.factory import get_semantic_cache
@@ -27,6 +29,10 @@ from app.services.semantic_cache.schemas import CacheMetadata
 from app.services.vector_db.factory import get_vector_db
 
 logger = logging.getLogger(__name__)
+
+_ORG_CACHE_TTL_SECONDS = 30.0
+# org_id -> (fetched_at_monotonic, org_name, content_version)
+_org_cache: Dict[int, Tuple[float, str, int]] = {}
 
 
 def _normalize_campus(value: Optional[str]) -> Optional[str]:
@@ -37,11 +43,15 @@ def _normalize_campus(value: Optional[str]) -> Optional[str]:
     return slug if slug and slug != "main" else None
 
 
-def _cache_scope(org_id: int, campus: Optional[str]) -> str:
-    """Tenant tag used for the semantic cache."""
+def _cache_scope(org_id: int, campus: Optional[str], version: int) -> str:
+    """
+    Tenant tag used for the semantic cache. Includes the tenant's content_version so
+    a re-ingest makes all previously cached answers unreachable.
+    """
+    base = f"{org_id}_v{version}"
     if campus:
-        return f"{org_id}_{campus.replace('-', '_')}"
-    return str(org_id)
+        return f"{base}_{campus.replace('-', '_')}"
+    return base
 
 
 class QueryPipeline:
@@ -60,12 +70,19 @@ class QueryPipeline:
         """Always resolves dynamically from settings."""
         return settings.collection_name
 
-    async def _resolve_org_details(self, org_id: int) -> Tuple[str, List[str]]:
+    async def _resolve_org_details(self, org_id: int) -> Tuple[str, List[str], int]:
+        now = time.monotonic()
+        hit = _org_cache.get(org_id)
+        if hit and now - hit[0] < _ORG_CACHE_TTL_SECONDS:
+            return hit[1], [], hit[2]
+
         async with async_session() as session:
             org = await session.get(Org, org_id)
             if org:
-                return org.name, []
-        return "the organization", []
+                version = int(org.content_version or 0)
+                _org_cache[org_id] = (now, org.name, version)
+                return org.name, [], version
+        return "the organization", [], 0
 
     def _reciprocal_rank_fusion(
         self,
@@ -138,34 +155,40 @@ class QueryPipeline:
 
         return await asyncio.gather(dense_task, _sparse())
 
+    @staticmethod
+    def _cached_response(req: PipelineQueryRequest, cache_entry) -> PipelineQueryResponse:
+        cached_contexts = [
+            RetrievedContextItem(**item) if isinstance(item, dict) else item
+            for item in cache_entry.metadata.extra.get("contexts", [])
+        ]
+        return PipelineQueryResponse(
+            query=req.query,
+            answer=cache_entry.response,
+            is_cached=True,
+            source="cache",
+            sources=cache_entry.metadata.extra.get("sources", []),
+            contexts=cached_contexts,
+        )
+
     async def execute(self, req: PipelineQueryRequest) -> PipelineQueryResponse:
         # Server-enforced top_k resolution
         chosen_top_k = req.top_k or settings.default_top_k
         top_k = max(settings.min_top_k, min(chosen_top_k, settings.max_top_k))
 
-        # 1. Compute dense vector (768-dim)
-        dense_embed = await self.embedder.embed_one(req.query, task_type="RETRIEVAL_QUERY")
+        # 1. Dense query vector + org details (name, content_version) in parallel
+        dense_embed, (org_name, known_locations, content_version) = await asyncio.gather(
+            self.embedder.embed_one(req.query, task_type="RETRIEVAL_QUERY"),
+            self._resolve_org_details(req.org_id),
+        )
         dense_vec = dense_embed.values
 
-        # 2. Semantic cache fast-path check FIRST (tenant default scope)
-        base_cache_scope = str(req.org_id)
+        # 2. Semantic cache fast-path (tenant scope, tied to the tenant's content version)
+        base_cache_scope = _cache_scope(req.org_id, None, content_version)
         cache_entry = await self.semantic_cache.get(vector=dense_vec, org_id=base_cache_scope)
         if cache_entry:
-            cached_contexts = [
-                RetrievedContextItem(**item) if isinstance(item, dict) else item
-                for item in cache_entry.metadata.extra.get("contexts", [])
-            ]
-            return PipelineQueryResponse(
-                query=req.query,
-                answer=cache_entry.response,
-                is_cached=True,
-                source="cache",
-                sources=cache_entry.metadata.extra.get("sources", []),
-                contexts=cached_contexts,
-            )
+            return self._cached_response(req, cache_entry)
 
         # 3. Cache MISS: Run classifier & sparse BM25 encoding
-        org_name, known_locations = await self._resolve_org_details(req.org_id)
         intent, sparse_data = await asyncio.gather(
             self.classifier.classify_intent(
                 req.query, org_name=org_name, known_locations=known_locations
@@ -174,24 +197,13 @@ class QueryPipeline:
         )
 
         campus = _normalize_campus(intent.detected_sub_entity)
-        final_cache_scope = _cache_scope(req.org_id, campus)
+        final_cache_scope = _cache_scope(req.org_id, campus, content_version)
 
         # If campus is detected, check campus-specific cache scope
         if campus and final_cache_scope != base_cache_scope:
             cache_entry = await self.semantic_cache.get(vector=dense_vec, org_id=final_cache_scope)
             if cache_entry:
-                cached_contexts = [
-                    RetrievedContextItem(**item) if isinstance(item, dict) else item
-                    for item in cache_entry.metadata.extra.get("contexts", [])
-                ]
-                return PipelineQueryResponse(
-                    query=req.query,
-                    answer=cache_entry.response,
-                    is_cached=True,
-                    source="cache",
-                    sources=cache_entry.metadata.extra.get("sources", []),
-                    contexts=cached_contexts,
-                )
+                return self._cached_response(req, cache_entry)
 
         # 4. Hybrid Retrieval in Active Collection
         tenant_filter: Dict[str, str] = {"group_id": str(req.org_id)}
@@ -220,7 +232,8 @@ class QueryPipeline:
                 source="fallback",
             )
 
-        # 6. Cross-Encoder Reranking
+        # 6. Cross-Encoder Reranking. Over-fetch (2x) so that dropping stale
+        #    duplicates below still leaves a full top_k of distinct, current evidence.
         rerank_pool_size = max(top_k * 4, 25)
         candidates = [
             RerankCandidate(
@@ -236,7 +249,7 @@ class QueryPipeline:
         reranked = await self.reranker.rerank(
             query=req.query,
             candidates=candidates,
-            top_k=top_k,
+            top_k=top_k * 2,
             score_threshold=settings.reranker_score_threshold,
         )
         if not reranked:
@@ -247,8 +260,27 @@ class QueryPipeline:
                 source="fallback",
             )
 
+        # 6b. Temporal conflict resolution: drop versions provably superseded by a fresher one
+        reranked, superseded = resolve_temporal_conflicts(req.query, reranked)
+        if superseded:
+            logger.info(
+                "Dropped %d superseded docs for org %s: %s",
+                len(superseded),
+                req.org_id,
+                [(s.source_url, s.reason) for s in superseded],
+            )
+        reranked = reranked[:top_k]
+
         # 7. Context Expansion (Postgres small-to-big)
         contexts = await self.expander.expand(req.org_id, reranked)
+        if not contexts:
+            return PipelineQueryResponse(
+                query=req.query,
+                answer="No sufficiently relevant institutional information was found to answer your inquiry.",
+                is_cached=False,
+                source="fallback",
+                superseded=superseded,
+            )
         source_urls: List[str] = []
         for c in contexts:
             if c.source_url and c.source_url not in source_urls:
@@ -262,7 +294,7 @@ class QueryPipeline:
         if intent.is_ambiguous and intent.clarification_message:
             final_answer += f"\n\n---\n*Note*: {intent.clarification_message}"
 
-        # 9. Store in Semantic Cache
+        # 9. Store in Semantic Cache (scope carries the tenant's content_version)
         await self.semantic_cache.set(
             query=req.query,
             vector=dense_vec,
@@ -284,4 +316,5 @@ class QueryPipeline:
             source="llm",
             sources=qa_response.sources,
             contexts=contexts,
+            superseded=superseded,
         )

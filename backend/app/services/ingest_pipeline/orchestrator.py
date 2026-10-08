@@ -1,18 +1,20 @@
 import asyncio
+import hashlib
 import logging
 import re
 import traceback
-from datetime import datetime
-from typing import Dict, List
+from datetime import datetime, timedelta, timezone
+from typing import Dict, List, Optional
 from urllib.parse import urlparse
 
 from crawl4ai import AsyncWebCrawler, CrawlerRunConfig, CacheMode
-from sqlalchemy import select, update, func
+from sqlalchemy import delete, or_, select, update, func
 
 from app.core.config import settings
 from app.core.database import async_session
 from app.models.chunk import Chunk
 from app.models.generated_question import GeneratedQuestion
+from app.models.org import Org
 from app.models.scraped_page import PageProcessStatus, ScrapedPage
 from app.models.website import Website, WebsiteScrapeStatus
 from app.services.embeddings.factory import get_embedder
@@ -22,17 +24,24 @@ from app.services.ingest_pipeline.chunker import (  # noqa: F401
     estimate_token_count,
     is_substantive_chunk,
 )
+from app.services.ingest_pipeline.clean_markdown import clean_markdown
 from app.services.ingest_pipeline.discovery import run_discovery
 from app.services.llm_qgen.factory import get_question_generator
 from app.services.llm_qgen.schema import RawChunk
 from app.services.vector_db.factory import get_vector_db
 from app.services.vector_db.schema import SparseVectorData, VectorPoint
+from app.utils.temporal import extract_doc_period
 from app.utils.uuid_generator import generate_chunk_id, generate_doc_id, generate_question_id
 
 logger = logging.getLogger(__name__)
 
 QGEN_MAX_ATTEMPTS = 3
 SYNC_MAX_CONSECUTIVE_FAILURES = 5
+# Re-scrape pages whose last scrape is older than this when a run is triggered.
+DEFAULT_REFRESH_AFTER_HOURS = 12.0
+# Safety valve: if more than this fraction of known pages looks "missing" after
+# discovery, assume discovery degraded (blocked, fallback crawl) and purge nothing.
+PURGE_MAX_FRACTION = 0.5
 
 
 def get_active_sync_column():
@@ -110,6 +119,49 @@ def classify_document_type(url: str, text: str = "") -> str:
     return "evergreen"
 
 
+# --------------------------------------------------------------------------- #
+# Scraping with change detection
+# --------------------------------------------------------------------------- #
+def _hash_markdown(markdown: str) -> str:
+    """Hash of the CLEANED text, so link/tracking/markup noise doesn't count as a change."""
+    normalized = re.sub(r"\s+", " ", clean_markdown(markdown or "")).strip()
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _apply_scrape_result(page: ScrapedPage, markdown: str) -> bool:
+    """Updates the page row from a fresh crawl. Returns True when the content changed."""
+    now = datetime.now(timezone.utc)
+    new_hash = _hash_markdown(markdown)
+    # Legacy rows have no stored hash: derive it from the old markdown so an unchanged
+    # page is NOT re-chunked / re-questioned / re-embedded on the first refresh run.
+    old_hash = page.content_hash or (
+        _hash_markdown(page.markdown_content) if page.markdown_content else None
+    )
+
+    page.last_scraped_at = now
+    page.content_hash = new_hash
+    page.status = PageProcessStatus.COMPLETED
+    if new_hash == old_hash:
+        return False
+
+    page.markdown_content = markdown
+    page.content_changed_at = now
+    page.chunked_at = None  # forces re-chunk -> new chunks -> old points swept
+    return True
+
+
+def _register_failure(page: ScrapedPage, max_retries: int) -> None:
+    page.retries += 1
+    if page.retries < max_retries:
+        page.status = PageProcessStatus.PENDING
+    elif page.markdown_content:
+        # A failed REFRESH must not destroy a previously good page; keep serving it.
+        logger.warning(f"[Scraper] Refresh failed for {page.url}; keeping previous content.")
+        page.status = PageProcessStatus.COMPLETED
+    else:
+        page.status = PageProcessStatus.FAILED
+
+
 async def scraper_worker(web_id: int, is_discovery_done: asyncio.Event, max_retries: int = 3) -> int:
     total_scraped = 0
     config = CrawlerRunConfig(
@@ -154,24 +206,13 @@ async def scraper_worker(web_id: int, is_discovery_done: asyncio.Event, max_retr
                     try:
                         crawl_result = await crawler.arun(url=page.url, config=config)
                         if crawl_result.success and crawl_result.markdown:
-                            page.markdown_content = crawl_result.markdown
-                            page.status = PageProcessStatus.COMPLETED
+                            _apply_scrape_result(page, str(crawl_result.markdown))
                             total_scraped += 1
                         else:
-                            page.retries += 1
-                            page.status = (
-                                PageProcessStatus.FAILED
-                                if page.retries >= max_retries
-                                else PageProcessStatus.PENDING
-                            )
+                            _register_failure(page, max_retries)
                     except Exception as e:
                         logger.warning(f"[Scraper Error] {page.url}: {e}")
-                        page.retries += 1
-                        page.status = (
-                            PageProcessStatus.FAILED
-                            if page.retries >= max_retries
-                            else PageProcessStatus.PENDING
-                        )
+                        _register_failure(page, max_retries)
 
                     # Polite pacing to avoid triggering Cloudflare / Nginx TCP reset triggers
                     await asyncio.sleep(1.0)
@@ -390,6 +431,8 @@ async def qdrant_sync_worker(org_id: int, web_id: int, is_qgen_done: asyncio.Eve
                         Chunk.part_total.label("part_total"),
                         ScrapedPage.id.label("page_id"),
                         ScrapedPage.url.label("page_url"),
+                        ScrapedPage.doc_period.label("page_doc_period"),
+                        ScrapedPage.content_changed_at.label("page_updated_at"),
                     )
                     .join(Chunk, GeneratedQuestion.chunk_id == Chunk.id)
                     .join(ScrapedPage, Chunk.page_id == ScrapedPage.id)
@@ -427,6 +470,10 @@ async def qdrant_sync_worker(org_id: int, web_id: int, is_qgen_done: asyncio.Eve
                         doc_type = classify_document_type(row.page_url, row.chunk_content)
                         campus = extract_sub_entity_from_url(row.page_url)
                         academic_level = classify_academic_level(row.page_url, row.chunk_content)
+                        # chunk-level period wins (most specific), page-level is the fallback
+                        doc_period = extract_doc_period(
+                            row.chunk_content, url=row.page_url, heading=row.heading_path or ""
+                        ) or row.page_doc_period
 
                         if row.chunk_id not in chunk_sparse_cache:
                             sparse_data = await sparse_embedder.embed_text(row.chunk_content)
@@ -467,6 +514,11 @@ async def qdrant_sync_worker(org_id: int, web_id: int, is_qgen_done: asyncio.Eve
                                     "doc_type": doc_type,
                                     "campus": campus,
                                     "academic_level": academic_level,
+                                    "doc_period": doc_period,
+                                    "page_updated_at": (
+                                        row.page_updated_at.isoformat()
+                                        if row.page_updated_at else None
+                                    ),
                                 },
                             )
                         )
@@ -524,7 +576,125 @@ async def qdrant_sync_worker(org_id: int, web_id: int, is_qgen_done: asyncio.Eve
     return total_synced
 
 
-async def run_full_pipeline(website_id: int) -> dict:
+# --------------------------------------------------------------------------- #
+# Post-pipeline reconciliation (stale data removal)
+# --------------------------------------------------------------------------- #
+async def reconcile_stale_points(org_id: int, web_id: int) -> int:
+    """
+    Deletes Qdrant points of re-chunked pages whose chunk_id no longer exists
+    (orphans from previous versions of the page). Runs only after a clean pipeline
+    so the new points are already in place. Checkpointed via qdrant_cleanup_pending,
+    so it is idempotent and safe to retry.
+    """
+    async with async_session() as session:
+        page_ids = list(
+            (
+                await session.execute(
+                    select(ScrapedPage.id).where(
+                        ScrapedPage.web_id == web_id,
+                        ScrapedPage.qdrant_cleanup_pending.is_(True),
+                    )
+                )
+            ).scalars().all()
+        )
+    if not page_ids:
+        return 0
+
+    vector_db = get_vector_db()
+    try:
+        for page_id in page_ids:
+            async with async_session() as session:
+                live_chunk_ids = list(
+                    (
+                        await session.execute(select(Chunk.id).where(Chunk.page_id == page_id))
+                    ).scalars().all()
+                )
+            await vector_db.delete_points(
+                collection_name=settings.collection_name,
+                filters={"group_id": str(org_id), "page_id": page_id},
+                must_not={"chunk_id": live_chunk_ids} if live_chunk_ids else None,
+            )
+            async with async_session() as session:
+                await session.execute(
+                    update(ScrapedPage)
+                    .where(ScrapedPage.id == page_id)
+                    .values(qdrant_cleanup_pending=False)
+                )
+                await session.commit()
+    finally:
+        await vector_db.close()
+
+    logger.info(f"[Reconcile] Swept stale Qdrant points for {len(page_ids)} pages (web {web_id}).")
+    return len(page_ids)
+
+
+async def purge_missing_pages(
+    org_id: int, web_id: int, run_started_at: datetime, discovered_count: int
+) -> int:
+    """
+    Removes pages (Qdrant points + Postgres rows) that a successful discovery no longer
+    lists, i.e. pages deleted from the website. Skipped when discovery looks degraded.
+    """
+    async with async_session() as session:
+        total = await session.scalar(
+            select(func.count(ScrapedPage.id)).where(ScrapedPage.web_id == web_id)
+        ) or 0
+        stale_ids = list(
+            (
+                await session.execute(
+                    select(ScrapedPage.id).where(
+                        ScrapedPage.web_id == web_id,
+                        or_(
+                            ScrapedPage.last_seen_at.is_(None),
+                            ScrapedPage.last_seen_at < run_started_at,
+                        ),
+                    )
+                )
+            ).scalars().all()
+        )
+
+    if not stale_ids:
+        return 0
+    if discovered_count <= 0 or len(stale_ids) > PURGE_MAX_FRACTION * max(total, 1):
+        logger.warning(
+            f"[Purge] Skipped for web {web_id}: {len(stale_ids)}/{total} pages missing, "
+            f"{discovered_count} discovered (guard tripped)."
+        )
+        return 0
+
+    vector_db = get_vector_db()
+    try:
+        for page_id in stale_ids:
+            await vector_db.delete_points(
+                collection_name=settings.collection_name,
+                filters={"group_id": str(org_id), "page_id": page_id},
+            )
+    finally:
+        await vector_db.close()
+
+    async with async_session() as session:
+        # chunks / generated_questions go away through the FK ON DELETE CASCADE
+        await session.execute(delete(ScrapedPage).where(ScrapedPage.id.in_(stale_ids)))
+        await session.commit()
+
+    logger.info(f"[Purge] Removed {len(stale_ids)} pages no longer present on web {web_id}.")
+    return len(stale_ids)
+
+
+async def _bump_content_version(org_id: int) -> None:
+    async with async_session() as session:
+        await session.execute(
+            update(Org).where(Org.id == org_id).values(content_version=Org.content_version + 1)
+        )
+        await session.commit()
+
+
+async def run_full_pipeline(
+    website_id: int,
+    refresh_after_hours: Optional[float] = DEFAULT_REFRESH_AFTER_HOURS,
+) -> dict:
+    run_started_at = datetime.now(timezone.utc)
+
     async with async_session() as session:
         website = await session.get(Website, website_id)
         if not website:
@@ -542,6 +712,25 @@ async def run_full_pipeline(website_id: int) -> dict:
             )
             .values(status=PageProcessStatus.PENDING)
         )
+
+        # Re-queue stale pages (and previously FAILED ones) so site edits are picked up.
+        # Old markdown/chunks stay in place until a changed version actually replaces them.
+        if refresh_after_hours is not None:
+            cutoff = run_started_at - timedelta(hours=refresh_after_hours)
+            await session.execute(
+                update(ScrapedPage)
+                .where(
+                    ScrapedPage.web_id == website_id,
+                    ScrapedPage.status.in_(
+                        [PageProcessStatus.COMPLETED, PageProcessStatus.FAILED]
+                    ),
+                    or_(
+                        ScrapedPage.last_scraped_at.is_(None),
+                        ScrapedPage.last_scraped_at < cutoff,
+                    ),
+                )
+                .values(status=PageProcessStatus.PENDING, retries=0)
+            )
         await session.commit()
 
         org_id = website.org_id
@@ -605,6 +794,30 @@ async def run_full_pipeline(website_id: int) -> dict:
     )
 
     errors = [r for r in results if isinstance(r, BaseException)]
+
+    def _num(v) -> int:
+        return v if isinstance(v, int) else 0
+
+    # Stale-data reconciliation only after a clean run (new points are guaranteed in place).
+    cleaned_pages = purged_pages = 0
+    if not errors:
+        try:
+            cleaned_pages = await reconcile_stale_points(org_id, website_id)
+            purged_pages = await purge_missing_pages(
+                org_id, website_id, run_started_at, discovered_count=_num(results[0])
+            )
+        except Exception as e:
+            logger.error(f"Reconciliation failed for website {website_id}: {e}")
+            traceback.print_exc()
+            errors.append(e)
+
+    # Invalidate semantic-cache entries of this tenant if anything indexed changed.
+    if _num(results[2]) > 0 or cleaned_pages > 0 or purged_pages > 0:
+        try:
+            await _bump_content_version(org_id)
+        except Exception as e:
+            logger.error(f"Failed to bump content_version for org {org_id}: {e}")
+
     async with async_session() as session:
         website = await session.get(Website, website_id)
         if website:
@@ -628,4 +841,6 @@ async def run_full_pipeline(website_id: int) -> dict:
         "created_chunks": created_chunks,
         "generated_questions": generated_questions,
         "synced_qdrant_points": synced_qdrant_points,
+        "swept_pages": cleaned_pages,
+        "purged_pages": purged_pages,
     }

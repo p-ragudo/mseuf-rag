@@ -25,6 +25,8 @@ class Settings(BaseSettings):
 
     # --- Database ---
     DATABASE_URL: str | None = None
+    DATABASE_URL_NOT_PROD: str | None = None
+    DATABASE_URL_USE_PROD: bool
     
     # --- Auth ---
     SECRET_KEY: str
@@ -90,6 +92,8 @@ class Settings(BaseSettings):
     semantic_cache_index_name: str = "thesis_semantic_cache"
 
     database_url: str
+    database_url_not_prod: str
+    database_url_use_prod: bool
 
     # Question Generation Script Settings
     script_qgen_use_real_data: bool = False
