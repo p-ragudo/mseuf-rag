@@ -96,10 +96,12 @@ pkill -9 -f "telegram_bot" || true
 // test environments
 DATABASE_URL_NOT_PROD=value
 SEMANTIC_CACHE_INDEX_NAME_NOT_PROD=value
+COLLECTION_NAME_NOT_PROD=value
 
 // "on-off" settings
 DATABASE_URL_USE_PROD=true/false
 SEMANTIC_CACHE_INDEX_NAME_USE_PROD=true/false
 // (the current prod is on the test qdrant tb)
 USE_TEST_QDRANT_DB=true/false
+COLLECTION_NAME_USE_PROD=true/false
 ```

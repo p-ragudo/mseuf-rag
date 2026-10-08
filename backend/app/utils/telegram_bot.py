@@ -13,6 +13,11 @@ from app.services.ingest_pipeline.orchestrator import run_full_pipeline, get_act
 from app.services.query_pipeline.query_pipeline import QueryPipeline
 from app.services.query_pipeline.schema import PipelineQueryRequest
 
+COLLECTION_NAME = (
+        settings.collection_name
+        if settings.collection_name_use_prod
+        else settings.collection_name_not_prod
+    )
 
 def _build_progress_bar(current: int, total: int, length: int = 10) -> str:
     if total <= 0:
@@ -112,7 +117,7 @@ async def run_pipeline_with_notifications(website_id: int, chat_id: Optional[int
             f"• *Website ID:* `{website_id}`\n"
             f"• *Org ID:* `{org_id}`\n"
             f"• *Target URL:* {target_url}\n"
-            f"• *Target Collection:* `{settings.collection_name}`\n"
+            f"• *Target Collection:* `{COLLECTION_NAME}`\n"
             f"• *Dense Model:* `{dense_info}`\n"
             f"• *Sparse Model:* `{sparse_info}`\n"
             f"• *Active Sync Flag:* `{sync_col.key}`",
@@ -124,7 +129,7 @@ async def run_pipeline_with_notifications(website_id: int, chat_id: Optional[int
             await send_reply(
                 chat_id,
                 f"✅ *Pipeline Completed Successfully!*\n"
-                f"• *Target Collection:* `{settings.collection_name}`\n"
+                f"• *Target Collection:* `{COLLECTION_NAME}`\n"
                 f"• *Dense Model:* `{dense_info}`\n"
                 f"• *Sparse Model:* `{sparse_info}`\n"
                 f"• *URLs Discovered:* `{results['discovered_urls']}`\n"
@@ -207,7 +212,7 @@ async def handle_status_command(chat_id: int | str, website_id: int):
             f"📊 *Ingestion Status — Site #{website_id}*\n"
             f"🌐 `{website.url}`\n"
             f"• *Status:* {status_label}\n"
-            f"• *Target Collection:* `{settings.collection_name}`\n"
+            f"• *Target Collection:* `{COLLECTION_NAME}`\n"
             f"• *Dense Embedder:* `{dense_info}`\n"
             f"• *Sparse Embedder:* `{sparse_info}`\n"
             f"• *Tracking Column:* `{sync_col.key}`\n"

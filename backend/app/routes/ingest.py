@@ -115,13 +115,18 @@ async def get_ingestion_status(
     )
     total_questions, synced_model_count = q_stats_res.one()
 
+    COLLECTION_NAME = (
+        settings.collection_name
+        if settings.collection_name_use_prod
+        else settings.collection_name_not_prod
+    )
     return {
         "website_id": website.id,
         "url": website.url,
         "status": website.status,
         "error_message": website.error_message,
         "active_target": {
-            "collection_name": settings.collection_name,
+            "collection_name": COLLECTION_NAME,
             "sync_column": sync_col.key,
             "provider": settings.embedding_provider,
             "dimension": getattr(settings, "embedding_dimension", settings.vector_dim),

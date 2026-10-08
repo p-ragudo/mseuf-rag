@@ -33,6 +33,11 @@ logger = logging.getLogger(__name__)
 _ORG_CACHE_TTL_SECONDS = 30.0
 # org_id -> (fetched_at_monotonic, org_name, content_version)
 _org_cache: Dict[int, Tuple[float, str, int]] = {}
+COLLECTION_NAME = (
+    settings.collection_name
+    if settings.collection_name_use_prod
+    else settings.collection_name_not_prod
+)
 
 
 def _normalize_campus(value: Optional[str]) -> Optional[str]:
@@ -68,7 +73,7 @@ class QueryPipeline:
     @property
     def collection_name(self) -> str:
         """Always resolves dynamically from settings."""
-        return settings.collection_name
+        return COLLECTION_NAME
 
     async def _resolve_org_details(self, org_id: int) -> Tuple[str, List[str], int]:
         now = time.monotonic()

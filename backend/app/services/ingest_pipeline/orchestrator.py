@@ -42,6 +42,11 @@ DEFAULT_REFRESH_AFTER_HOURS = 12.0
 # Safety valve: if more than this fraction of known pages looks "missing" after
 # discovery, assume discovery degraded (blocked, fallback crawl) and purge nothing.
 PURGE_MAX_FRACTION = 0.5
+COLLECTION_NAME = (
+    settings.collection_name
+    if settings.collection_name_use_prod
+    else settings.collection_name_not_prod
+)
 
 
 def get_active_sync_column():
@@ -399,7 +404,7 @@ async def qdrant_sync_worker(org_id: int, web_id: int, is_qgen_done: asyncio.Eve
     vector_db = get_vector_db()
     embedder = get_embedder()
     sparse_embedder = get_sparse_embedder()
-    target_collection = settings.collection_name
+    target_collection = COLLECTION_NAME
     sync_col = get_active_sync_column()
 
     # Initializes Qdrant collection matching embedder dimensions (768)
@@ -610,7 +615,7 @@ async def reconcile_stale_points(org_id: int, web_id: int) -> int:
                     ).scalars().all()
                 )
             await vector_db.delete_points(
-                collection_name=settings.collection_name,
+                collection_name=COLLECTION_NAME,
                 filters={"group_id": str(org_id), "page_id": page_id},
                 must_not={"chunk_id": live_chunk_ids} if live_chunk_ids else None,
             )
@@ -666,7 +671,7 @@ async def purge_missing_pages(
     try:
         for page_id in stale_ids:
             await vector_db.delete_points(
-                collection_name=settings.collection_name,
+                collection_name=COLLECTION_NAME,
                 filters={"group_id": str(org_id), "page_id": page_id},
             )
     finally:

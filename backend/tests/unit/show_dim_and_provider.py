@@ -19,8 +19,20 @@ print(f"EMBEDDING_MODEL           = {settings.embedding_model}")
 print(f"EMBEDDING_API_KEY         = {_mask_secret(settings.embedding_api_key)}")
 print(f"EMBEDDING_DIMENSION       = {settings.embedding_dimension}")
 print(f"VECTOR_DIM                = {settings.vector_dim}")
-print(f"COLLECTION_NAME           = {settings.collection_name}")
-print(f"SEMANTIC_CACHE_INDEX_NAME = {settings.semantic_cache_index_name}")
+
+COLLECTION_NAME = (
+    settings.collection_name
+    if settings.collection_name_use_prod
+    else settings.collection_name_not_prod
+)
+print(f"COLLECTION_NAME           = {COLLECTION_NAME}")
+
+SEMANTIC_CACHE_INDEX_NAME = (
+    settings.semantic_cache_index_name
+    if settings.semantic_cache_use_prod
+    else settings.semantic_cache_not_prod
+)
+print(f"SEMANTIC_CACHE_INDEX_NAME = {SEMANTIC_CACHE_INDEX_NAME}")
 print("=" * 50)
 
 embedder = get_embedder()

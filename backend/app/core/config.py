@@ -52,6 +52,8 @@ class Settings(BaseSettings):
     chunk_collection_name: str = "chunks_collection"
 
     collection_name: str
+    collection_name_not_prod: str
+    collection_name_use_prod: str
 
     # Retrieval Constraints
     default_top_k: int = 5
@@ -90,6 +92,8 @@ class Settings(BaseSettings):
     semantic_cache_threshold: float = 0.25
     semantic_cache_ttl_seconds: int = 604800
     semantic_cache_index_name: str = "thesis_semantic_cache"
+    semantic_cache_index_name_not_prod: str
+    semantic_cache_index_name_use_prod: bool
 
     database_url: str
     database_url_not_prod: str

@@ -24,7 +24,12 @@ def get_semantic_cache() -> BaseSemanticCache:
         if not ttl:
             raise ValueError("SEMANTIC_CACHE_TTL_SECONDS environment variable is required.")
 
-        index_name = settings.semantic_cache_index_name
+
+        index_name = (
+            settings.semantic_cache_index_name
+            if settings.semantic_cache_use_prod
+            else settings.semantic_cache_not_prod
+        )
         if not index_name:
             raise ValueError("SEMANTIC_CACHE_INDEX_NAME environment variable is required.")
 

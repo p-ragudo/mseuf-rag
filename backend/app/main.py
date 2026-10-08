@@ -25,8 +25,13 @@ async def lifespan(app: FastAPI):
     # 2. Vector DB bootstrap: guarantees collection and group_id payload index exist
     vector_db = get_vector_db()
     embedder = get_embedder()
+    COLLECTION_NAME = (
+        settings.collection_name
+        if settings.collection_name_use_prod
+        else settings.collection_name_not_prod
+    )
     await vector_db.create_collection_if_not_exists(
-        collection_name=settings.collection_name,
+        collection_name=COLLECTION_NAME,
         dense_vector_size=embedder.dimension,
         distance="Cosine",
     )
