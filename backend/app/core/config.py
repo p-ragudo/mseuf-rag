@@ -53,7 +53,16 @@ class Settings(BaseSettings):
 
     collection_name: str
     collection_name_not_prod: str
-    collection_name_use_prod: str
+    collection_name_use_prod: bool
+
+    @computed_field
+    @property
+    def resolved_collection_name(self) -> str:
+        return (
+            self.collection_name
+            if self.collection_name_use_prod
+            else self.collection_name_not_prod
+        )
 
     # Retrieval Constraints
     default_top_k: int = 5
@@ -105,6 +114,9 @@ class Settings(BaseSettings):
 
     telegram_bot_token: str
     telegram_bot_fastapi_key: str
+    telegram_bot_token_not_prod: Optional[str]
+    telegram_bot_token_fastapi_key_not_prod: Optional[str] = ""
+    telegram_bot_use_prod: bool
 
     model_config = SettingsConfigDict(
         env_file=None,

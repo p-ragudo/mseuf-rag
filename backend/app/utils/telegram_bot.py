@@ -19,10 +19,18 @@ from app.services.query_pipeline.schema import PipelineQueryRequest
 from app.services.semantic_cache.factory import get_semantic_cache
 from app.services.vector_db.factory import get_vector_db
 
-COLLECTION_NAME = (
-    settings.collection_name
-    if getattr(settings, "collection_name_use_prod", False)
-    else settings.collection_name
+def _is_truthy(val) -> bool:
+    """Safely evaluates booleans, strings ('true'/'false'), or integers."""
+    if isinstance(val, str):
+        return val.strip().lower() in ("true", "1", "yes", "on")
+    return bool(val)
+
+use_prod_coll = _is_truthy(getattr(settings, "collection_name_use_prod", False))
+
+TELEGRAM_BOT_TOKEN = (
+    settings.telegram_bot_token
+    if settings.telegram_bot_use_prod
+    else settings.telegram_bot_token_not_prod
 )
 
 
@@ -62,10 +70,10 @@ def _build_progress_bar(current: int, total: int, length: int = 10) -> str:
 
 
 async def send_reply(chat_id: int | str, text: str, parse_mode: Optional[str] = "Markdown"):
-    if not settings.telegram_bot_token:
+    if not TELEGRAM_BOT_TOKEN:
         return
 
-    url = f"https://api.telegram.org/bot{settings.telegram_bot_token}/sendMessage"
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": chat_id,
         "text": text,
@@ -101,11 +109,7 @@ async def handle_check_environment_command(chat_id: int | str):
     use_prod_cache = _is_truthy(getattr(settings, "semantic_cache_index_name_use_prod", False))
     use_prod_db = _is_truthy(getattr(settings, "database_url_use_prod", False))
 
-    active_collection = (
-        settings.collection_name
-        if use_prod_collection
-        else getattr(settings, "collection_name_not_prod", settings.collection_name)
-    )
+    active_collection = settings.resolved_collection_name
 
     active_semantic_cache = (
         getattr(settings, "semantic_cache_index_name", "<NOT SET>")
@@ -277,7 +281,7 @@ async def run_pipeline_with_notifications(website_id: int, chat_id: Optional[int
             f"• *Website ID:* `{website_id}`\n"
             f"• *Org ID:* `{org_id}`\n"
             f"• *Target URL:* {target_url}\n"
-            f"• *Target Collection:* `{COLLECTION_NAME}`\n"
+            f"• *Target Collection:* `{settings.resolved_collection_name}`\n"
             f"• *Dense Model:* `{dense_info}`\n"
             f"• *Sparse Model:* `{sparse_info}`\n"
             f"• *Active Sync Flag:* `{sync_col.key}`",
@@ -289,7 +293,7 @@ async def run_pipeline_with_notifications(website_id: int, chat_id: Optional[int
             await send_reply(
                 chat_id,
                 f"✅ *Pipeline Completed Successfully!*\n"
-                f"• *Target Collection:* `{COLLECTION_NAME}`\n"
+                f"• *Target Collection:* `{settings.resolved_collection_name}`\n"
                 f"• *Dense Model:* `{dense_info}`\n"
                 f"• *Sparse Model:* `{sparse_info}`\n"
                 f"• *URLs Discovered:* `{results['discovered_urls']}`\n"
@@ -372,7 +376,7 @@ async def handle_status_command(chat_id: int | str, website_id: int):
             f"📊 *Ingestion Status — Site #{website_id}*\n"
             f"🌐 `{website.url}`\n"
             f"• *Status:* {status_label}\n"
-            f"• *Target Collection:* `{COLLECTION_NAME}`\n"
+            f"• *Target Collection:* `{settings.resolved_collection_name}`\n"
             f"• *Dense Embedder:* `{dense_info}`\n"
             f"• *Sparse Embedder:* `{sparse_info}`\n"
             f"• *Tracking Column:* `{sync_col.key}`\n"
@@ -402,11 +406,11 @@ async def handle_status_command(chat_id: int | str, website_id: int):
 
 
 async def start_telegram_bot_listener():
-    if not settings.telegram_bot_token:
+    if not TELEGRAM_BOT_TOKEN:
         print("[Telegram] TELEGRAM_BOT_TOKEN not configured. Skipping listener.")
         return
 
-    url = f"https://api.telegram.org/bot{settings.telegram_bot_token}/getUpdates"
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
     offset = None
     print("[Telegram] Poller active. Listening for commands...")
 

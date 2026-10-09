@@ -1,6 +1,7 @@
 import asyncio
 import inspect
 from urllib.parse import urlparse
+import httpx
 from sqlalchemy import text
 from app.core.config import settings
 from app.core.database import engine, DATABSE_URL
@@ -39,6 +40,7 @@ def _safe_db_summary(raw_url: str | None) -> str:
 use_prod_collection = _is_truthy(getattr(settings, "collection_name_use_prod", False))
 use_prod_cache = _is_truthy(getattr(settings, "semantic_cache_index_name_use_prod", False))
 use_prod_db = _is_truthy(getattr(settings, "database_url_use_prod", False))
+use_prod_telegram = _is_truthy(getattr(settings, "telegram_bot_use_prod", False))
 
 active_collection = (
     settings.collection_name
@@ -52,22 +54,37 @@ active_semantic_cache = (
     else getattr(settings, "semantic_cache_index_name_not_prod", "<NOT SET>")
 )
 
+active_telegram_token = (
+    getattr(settings, "telegram_bot_token", None)
+    if use_prod_telegram
+    else getattr(settings, "telegram_bot_token_not_prod", None)
+)
+
+active_telegram_fastapi_key = (
+    getattr(settings, "telegram_bot_fastapi_key", None)
+    if use_prod_telegram
+    else getattr(settings, "telegram_bot_fastapi_key_not_prod", None)
+)
+
 print("=" * 60)
 print("ACTIVE ENVIRONMENT CONFIGURATION")
 print("=" * 60)
-print(f"EMBEDDING_PROVIDER        = {getattr(settings, 'embedding_provider', '<NOT SET>')}")
-print(f"EMBEDDING_MODEL           = {getattr(settings, 'embedding_model', '<NOT SET>')}")
-print(f"EMBEDDING_API_KEY         = {_mask_secret(getattr(settings, 'embedding_api_key', None))}")
-print(f"EMBEDDING_DIMENSION       = {getattr(settings, 'embedding_dimension', '<NOT SET>')}")
-print(f"VECTOR_DIM                = {getattr(settings, 'vector_dim', '<NOT SET>')}")
+print(f"EMBEDDING_PROVIDER         = {getattr(settings, 'embedding_provider', '<NOT SET>')}")
+print(f"EMBEDDING_MODEL            = {getattr(settings, 'embedding_model', '<NOT SET>')}")
+print(f"EMBEDDING_API_KEY          = {_mask_secret(getattr(settings, 'embedding_api_key', None))}")
+print(f"EMBEDDING_DIMENSION        = {getattr(settings, 'embedding_dimension', '<NOT SET>')}")
+print(f"VECTOR_DIM                 = {getattr(settings, 'vector_dim', '<NOT SET>')}")
 print("-" * 60)
-print(f"ACTIVE COLLECTION_NAME    = {active_collection} (PROD: {use_prod_collection})")
-print(f"ACTIVE SEMANTIC_CACHE     = {active_semantic_cache} (PROD: {use_prod_cache})")
-print(f"RESOLVED APP ENGINE URL   = {_safe_db_summary(DATABSE_URL)} (PROD: {use_prod_db})")
+print(f"ACTIVE COLLECTION_NAME     = {active_collection} (PROD: {use_prod_collection})")
+print(f"ACTIVE SEMANTIC_CACHE      = {active_semantic_cache} (PROD: {use_prod_cache})")
+print(f"RESOLVED APP ENGINE URL    = {_safe_db_summary(DATABSE_URL)} (PROD: {use_prod_db})")
+print("-" * 60)
+print(f"TELEGRAM BOT TOKEN         = {_mask_secret(active_telegram_token)} (PROD: {use_prod_telegram})")
+print(f"TELEGRAM FASTAPI KEY       = {_mask_secret(active_telegram_fastapi_key)} (PROD: {use_prod_telegram})")
 print("=" * 60)
 
 
-# 2. Async Verifications (Live Database + Embedder + Vector DB)
+# 2. Async Verifications (Live Database + Embedder + Vector DB + Telegram Bot)
 async def run_verifications():
     # Database
     print("\n[VERIFICATION: DATABASE CONNECTION]")
@@ -108,11 +125,9 @@ async def run_verifications():
         vdb = get_vector_db()
         print(f"  Provider Loaded:   {type(vdb).__name__}")
 
-        # Extract underlying client (e.g. self.client or self.async_client inside QdrantVectorDB)
         client = getattr(vdb, "client", getattr(vdb, "async_client", None))
 
         if client is not None:
-            # Query actual collection info over the wire
             get_coll_method = getattr(client, "get_collection")
             if inspect.iscoroutinefunction(get_coll_method):
                 coll_info = await get_coll_method(collection_name=active_collection)
@@ -127,7 +142,6 @@ async def run_verifications():
             print(f"  Live Point Count:  {points_count}")
             print(f"  Status:            SUCCESS (Connected to live vector index)")
         else:
-            # Fallback if QdrantVectorDB wraps collection check on itself
             check_method = getattr(vdb, "collection_exists", None) or getattr(vdb, "get_collection", None)
             if check_method:
                 exists = await check_method(active_collection) if inspect.iscoroutinefunction(check_method) else check_method(active_collection)
@@ -138,6 +152,29 @@ async def run_verifications():
                 print(f"  Status:            WARNING (Client initialized, but no direct collection check method found)")
     except Exception as e:
         print(f"  Status:            FAILED ({e})")
+
+    # Telegram Bot API Verification
+    print("\n[VERIFICATION: TELEGRAM BOT]")
+    if not active_telegram_token:
+        print("  Status:            SKIPPED (No Telegram bot token configured)")
+    else:
+        try:
+            telegram_api_url = f"https://api.telegram.org/bot{active_telegram_token}/getMe"
+            async with httpx.AsyncClient(timeout=10.0) as http_client:
+                response = await http_client.get(telegram_api_url)
+                payload = response.json()
+
+            if response.status_code == 200 and payload.get("ok"):
+                bot_info = payload.get("result", {})
+                print(f"  Bot Name:          {bot_info.get('first_name', '<UNKNOWN>')}")
+                print(f"  Bot Username:      @{bot_info.get('username', '<UNKNOWN>')}")
+                print(f"  Bot ID:            {bot_info.get('id', '<UNKNOWN>')}")
+                print(f"  Status:            SUCCESS (Authenticated with Telegram API)")
+            else:
+                description = payload.get("description", response.text)
+                print(f"  Status:            FAILED (HTTP {response.status_code}: {description})")
+        except Exception as e:
+            print(f"  Status:            FAILED ({e})")
 
     print("=" * 60)
 

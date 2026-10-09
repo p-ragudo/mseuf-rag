@@ -13,12 +13,7 @@ client = QdrantClient(
     timeout=900.0  # 15 minutes
 )
 
-COLLECTION_NAME = (
-    settings.collection_name
-    if settings.collection_name_use_prod
-    else settings.collection_name_not_prod
-)
-source_collection = COLLECTION_NAME
+source_collection = settings.resolved_collection_name
 target_collection = f"improve-and-benchmarks_{source_collection}"
 
 print(f"Checking existing snapshots for '{source_collection}'...")

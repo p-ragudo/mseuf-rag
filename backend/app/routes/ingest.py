@@ -1,4 +1,4 @@
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 
@@ -15,18 +15,16 @@ from app.routes.auth import get_current_user
 
 router = APIRouter(prefix="/ingest", tags=["Ingest Pipeline"])
 
-
 @router.post("/run/{website_id}", status_code=status.HTTP_202_ACCEPTED)
 async def trigger_ingestion(
     website_id: int,
     background_tasks: BackgroundTasks,
+    force_refresh: bool = Query(
+        False, description="Forces re-scraping and re-chunking of pages regardless of age"
+    ),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """
-    Triggers discovery, scraping, chunking, question generation,
-    and Qdrant indexing for a website in the background.
-    """
     stmt = (
         select(Website)
         .join(OrgMember, Website.org_id == OrgMember.org_id)
@@ -50,11 +48,12 @@ async def trigger_ingestion(
             detail="Scrape and ingestion pipeline is already running for this site.",
         )
 
-    # Launch non-blocking background orchestration
-    background_tasks.add_task(run_full_pipeline, website_id=website_id)
+    background_tasks.add_task(
+        run_full_pipeline, website_id=website_id, force_refresh=force_refresh
+    )
 
     return {
-        "message": f"Pipeline triggered for {website.url}",
+        "message": f"Pipeline triggered for {website.url} (force_refresh={force_refresh})",
         "website_id": website.id,
         "status": WebsiteScrapeStatus.IN_PROGRESS,
     }
@@ -66,7 +65,6 @@ async def get_ingestion_status(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Returns database checkpoint stats across all 5 ingestion stages."""
     stmt = (
         select(Website)
         .join(OrgMember, Website.org_id == OrgMember.org_id)
@@ -84,7 +82,6 @@ async def get_ingestion_status(
             detail=f"Website {website_id} not found or you lack access permissions.",
         )
 
-    # 1. Page status breakdown
     page_counts_res = await db.execute(
         select(ScrapedPage.status, func.count(ScrapedPage.id))
         .where(ScrapedPage.web_id == website_id)
@@ -93,7 +90,6 @@ async def get_ingestion_status(
     page_stats = {status_val.value: count for status_val, count in page_counts_res.all()}
     total_pages = sum(page_stats.values())
 
-    # 2. Chunk stats
     chunks_count_res = await db.execute(
         select(func.count(Chunk.id))
         .join(ScrapedPage, Chunk.page_id == ScrapedPage.id)
@@ -101,7 +97,6 @@ async def get_ingestion_status(
     )
     total_chunks = chunks_count_res.scalar_one() or 0
 
-    # 3. Dynamic Model Sync Column Check
     sync_col = get_active_sync_column()
 
     q_stats_res = await db.execute(
@@ -115,18 +110,13 @@ async def get_ingestion_status(
     )
     total_questions, synced_model_count = q_stats_res.one()
 
-    COLLECTION_NAME = (
-        settings.collection_name
-        if settings.collection_name_use_prod
-        else settings.collection_name_not_prod
-    )
     return {
         "website_id": website.id,
         "url": website.url,
         "status": website.status,
         "error_message": website.error_message,
         "active_target": {
-            "collection_name": COLLECTION_NAME,
+            "collection_name": settings.resolved_collection_name,
             "sync_column": sync_col.key,
             "provider": settings.embedding_provider,
             "dimension": getattr(settings, "embedding_dimension", settings.vector_dim),

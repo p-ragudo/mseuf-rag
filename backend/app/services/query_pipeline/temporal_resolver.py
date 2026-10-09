@@ -1,17 +1,9 @@
 """
 Query-time supersession of stale documents.
 
-After reranking, near-identical candidates (same topic, different version) are
-clustered. Inside a cluster, a candidate is dropped only when a sibling is
-PROVABLY newer:
-  * it covers a later academic period (AY 2026-2027 beats AY 2025-2026), or
-  * same period (or both undated) and the sibling content was updated >1 day later.
-Undated vs dated is never resolved by dropping: the LLM sees both with their
-metadata and the QA prompt tells it which to prefer.
-
-If the user asks about a specific period ("AY 2024-2025 tuition"), history is
-what they want, so docs of that period are kept and other dated docs dropped.
-Legacy points without `doc_period` in their payload are dated from their text.
+Clusters retrieved candidate documents by structural hierarchy (heading path, 
+URL stem, and content overlap). Suppresses older versions when a newer version 
+covering a later academic period or fresher update date is present.
 """
 from __future__ import annotations
 
@@ -25,12 +17,12 @@ from app.services.query_pipeline.schema import SupersededInfo
 from app.services.reranker.schema import RerankResult
 from app.utils.temporal import extract_doc_period, format_period
 
-NEAR_DUPLICATE_JACCARD = 0.90
-SAME_HEADING_JACCARD = 0.60
-SAME_URL_STEM_JACCARD = 0.50
+NEAR_DUPLICATE_JACCARD = 0.75  # Lowered from 0.90 to account for rewritten fee/course updates
+SAME_HEADING_JACCARD = 0.40
+SAME_URL_STEM_JACCARD = 0.45
 UPDATE_GAP = timedelta(days=1)
 
-_WORD_RE = re.compile(r"[a-z]{3,}")  # letters only: numbers/years/fees never affect similarity
+_WORD_RE = re.compile(r"[a-z]{3,}")
 
 
 @dataclass
@@ -104,7 +96,7 @@ def _same_topic(a: _Item, b: _Item) -> bool:
 
 
 def _supersedes(w: _Item, m: _Item) -> Optional[str]:
-    """Reason string if winner `w` provably makes `m` stale, else None."""
+    """Returns the supersession reason if winner `w` invalidates `m`."""
     if w.period is not None and m.period is not None:
         if w.period > m.period:
             return (
@@ -113,7 +105,8 @@ def _supersedes(w: _Item, m: _Item) -> Optional[str]:
         if w.period < m.period:
             return None
     elif w.period is not None or m.period is not None:
-        return None  # one side undated: not provable
+        return None
+
     if w.updated and m.updated and (w.updated - m.updated) > UPDATE_GAP:
         return "same topic, more recently updated source"
     return None
@@ -142,24 +135,23 @@ def _clusters(items: List[_Item]) -> List[List[int]]:
 def resolve_temporal_conflicts(
     query: str, results: List[RerankResult]
 ) -> Tuple[List[RerankResult], List[SupersededInfo]]:
-    """Returns (kept results in original rerank order, telemetry about what was dropped)."""
     if len(results) < 2:
         return results, []
 
     items = [_build(r) for r in results]
-    dropped_idx: Dict[int, Tuple[str, str]] = {}  # idx -> (reason, superseded_by_url)
+    dropped_idx: Dict[int, Tuple[str, str]] = {}
 
-    # 1) The user explicitly asked for a period: keep that period (and undated), drop other dated ones.
+    # 1. User specified an explicit target period (e.g., "tuition fees 2024")
     q_period = extract_doc_period(query, allow_bare_year=True)
     if q_period is not None and any(it.period == q_period for it in items):
         for i, it in enumerate(items):
             if it.period is not None and it.period != q_period:
                 dropped_idx[i] = (
-                    f"query asks for {format_period(q_period)}, document covers {format_period(it.period)}",
+                    f"query requests {format_period(q_period)}, document covers {format_period(it.period)}",
                     "",
                 )
 
-    # 2) Supersession inside clusters of near-identical documents.
+    # 2. Cluster candidates and prune superseded older documents
     alive = [i for i in range(len(items)) if i not in dropped_idx]
     sub = [items[i] for i in alive]
     for cluster in _clusters(sub):

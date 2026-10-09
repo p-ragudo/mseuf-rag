@@ -70,5 +70,14 @@ class BaseVectorDB(ABC):
         pass
 
     @abstractmethod
+    async def delete_points_by_ids(
+        self,
+        collection_name: str,
+        point_ids: List[str],
+    ) -> None:
+        """Explicitly deletes a list of point IDs."""
+        pass
+
+    @abstractmethod
     async def close(self) -> None:
         pass

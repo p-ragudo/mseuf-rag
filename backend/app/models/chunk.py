@@ -26,6 +26,7 @@ class Chunk(Base):
     part_index: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     part_total: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     qgen_attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    chunk_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
 
     # Relationships
     page: Mapped["ScrapedPage"] = relationship(back_populates="chunks")
@@ -36,4 +37,5 @@ class Chunk(Base):
 
     __table_args__ = (
         Index("ix_chunks_has_qgen_attempts", "has_qgen", "qgen_attempts"),
+        Index("ix_chunks_page_chunk_index", "page_id", "chunk_index"),
     )
