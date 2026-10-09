@@ -1,0 +1,239 @@
+from app/services/semantic_cache/
+
+base.py:
+from abc import ABC, abstractmethod
+from typing import List, Optional
+from .schemas import CacheEntry, CacheMetadata
+
+
+class BaseSemanticCache(ABC):
+    """Abstract Base Class for semantic caching services using pre-computed embeddings."""
+
+    @abstractmethod
+    async def get(
+        self,
+        vector: List[float],
+        org_id: int | str,
+    ) -> Optional[CacheEntry]:
+        """Queries the semantic cache for a specific tenant using a pre-computed vector."""
+        pass
+
+    @abstractmethod
+    async def set(
+        self,
+        query: str,
+        vector: List[float],
+        response: str,
+        org_id: int | str,
+        metadata: Optional[CacheMetadata] = None,
+    ) -> None:
+        """Stores query, pre-computed vector, response, tenant isolation tag, and metadata."""
+        pass
+
+    @abstractmethod
+    async def clear(self) -> None:
+        """Clears all records in the cache index."""
+        pass
+
+
+
+
+
+factory.py:
+from .base import BaseSemanticCache
+from .redis_cache import RedisSemanticCache
+from .in_memory_cache import InMemorySemanticCache
+from app.core.config import settings
+
+def get_semantic_cache() -> BaseSemanticCache:
+    provider = settings.semantic_cache_provider
+
+    if not provider:
+        raise ValueError("Environment variable 'SEMANTIC_CACHE_PROVIDER' is required.")
+
+    provider = provider.lower()
+
+    if provider == "redis":
+        url = settings.semantic_cache_url
+        if not url:
+            raise ValueError("SEMANTIC_CACHE_URL environment variable is required for redis provider.")
+
+        threshold = settings.semantic_cache_threshold
+        if not threshold:
+            raise ValueError("SEMANTIC_CACHE_THRESHOLD environment variable is required.")
+
+        ttl = settings.semantic_cache_ttl_seconds
+        if not ttl:
+            raise ValueError("SEMANTIC_CACHE_TTL_SECONDS environment variable is required.")
+
+        index_name = settings.semantic_cache_index_name
+        if not index_name:
+            raise ValueError("SEMANTIC_CACHE_INDEX_NAME environment variable is required.")
+
+        dim = settings.vector_dim
+        if not dim:
+            raise ValueError("VECTOR_DIM is required for redis provider.")
+
+        return RedisSemanticCache(
+            redis_url=url,
+            distance_threshold=float(threshold),
+            ttl=int(ttl),
+            index_name=index_name,
+            dim=dim
+        )
+
+    elif provider in ("memory", "mock", "test"):
+        threshold = settings.semantic_cache_threshold
+        return InMemorySemanticCache(distance_threshold=threshold)
+
+    else:
+        raise ValueError(f"Unknown SEMANTIC_CACHE_PROVIDER: '{provider}'")
+
+
+
+
+
+redis_cache.py:
+from typing import List, Optional
+from redisvl.extensions.llmcache import SemanticCache
+from redisvl.query.filter import Tag
+from redisvl.utils.vectorize import CustomVectorizer
+
+from .base import BaseSemanticCache
+from .schemas import CacheEntry, CacheMetadata
+
+
+class RedisSemanticCache(BaseSemanticCache):
+    def __init__(
+        self,
+        redis_url: str,
+        distance_threshold: float,
+        ttl: int,
+        index_name: str,
+        dim: int,
+    ) -> None:
+        self.redis_url = redis_url
+        self.distance_threshold = distance_threshold
+        self.ttl = ttl
+        self.index_name = index_name
+        self.dim = dim
+        self._cache: Optional[SemanticCache] = None
+
+        # Satisfies RedisVL vectorizer requirement without external downloads
+        dummy_vectorizer = CustomVectorizer(
+            embed=lambda text, **kwargs: [0.0] * self.dim
+        )
+
+        try:
+            self._cache = SemanticCache(
+                name=self.index_name,
+                redis_url=self.redis_url,
+                distance_threshold=self.distance_threshold,
+                ttl=self.ttl,
+                overwrite=True,
+                dim=self.dim,
+                vectorizer=dummy_vectorizer,
+                # Multi-tenancy filterable tag field
+                filterable_fields=[{"name": "org_id", "type": "tag"}],
+            )
+        except Exception as e:
+            print(f"[Redis Cache] Initialization warning (cache disabled/bypassed): {e}")
+
+    async def get(
+        self,
+        vector: List[float],
+        org_id: int | str,
+    ) -> Optional[CacheEntry]:
+        if not self._cache:
+            return None
+        try:
+            tenant_tag = Tag("org_id") == str(org_id)
+
+            results = await self._cache.acheck(
+                vector=vector,
+                num_results=1,
+                distance_threshold=self.distance_threshold,
+                filter_expression=tenant_tag,
+            )
+
+            if results and len(results) > 0:
+                raw_hit = results[0]
+                metadata_dict = raw_hit.get("metadata", {}) or {}
+
+                return CacheEntry(
+                    query=raw_hit.get("prompt", ""),
+                    response=raw_hit.get("response", ""),
+                    metadata=(
+                        CacheMetadata(**metadata_dict)
+                        if isinstance(metadata_dict, dict)
+                        else CacheMetadata()
+                    ),
+                )
+        except Exception as e:
+            print(f"[Redis Cache] Lookup exception (bypassing): {e}")
+        return None
+
+    async def set(
+        self,
+        query: str,
+        vector: List[float],
+        response: str,
+        org_id: int | str,
+        metadata: Optional[CacheMetadata] = None,
+    ) -> None:
+        if not self._cache:
+            return
+        try:
+            meta_payload = metadata.model_dump() if metadata else {}
+            await self._cache.astore(
+                prompt=query,
+                vector=vector,
+                response=response,
+                filters={"org_id": str(org_id)},
+                metadata=meta_payload,
+            )
+        except Exception as e:
+            print(f"[Redis Cache] Store exception: {e}")
+
+    async def clear(self) -> None:
+        if not self._cache:
+            return
+        try:
+            await self._cache.aclear()
+        except Exception as e:
+            print(f"[Redis Cache] Clear exception: {e}")
+
+
+
+
+
+schemas.py:
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
+from pydantic import BaseModel, Field
+
+
+class CacheMetadata(BaseModel):
+    doc_ids: List[str] = Field(default_factory=list, description="IDs of source docs used")
+    chunk_ids: List[str] = Field(default_factory=list, description="IDs of chunks used")
+    confidence_score: Optional[float] = Field(None, description="Retrieval similarity score from primary retrieval")
+    extra: Dict[str, Any] = Field(default_factory=dict, description="Arbitrary metadata")
+
+
+class CacheEntry(BaseModel):
+    query: str = Field(..., description="Actual question text cached (user query or synthetic query)")
+    response: str = Field(..., description="The finalized answer string to return")
+    metadata: CacheMetadata = Field(default_factory=CacheMetadata)
+    cached_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    distance: Optional[float] = Field(None, description="Vector distance returned by the cache hit (if read)")
+
+
+class ChatQueryRequest(BaseModel):
+    query: str = Field(..., min_length=2, max_length=1000, description="User's natural language question")
+    session_id: Optional[str] = Field(None, description="Optional conversational session ID")
+
+
+class ChatQueryResponse(BaseModel):
+    answer: str
+    is_cached: bool = False
+    source_chunks: List[str] = Field(default_factory=list)

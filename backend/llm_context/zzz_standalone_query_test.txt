@@ -1,0 +1,214 @@
+from backend/tests/integration/query.py:
+
+import asyncio
+from app.services.query_pipeline.query_pipeline import QueryPipeline
+from app.services.query_pipeline.schema import PipelineQueryRequest
+
+query = "Programs offered for tech related courses?"
+
+
+def display_retrieved_chunks(contexts):
+    if not contexts:
+        print("  [No chunks retrieved]")
+        return
+
+    print(f"  Total Chunks Retrieved: {len(contexts)}")
+    for idx, ctx in enumerate(contexts, start=1):
+        preview = ctx.content.replace("\n", " ").strip()
+        if len(preview) > 160:
+            preview = preview[:160] + "..."
+        print(f"\n  [{idx}] Title: {ctx.title}")
+        print(f"      Source: {ctx.source_url}")
+        print(f"      Branch/Entity: {ctx.campus.upper()} | Level: {ctx.academic_level.upper()}")
+        print(f"      Length: {len(ctx.content)} chars")
+
+        ce_score_str = f"{ctx.rerank_score:.4f}" if ctx.rerank_score is not None else "N/A"
+        rrf_score_str = f"{ctx.initial_score:.4f}" if ctx.initial_score is not None else "N/A"
+        print(f"      Cross-Encoder Score: {ce_score_str} | Upstream RRF Score: {rrf_score_str}")
+
+        print("      Matched Question(s) & Similarity Scores:")
+        if ctx.matched_questions:
+            for q_info in ctx.matched_questions:
+                print(
+                    f"        • [{q_info.method.upper()}] (score: {q_info.score:.4f}, rank: {q_info.rank}) "
+                    f"\"{q_info.question}\""
+                )
+        else:
+            print("        [No synthetic questions logged]")
+        print(f"      Text:   {preview}")
+
+
+async def main():
+    print("Initializing Staging Query Pipeline (Redis + Qdrant + Fast Embed + Gemini QA)...")
+    pipeline = QueryPipeline()
+
+    request_data = PipelineQueryRequest(
+        query=query,
+        org_id=1,
+        top_k=5,
+    )
+
+    print("\n" + "=" * 80)
+    print("--- TEST 1: Cold Execution (Expecting Multi-Vector RRF + Cross-Encoder Rerank) ---")
+    print("=" * 80)
+    res_1 = await pipeline.execute(request_data)
+    print(f"Query:     {query}")
+    print(f"Answer:\n{res_1.answer}\n")
+    print(f"Source:    {res_1.source}")
+    print(f"Is Cached: {res_1.is_cached}")
+    print(f"Sources:   {res_1.sources}")
+    print("\n--- Retrieved Chunks (Reranked Contexts with Scores) ---")
+    display_retrieved_chunks(res_1.contexts)
+
+    print("\n" + "=" * 80)
+    print("--- TEST 2: Warm Execution (Expecting Redis Semantic Cache Hit) ---")
+    print("=" * 80)
+    res_2 = await pipeline.execute(request_data)
+    print(f"Query:     {query}")
+    print(f"Answer:\n{res_2.answer}\n")
+    print(f"Source:    {res_2.source}")
+    print(f"Is Cached: {res_2.is_cached}")
+    print(f"Sources:   {res_2.sources}")
+    print("\n--- Retrieved Chunks (From Redis Cache with Preserved Metrics) ---")
+    display_retrieved_chunks(res_2.contexts)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+
+
+
+
+
+
+
+from backend/tests/unit/test_chunker.py:
+"""Run: python tests/test_chunker.py   (or pytest). Needs no DB, no network."""
+import importlib.util
+import pathlib
+import sys
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+
+
+def _load(name, rel):
+    spec = importlib.util.spec_from_file_location(name, ROOT / rel)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+chunker = _load("chunker", "app/services/ingest_pipeline/chunker.py")
+cleaner = _load("clean_markdown", "app/services/ingest_pipeline/clean_markdown.py")
+chunk_markdown = chunker.chunk_markdown
+
+STEPS = [
+    "Create an account on the online admission portal and verify your email address",
+    "Fill out the application form completely and upload a recent ID photo",
+    "Upload scanned copies of your Form 138 and Good Moral Certificate",
+    "Pay the non-refundable application fee at the cashier or through the bank",
+    "Take the entrance examination on the schedule assigned to you by email",
+    "Attend the admission interview with your parent or guardian present",
+    "Wait for the release of the admission results posted in your portal",
+    "Complete enrollment by paying the reservation fee and submitting your documents",
+]
+
+
+def md_steps(extra_words=0):
+    pad = " " + "detail " * extra_words if extra_words else ""
+    return "\n".join(f"{i}. {s}{pad}" for i, s in enumerate(STEPS, 1))
+
+
+def all_text(drafts):
+    return "\n".join(d.body for d in drafts)
+
+
+def test_numbered_procedure_stays_in_one_chunk():
+    md = f"# Admissions\n\n## Freshmen Steps\n\nSteps to apply:\n\n{md_steps()}\n"
+    drafts = chunk_markdown(cleaner.clean_markdown(md))
+    holders = [d for d in drafts if "1. Create an account" in d.body]
+    assert len(holders) == 1
+    for i in range(1, 9):
+        assert f"{i}. " in holders[0].body
+    assert holders[0].part_total == 1
+    assert holders[0].content.startswith("Section: Admissions > Freshmen Steps")
+
+
+def test_huge_procedure_is_split_by_item_with_leadin_and_no_orphan_tail():
+    md = f"# Admissions\n\n## Freshmen Steps\n\nSteps to apply:\n\n{md_steps(extra_words=120)}\n"
+    drafts = chunk_markdown(md)
+    assert len(drafts) > 1
+    assert len({d.section_id for d in drafts}) == 1           # one section
+    assert [d.part_index for d in drafts] == list(range(1, len(drafts) + 1))
+    assert all(d.part_total == len(drafts) for d in drafts)
+    for d in drafts:
+        assert "Steps to apply:" in d.body                     # lead-in repeated
+        assert f"(part {d.part_index} of {d.part_total})" in d.content
+    text = all_text(drafts)
+    for i in range(1, 9):                                      # nothing lost, nothing cut mid-item
+        assert f"{i}. " in text
+    assert [d.chunk_index for d in drafts] == list(range(len(drafts)))
+
+
+def test_short_trailing_steps_are_not_dropped():
+    md = f"# Admissions\n\n## Steps\n\nSteps:\n\n{md_steps(extra_words=120)}\n"
+    text = all_text(chunk_markdown(md))
+    assert "8. Complete enrollment" in text and "7. Wait for the release" in text
+
+
+def test_interrupted_numbered_list_is_rejoined():
+    md = (
+        "# Admissions\n\n## Steps\n\nSteps to apply:\n\n"
+        "1. Create an account on the portal and verify your email address\n"
+        "2. Fill out the application form and upload a photo of yourself\n"
+        "3. Upload scanned copies of your report card and certificates\n\n"
+        "Note that incomplete documents will delay the processing of your application.\n\n"
+        "4. Pay the application fee at the cashier or through the partner bank\n"
+        "5. Take the entrance examination on the date sent to your email\n"
+    )
+    drafts = chunk_markdown(md)
+    holder = [d for d in drafts if "4. Pay the application fee" in d.body]
+    assert holder and "1. Create an account" in holder[0].body
+
+
+def test_small_sibling_sections_are_packed_and_headings_kept():
+    md = "# Admissions\n\n## Step 1\n\nCreate an account on the online portal and verify your email.\n\n" \
+         "## Step 2\n\nFill out the application form and upload your photo and documents.\n\n" \
+         "## Step 3\n\nPay the application fee at the cashier or through the partner bank.\n"
+    drafts = chunk_markdown(md)
+    assert len(drafts) == 1
+    assert "## Step 1" in drafts[0].body and "## Step 3" in drafts[0].body
+    assert drafts[0].heading_path == "Admissions"
+
+
+def test_table_split_repeats_header():
+    rows = "\n".join(f"| Program {i} | Fee {i} thousand pesos per semester for tuition | Notes {'x' * 60} |" for i in range(80))
+    md = f"# Tuition\n\nTuition fees:\n\n| Program | Fee | Notes |\n| --- | --- | --- |\n{rows}\n"
+    drafts = chunk_markdown(md)
+    assert len(drafts) > 1
+    for d in drafts:
+        assert "| Program | Fee | Notes |" in d.body
+    assert "Program 79" in all_text(drafts)
+
+
+def test_boilerplate_page_is_dropped():
+    md = "# Home\n\nCookie policy. Privacy policy. All rights reserved. Read more. Click here."
+    assert chunk_markdown(md) == []
+
+
+def test_cleaner_preserves_indentation_numbering_and_frontmatter():
+    raw = "---\ntitle: x\n---\n# Steps\n\n1\\. Do this first thing here\n   - nested item stays indented\n2\\. Then this\n\nsee [link](http://a.b/c) now"
+    out = cleaner.clean_markdown(raw)
+    assert "title: x" not in out
+    assert "1. Do this first thing here" in out
+    assert "\n   - nested item stays indented" in out
+    assert "see link now" in out and "http" not in out
+
+
+if __name__ == "__main__":
+    fns = [v for k, v in dict(globals()).items() if k.startswith("test_")]
+    for f in fns:
+        f()
+        print("ok", f.__name__)
+    print(f"{len(fns)} passed")

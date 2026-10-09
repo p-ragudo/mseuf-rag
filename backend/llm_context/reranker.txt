@@ -1,0 +1,371 @@
+from app/services/reranker
+
+
+__init__.py:
+from app.services.reranker.base import BaseReranker
+from app.services.reranker.factory import get_reranker
+from app.services.reranker.schema import RerankCandidate, RerankResult
+
+__all__ = ["BaseReranker", "get_reranker", "RerankCandidate", "RerankResult"]
+
+
+
+
+
+
+
+
+base.py:
+from abc import ABC, abstractmethod
+from typing import List, Optional
+from app.services.reranker.schema import RerankCandidate, RerankResult
+
+
+class BaseReranker(ABC):
+    """Abstract interface for all cross-encoder reranker providers."""
+
+    @abstractmethod
+    async def rerank(
+        self,
+        query: str,
+        candidates: List[RerankCandidate],
+        top_k: Optional[int] = None,
+        score_threshold: Optional[float] = None,
+    ) -> List[RerankResult]:
+        """
+        Reranks a list of candidate documents against a query string.
+        """
+        pass
+
+
+
+
+
+
+
+
+factory.py:
+from functools import lru_cache
+from app.core.config import settings
+from app.services.reranker.base import BaseReranker
+from app.services.reranker.fastembed_provider import FastEmbedReranker
+
+
+class RerankerFactory:
+    @staticmethod
+    def create() -> BaseReranker:
+        model_name = getattr(
+            settings,
+            "reranker_model_name",
+            "Xenova/ms-marco-MiniLM-L-12-v2",
+        )
+        return FastEmbedReranker(model_name=model_name)
+
+
+@lru_cache(maxsize=1)
+def get_reranker() -> BaseReranker:
+    return RerankerFactory.create()
+
+
+
+
+
+
+
+
+fastembed_provider.py:
+import asyncio
+from typing import List, Optional
+from fastembed.rerank.cross_encoder import TextCrossEncoder
+
+from app.services.reranker.base import BaseReranker
+from app.services.reranker.schema import RerankCandidate, RerankResult
+
+
+class FastEmbedReranker(BaseReranker):
+    """
+    In-process ONNX cross-encoder using `fastembed`.
+    Reuses the existing fastembed ONNX runtime dependency already installed
+    in the project for BM25.
+    """
+
+    def __init__(self, model_name: str = "BAAI/bge-reranker-base"):
+        self.model_name = model_name
+        # Loads ONNX cross-encoder weights via fastembed
+        self.model = TextCrossEncoder(model_name=self.model_name)
+
+    def _sync_rerank(
+        self,
+        query: str,
+        candidates: List[RerankCandidate],
+        top_k: Optional[int] = None,
+        score_threshold: Optional[float] = None,
+    ) -> List[RerankResult]:
+        if not candidates:
+            return []
+
+        docs = [c.content for c in candidates]
+        # fastembed returns an iterable of similarity scores
+        raw_scores = list(self.model.rerank(query=query, documents=docs))
+
+        results: List[RerankResult] = []
+        for candidate, score in zip(candidates, raw_scores):
+            score_float = float(score)
+            if score_threshold is not None and score_float < score_threshold:
+                continue
+
+            results.append(
+                RerankResult(
+                    chunk_id=candidate.chunk_id,
+                    content=candidate.content,
+                    initial_score=candidate.initial_score,
+                    rerank_score=score_float,
+                    payload=candidate.payload,
+                    matched_questions=candidate.matched_questions,
+                )
+            )
+
+        results.sort(key=lambda item: item.rerank_score, reverse=True)
+
+        if top_k is not None:
+            return results[:top_k]
+        return results
+
+    async def rerank(
+        self,
+        query: str,
+        candidates: List[RerankCandidate],
+        top_k: Optional[int] = None,
+        score_threshold: Optional[float] = None,
+    ) -> List[RerankResult]:
+        return await asyncio.to_thread(
+            self._sync_rerank, query, candidates, top_k, score_threshold
+        )
+
+
+
+
+
+
+
+
+flashrank_provider.py:
+import asyncio
+from typing import List, Optional
+from flashrank import Ranker, RerankRequest
+
+from app.services.reranker.base import BaseReranker
+from app.services.reranker.schema import RerankCandidate, RerankResult
+
+
+class FlashRankReranker(BaseReranker):
+    """
+    In-process ONNX cross-encoder reranker powered by FlashRank.
+    Extremely fast on CPU with no heavy PyTorch dependencies.
+    """
+
+    def __init__(self, model_name: str = "ms-marco-MiniLM-L-12-v2", max_length: int = 512):
+        self.model_name = model_name
+        self.max_length = max_length
+        # Initialize Ranker (lazy-loaded or cached by flashrank internally)
+        self.ranker = Ranker(model_name=self.model_name, max_length=self.max_length)
+
+    def _sync_rerank(
+        self,
+        query: str,
+        candidates: List[RerankCandidate],
+        top_k: Optional[int] = None,
+        score_threshold: Optional[float] = None,
+    ) -> List[RerankResult]:
+        if not candidates:
+            return []
+
+        passages = [
+            {"id": c.chunk_id, "text": c.content, "meta": c}
+            for c in candidates
+        ]
+
+        rerank_req = RerankRequest(query=query, passages=passages)
+        ranked_passages = self.ranker.rerank(rerank_req)
+
+        results: List[RerankResult] = []
+        for p in ranked_passages:
+            score = float(p.get("score", 0.0))
+            if score_threshold is not None and score < score_threshold:
+                continue
+
+            orig_candidate: RerankCandidate = p["meta"]
+            results.append(
+                RerankResult(
+                    chunk_id=orig_candidate.chunk_id,
+                    content=orig_candidate.content,
+                    initial_score=orig_candidate.initial_score,
+                    rerank_score=score,
+                    payload=orig_candidate.payload,
+                    matched_questions=orig_candidate.matched_questions,
+                )
+            )
+
+        results.sort(key=lambda r: r.rerank_score, reverse=True)
+
+        if top_k is not None:
+            return results[:top_k]
+        return results
+
+    async def rerank(
+        self,
+        query: str,
+        candidates: List[RerankCandidate],
+        top_k: Optional[int] = None,
+        score_threshold: Optional[float] = None,
+    ) -> List[RerankResult]:
+        return await asyncio.to_thread(
+            self._sync_rerank, query, candidates, top_k, score_threshold
+        )
+
+
+
+
+
+
+
+
+schema.py:
+from typing import Any, Dict, List
+from pydantic import BaseModel, Field
+from app.services.llm_qa.schema import MatchedQuestionDetail
+
+
+class RerankCandidate(BaseModel):
+    """Candidate document passed from RRF fusion into the cross-encoder reranker."""
+    chunk_id: str
+    content: str
+    initial_score: float = 0.0
+    payload: Dict[str, Any] = Field(default_factory=dict)
+    matched_questions: List[MatchedQuestionDetail] = Field(default_factory=list)
+
+
+class RerankResult(BaseModel):
+    """Candidate scored and ranked by the cross-encoder."""
+    chunk_id: str
+    content: str
+    initial_score: float
+    rerank_score: float
+    payload: Dict[str, Any] = Field(default_factory=dict)
+    matched_questions: List[MatchedQuestionDetail] = Field(default_factory=list)
+
+
+
+
+
+
+
+
+transformers_provider.py:
+import asyncio
+from typing import List, Optional
+import torch
+from transformers import AutoModelForSequenceClassification, AutoTokenizer
+
+from app.services.reranker.base import BaseReranker
+from app.services.reranker.schema import RerankCandidate, RerankResult
+
+
+class TransformersReranker(BaseReranker):
+    """
+    Standard PyTorch cross-encoder using HuggingFace Transformers.
+    Runs on CUDA, MPS, or CPU with automatic precision selection.
+    """
+
+    def __init__(
+        self,
+        model_name: str = "BAAI/bge-reranker-base",
+        max_length: int = 512,
+        batch_size: int = 16,
+    ):
+        self.model_name = model_name
+        self.max_length = max_length
+        self.batch_size = batch_size
+
+        if torch.cuda.is_available():
+            self.device = torch.device("cuda")
+            self.dtype = torch.float16
+        elif torch.backends.mps.is_available():
+            self.device = torch.device("mps")
+            self.dtype = torch.float32
+        else:
+            self.device = torch.device("cpu")
+            self.dtype = torch.float32
+
+        self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+        self.model = AutoModelForSequenceClassification.from_pretrained(
+            self.model_name,
+            torch_dtype=self.dtype,
+        )
+        self.model.to(self.device)
+        self.model.eval()
+
+    def _sync_rerank(
+        self,
+        query: str,
+        candidates: List[RerankCandidate],
+        top_k: Optional[int] = None,
+        score_threshold: Optional[float] = None,
+    ) -> List[RerankResult]:
+        if not candidates:
+            return []
+
+        pairs = [[query, c.content] for c in candidates]
+        scores: List[float] = []
+
+        with torch.no_grad():
+            for i in range(0, len(pairs), self.batch_size):
+                batch_pairs = pairs[i : i + self.batch_size]
+                inputs = self.tokenizer(
+                    batch_pairs,
+                    padding=True,
+                    truncation=True,
+                    max_length=self.max_length,
+                    return_tensors="pt",
+                )
+                inputs = {k: v.to(self.device) for k, v in inputs.items()}
+                logits = self.model(**inputs).logits
+
+                if logits.shape[-1] == 1:
+                    batch_scores = logits.view(-1).float().cpu().tolist()
+                else:
+                    batch_scores = logits[:, 1].float().cpu().tolist()
+
+                scores.extend(batch_scores)
+
+        results: List[RerankResult] = []
+        for c, score in zip(candidates, scores):
+            if score_threshold is not None and score < score_threshold:
+                continue
+            results.append(
+                RerankResult(
+                    chunk_id=c.chunk_id,
+                    content=c.content,
+                    initial_score=c.initial_score,
+                    rerank_score=score,
+                    payload=c.payload,
+                    matched_questions=c.matched_questions,
+                )
+            )
+
+        results.sort(key=lambda r: r.rerank_score, reverse=True)
+
+        if top_k is not None:
+            return results[:top_k]
+        return results
+
+    async def rerank(
+        self,
+        query: str,
+        candidates: List[RerankCandidate],
+        top_k: Optional[int] = None,
+        score_threshold: Optional[float] = None,
+    ) -> List[RerankResult]:
+        return await asyncio.to_thread(
+            self._sync_rerank, query, candidates, top_k, score_threshold
+        )

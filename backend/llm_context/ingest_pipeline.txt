@@ -1,0 +1,1747 @@
+from app/services/ingest_pipeline/
+
+chunk.py:
+import hashlib
+from datetime import datetime, timezone
+from typing import List, Optional
+
+from sqlalchemy import delete, func, select
+
+from app.core.database import async_session
+from app.models.chunk import Chunk
+from app.models.scraped_page import PageProcessStatus, ScrapedPage
+from app.services.ingest_pipeline.chunker import chunk_markdown, estimate_token_count
+from app.services.ingest_pipeline.clean_markdown import clean_markdown
+from app.utils.temporal import extract_doc_period
+
+
+def _page_title_from_url(url: str) -> str:
+    slug = url.rstrip("/").split("/")[-1]
+    if not slug or slug.startswith(("http", "www")):
+        return "Homepage"
+    return slug.replace("-", " ").replace("_", " ").strip().title() or "Homepage"
+
+
+def _hash_chunk(content: str) -> str:
+    return hashlib.sha256(content.strip().encode("utf-8")).hexdigest()
+
+
+async def process_and_chunk_pages(
+    web_id: int,
+    org_id: Optional[int] = None,
+    batch_size: int = 20,
+) -> int:
+    """
+    Cleans, chunks, and replaces old chunks safely.
+    Sets qdrant_cleanup_pending=True so orchestrator cleans up dead Qdrant points post-sync.
+    """
+    async with async_session() as session:
+        conditions = [
+            ScrapedPage.web_id == web_id,
+            ScrapedPage.status == PageProcessStatus.COMPLETED,
+            ScrapedPage.chunked_at.is_(None),
+            ScrapedPage.markdown_content.is_not(None),
+        ]
+        if org_id is not None:
+            conditions.append(ScrapedPage.org_id == org_id)
+
+        res = await session.execute(
+            select(ScrapedPage).where(*conditions).limit(batch_size)
+        )
+        pages = list(res.scalars().all())
+        if not pages:
+            return 0
+
+        total_created = 0
+        for page in pages:
+            cleaned = clean_markdown(page.markdown_content or "")
+            drafts = chunk_markdown(cleaned, page_title=_page_title_from_url(page.url))
+
+            # Check if old chunks exist
+            had_old_chunks = (
+                await session.scalar(
+                    select(func.count(Chunk.id)).where(Chunk.page_id == page.id)
+                )
+                or 0
+            ) > 0
+
+            # Atomic swap: Delete old chunks and add new drafts in the same transaction
+            await session.execute(delete(Chunk).where(Chunk.page_id == page.id))
+
+            new_chunks: List[Chunk] = [
+                Chunk(
+                    page_id=page.id,
+                    content=d.content,
+                    token_count=estimate_token_count(d.content),
+                    has_qgen=False,
+                    chunk_index=d.chunk_index,
+                    section_id=d.section_id,
+                    heading_path=d.heading_path or None,
+                    part_index=d.part_index,
+                    part_total=d.part_total,
+                    chunk_hash=_hash_chunk(d.content),
+                )
+                for d in drafts
+            ]
+
+            if new_chunks:
+                session.add_all(new_chunks)
+                total_created += len(new_chunks)
+
+            page.doc_period = extract_doc_period(cleaned, url=page.url)
+            if had_old_chunks:
+                page.qdrant_cleanup_pending = True
+            page.chunked_at = datetime.now(timezone.utc)
+
+        await session.commit()
+    return total_created
+
+
+
+
+
+
+
+
+
+
+
+clean_markdown.py:
+import re
+
+_FRONTMATTER_RE = re.compile(r"\A---\s*\n.*?\n---\s*\n", re.DOTALL)
+
+
+def clean_markdown(raw_markdown: str) -> str:
+    """
+    Cleans raw crawler markdown while preserving the structure the chunker needs:
+    headings, list markers, list indentation (nested items), numbering and tables.
+
+    Changes vs the old version:
+      * YAML frontmatter is stripped FIRST (it used to be dead code, because the
+        '---' rule below removed the delimiters before the check ran).
+      * Leading indentation is preserved (the old `[ \\t]+ -> ' '` flattened
+        nested lists and indented continuation lines).
+      * Escaped numbering such as '3\\.' is restored to '3.' so numbered steps
+        are recognised as one list.
+      * HTML tag stripping only matches real tags, so "< 5 units > 2" survives.
+    """
+    if not raw_markdown:
+        return ""
+
+    text = raw_markdown.replace("\r\n", "\n").replace("\r", "\n").replace(" ", " ")
+
+    text = _FRONTMATTER_RE.sub("", text, count=1)
+
+    text = re.sub(r"(?i)<br\s*/?>", "\n", text)
+    text = re.sub(r"</?[a-zA-Z][^>]*>", " ", text)
+
+    text = re.sub(r"!\[[^\]]*\]\([^\)]*\)", "", text)
+    text = re.sub(r"\[([^\]]+)\]\([^\)]+\)", r"\1", text)
+    text = re.sub(r"https?://\S+", "", text)
+
+    # Horizontal rules (standalone ---, ***, ___). Table separator rows contain '|' so they are safe.
+    text = re.sub(r"^[ \t]*[-*_]{3,}[ \t]*$", "", text, flags=re.MULTILINE)
+
+    text = re.sub(
+        r"(?i)\b(share on facebook|share on x|share on twitter|share on linkedin|share via email)\b",
+        "",
+        text,
+    )
+
+    # Restore escaped ordered-list markers: "3\." -> "3."
+    text = re.sub(r"^(\s*\d{1,3})\\([.)])", r"\1\2", text, flags=re.MULTILINE)
+
+    # Trim trailing whitespace per line and collapse inner runs of spaces,
+    # but never touch leading indentation.
+    cleaned_lines = []
+    for line in text.split("\n"):
+        stripped = line.rstrip()
+        indent_len = len(stripped) - len(stripped.lstrip(" \t"))
+        indent, rest = stripped[:indent_len], stripped[indent_len:]
+        rest = re.sub(r"[ \t]{2,}", " ", rest)
+        cleaned_lines.append(indent + rest if rest else "")
+    text = "\n".join(cleaned_lines)
+
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+
+
+
+
+
+
+
+
+discovery.py:
+import xml.etree.ElementTree as ET
+from typing import List, Optional, Set
+from urllib.parse import urljoin, urlparse
+from urllib.robotparser import RobotFileParser
+from datetime import datetime, timezone
+
+import httpx
+from crawl4ai import AsyncWebCrawler, CrawlerRunConfig, CacheMode
+from sqlalchemy.dialects.postgresql import insert
+
+from app.core.database import async_session
+from app.models.scraped_page import ScrapedPage, PageProcessStatus
+
+DEFAULT_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+
+
+def _normalize_url(url: str) -> str:
+    parsed = urlparse(url)
+    return parsed._replace(fragment="").geturl().rstrip("/")
+
+
+def _is_crawl_trap(url: str) -> bool:
+    """
+    Blocks infinite calendar query loops, filters, and dynamic pagination traps.
+    e.g. /events?view=2025-05, /calendar?month=...
+    """
+    parsed = urlparse(url)
+    query = parsed.query.lower()
+    path = parsed.path.lower()
+
+    # Block recursive calendar/events queries
+    trap_params = ["view=", "month=", "year=", "date=", "filter=", "calendar_"]
+    if any(param in query for param in trap_params):
+        return True
+
+    # Block media / binary downloads discovered accidentally
+    ignored_extensions = (
+        ".pdf", ".jpg", ".jpeg", ".png", ".gif", ".webp", ".zip",
+        ".docx", ".xlsx", ".pptx", ".mp4", ".svg"
+    )
+    if any(path.endswith(ext) for ext in ignored_extensions):
+        return True
+
+    return False
+
+
+async def _fetch_sitemap_urls(
+    client: httpx.AsyncClient,
+    sitemap_url: str,
+    visited_sitemaps: Set[str],
+) -> Set[str]:
+    clean_sitemap_url = _normalize_url(sitemap_url)
+    if clean_sitemap_url in visited_sitemaps:
+        return set()
+
+    visited_sitemaps.add(clean_sitemap_url)
+    discovered: Set[str] = set()
+
+    try:
+        resp = await client.get(clean_sitemap_url, timeout=15.0, follow_redirects=True)
+        if resp.status_code != 200 or not resp.text.strip():
+            return discovered
+
+        root = ET.fromstring(resp.text)
+        namespace = {"ns": root.tag.split("}")[0].strip("{")} if "}" in root.tag else {}
+
+        # Sitemap index
+        sitemap_tags = (
+            root.findall(".//ns:sitemap/ns:loc", namespace)
+            if namespace
+            else root.findall(".//sitemap/loc")
+        )
+        if sitemap_tags:
+            for tag in sitemap_tags:
+                if tag.text:
+                    child_urls = await _fetch_sitemap_urls(
+                        client, tag.text.strip(), visited_sitemaps
+                    )
+                    discovered.update(child_urls)
+            return discovered
+
+        # Direct page URLs
+        url_tags = (
+            root.findall(".//ns:url/ns:loc", namespace)
+            if namespace
+            else root.findall(".//url/loc")
+        )
+        for tag in url_tags:
+            if tag.text:
+                norm = _normalize_url(tag.text.strip())
+                if not _is_crawl_trap(norm):
+                    discovered.add(norm)
+
+    except Exception:
+        pass
+
+    return discovered
+
+
+async def _discover_from_sitemaps(
+    base_url: str,
+    robot_parser: Optional[RobotFileParser] = None,
+) -> Set[str]:
+    parsed = urlparse(base_url)
+    root_origin = f"{parsed.scheme}://{parsed.netloc}"
+    discovered: Set[str] = set()
+    candidate_sitemaps: List[str] = []
+    visited_sitemaps: Set[str] = set()
+
+    async with httpx.AsyncClient(headers={"User-Agent": DEFAULT_USER_AGENT}) as client:
+        try:
+            robots_resp = await client.get(
+                f"{root_origin}/robots.txt", timeout=10.0, follow_redirects=True
+            )
+            if robots_resp.status_code == 200:
+                for line in robots_resp.text.splitlines():
+                    if line.lower().startswith("sitemap:"):
+                        candidate_sitemaps.append(line.split(":", 1)[1].strip())
+        except Exception:
+            pass
+
+        candidate_sitemaps.extend([
+            f"{root_origin}/sitemap.xml",
+            f"{root_origin}/sitemap_index.xml",
+            f"{root_origin}/wp-sitemap.xml",
+        ])
+
+        for sm_url in list(dict.fromkeys(candidate_sitemaps)):
+            urls = await _fetch_sitemap_urls(client, sm_url, visited_sitemaps)
+            discovered.update(urls)
+
+    if robot_parser:
+        discovered = {
+            url for url in discovered if robot_parser.can_fetch(DEFAULT_USER_AGENT, url)
+        }
+
+    return discovered
+
+
+async def _discover_from_internal_links(
+    base_url: str,
+    robot_parser: Optional[RobotFileParser] = None,
+) -> Set[str]:
+    domain = urlparse(base_url).netloc
+    found: Set[str] = set()
+
+    config = CrawlerRunConfig(cache_mode=CacheMode.BYPASS)
+    async with AsyncWebCrawler() as crawler:
+        result = await crawler.arun(url=base_url, config=config)
+        if result.success and result.links:
+            for item in result.links.get("internal", []):
+                href = item.get("href")
+                if not href:
+                    continue
+                full_url = urljoin(base_url, href)
+                if urlparse(full_url).netloc == domain:
+                    clean = _normalize_url(full_url)
+                    if not _is_crawl_trap(clean):
+                        if not robot_parser or robot_parser.can_fetch(DEFAULT_USER_AGENT, clean):
+                            found.add(clean)
+
+    return found
+
+
+async def _get_robot_parser(base_url: str) -> RobotFileParser:
+    parsed = urlparse(base_url)
+    robots_url = f"{parsed.scheme}://{parsed.netloc}/robots.txt"
+    parser = RobotFileParser()
+
+    try:
+        async with httpx.AsyncClient(headers={"User-Agent": DEFAULT_USER_AGENT}) as client:
+            resp = await client.get(robots_url, timeout=10.0, follow_redirects=True)
+            if resp.status_code == 200:
+                parser.parse(resp.text.splitlines())
+            else:
+                parser.allow_all = True
+    except Exception:
+        parser.allow_all = True
+
+    return parser
+
+
+async def run_discovery(
+    org_id: int, 
+    web_id: int, 
+    base_url: str,
+    max_pages: Optional[int] = None,
+) -> int:
+    clean_base = _normalize_url(base_url)
+    robot_parser = await _get_robot_parser(clean_base)
+
+    urls = await _discover_from_sitemaps(clean_base, robot_parser=robot_parser)
+    if not urls:
+        urls = await _discover_from_internal_links(clean_base, robot_parser=robot_parser)
+
+    if robot_parser.can_fetch(DEFAULT_USER_AGENT, clean_base):
+        urls.add(clean_base)
+
+    filtered_urls = [u for u in urls if not _is_crawl_trap(u)]
+    if not filtered_urls:
+        return 0
+
+    sorted_urls = sorted(filtered_urls)
+    if max_pages and max_pages > 0 and len(sorted_urls) > max_pages:
+        sorted_urls = [clean_base] + [u for u in sorted_urls if u != clean_base][:max_pages - 1]
+
+    records = [
+        {
+            "org_id": org_id,
+            "web_id": web_id,
+            "url": target_url,
+            "markdown_content": None,
+            "status": PageProcessStatus.PENDING,
+            "retries": 0,
+        }
+        for target_url in sorted_urls
+    ]
+
+    now = datetime.now(timezone.utc)
+    BATCH_SIZE = 200
+
+    async with async_session() as session:
+        for i in range(0, len(records), BATCH_SIZE):
+            batch = [{**r, "last_seen_at": now} for r in records[i:i + BATCH_SIZE]]
+            stmt = (
+                insert(ScrapedPage)
+                .values(batch)
+                .on_conflict_do_update(
+                    index_elements=["org_id", "web_id", "url"],
+                    set_={"last_seen_at": now},
+                )
+            )
+            await session.execute(stmt)
+            await session.commit()
+
+    # total URLs discovered this run (used by the purge safety guard), not only new ones
+    return len(sorted_urls)
+
+
+
+
+
+
+
+
+
+
+
+orchestrator.py:
+import asyncio
+import hashlib
+import logging
+import re
+import traceback
+from datetime import datetime, timedelta, timezone
+from typing import Dict, List, Optional
+from urllib.parse import urlparse
+
+from crawl4ai import AsyncWebCrawler, CrawlerRunConfig, CacheMode
+from sqlalchemy import delete, or_, select, update, func
+
+from app.core.config import settings
+from app.core.database import async_session
+from app.models.chunk import Chunk
+from app.models.generated_question import GeneratedQuestion
+from app.models.org import Org
+from app.models.scraped_page import PageProcessStatus, ScrapedPage
+from app.models.website import Website, WebsiteScrapeStatus
+from app.services.embeddings.factory import get_embedder
+from app.services.embeddings.sparse_embedder import get_sparse_embedder
+from app.services.ingest_pipeline.chunk import process_and_chunk_pages
+from app.services.ingest_pipeline.chunker import (  # noqa: F401
+    estimate_token_count,
+    is_substantive_chunk,
+)
+from app.services.ingest_pipeline.clean_markdown import clean_markdown
+from app.services.ingest_pipeline.discovery import run_discovery
+from app.services.llm_qgen.factory import get_question_generator
+from app.services.llm_qgen.schema import RawChunk
+from app.services.vector_db.factory import get_vector_db
+from app.services.vector_db.schema import SparseVectorData, VectorPoint
+from app.utils.temporal import extract_doc_period
+from app.utils.uuid_generator import generate_chunk_id, generate_doc_id, generate_question_id
+
+logger = logging.getLogger(__name__)
+
+QGEN_MAX_ATTEMPTS = 3
+SYNC_MAX_CONSECUTIVE_FAILURES = 5
+DEFAULT_REFRESH_AFTER_HOURS = 12.0
+PURGE_MAX_FRACTION = 0.5
+
+def get_active_sync_column():
+    provider = (settings.embedding_provider or "").strip().lower()
+    dim = getattr(settings, "embedding_dimension", None) or getattr(settings, "vector_dim", 768)
+
+    if provider == "gemini":
+        col_name = "is_synced_gemini_768" if dim == 768 else "is_synced_gemini"
+    elif "bge" in provider or "bge" in (settings.embedding_model or "").lower():
+        col_name = "is_synced_bge_m3"
+    else:
+        col_name = "is_synced_qdrant"
+
+    return getattr(GeneratedQuestion, col_name, GeneratedQuestion.is_synced_qdrant)
+
+
+def extract_sub_entity_from_url(url: str) -> str:
+    parsed = urlparse(url)
+    segments = [s.strip().lower() for s in parsed.path.split("/") if s.strip()]
+    if segments:
+        candidate = segments[0]
+        ignored = {
+            "pages", "news", "announcement", "announcements", "events", "about",
+            "article", "posts", "home", "index", "admission", "admissions",
+            "academics", "programs", "apply", "contact", "scholarships",
+            "tuition", "student-life", "services",
+        }
+        if candidate not in ignored:
+            return candidate
+    return "main"
+
+
+def classify_academic_level(url: str, text: str = "") -> str:
+    path = urlparse(url).path.lower()
+    lower_text = text[:400].lower()
+
+    if "senior-high" in path or "strand" in lower_text or "shs" in path:
+        return "shs"
+    if "basic-education" in path or "elementary" in path or "junior-high" in path:
+        return "basic_ed"
+    if "undergraduate" in path:
+        return "undergraduate"
+    if re.search(r"(?<!under)graduate", path) or "master" in lower_text or "doctor" in lower_text:
+        return "graduate"
+    return "undergraduate"
+
+
+def classify_document_type(url: str, text: str = "") -> str:
+    path = urlparse(url).path.lower()
+    ephemeral_indicators = [
+        "/news", "/announcement", "/announcements",
+        "/events", "/event", "/blog", "/posts", "/press",
+        "/memorandum", "/advisory", "/bulletin",
+    ]
+    if any(token in path for token in ephemeral_indicators):
+        return "ephemeral"
+
+    if re.search(r"/(?:19|20)\d{2}/", path):
+        return "ephemeral"
+
+    current_year = datetime.now().year
+    for m in re.finditer(r"a\.?y\.?\s*(20\d{2})", text[:600].lower()):
+        if int(m.group(1)) <= current_year - 2:
+            return "ephemeral"
+
+    return "evergreen"
+
+
+def _hash_markdown(markdown: str) -> str:
+    """Strips transient dates and numbers to prevent false change detection."""
+    text = clean_markdown(markdown or "")
+    # Remove dynamic timestamps, visitor numbers, and relative dates
+    text = re.sub(r"\b\d{1,2}:\d{2}(?::\d{2})?\s*(?:am|pm)?\b", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\b(?:today|yesterday|just now|\d+\s+minutes?\s+ago)\b", "", text, flags=re.IGNORECASE)
+    normalized = re.sub(r"\s+", " ", text).strip().lower()
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _apply_scrape_result(page: ScrapedPage, markdown: str) -> bool:
+    now = datetime.now(timezone.utc)
+    new_hash = _hash_markdown(markdown)
+    old_hash = page.content_hash or (
+        _hash_markdown(page.markdown_content) if page.markdown_content else None
+    )
+
+    page.last_scraped_at = now
+    page.content_hash = new_hash
+    page.status = PageProcessStatus.COMPLETED
+
+    if new_hash == old_hash and page.markdown_content:
+        return False
+
+    page.markdown_content = markdown
+    page.content_changed_at = now
+    page.chunked_at = None
+    return True
+
+
+def _register_failure(page: ScrapedPage, max_retries: int) -> None:
+    page.retries += 1
+    if page.retries < max_retries:
+        page.status = PageProcessStatus.PENDING
+    elif page.markdown_content:
+        logger.warning(f"[Scraper] Refresh failed for {page.url}; retaining previous valid version.")
+        page.status = PageProcessStatus.COMPLETED
+    else:
+        page.status = PageProcessStatus.FAILED
+
+
+async def scraper_worker(web_id: int, is_discovery_done: asyncio.Event, max_retries: int = 3) -> int:
+    total_scraped = 0
+    config = CrawlerRunConfig(
+        cache_mode=CacheMode.BYPASS,
+        excluded_tags=["nav", "footer", "header", "script", "style", "noscript", "aside", "form"],
+        exclude_external_links=True,
+        exclude_social_media_links=True,
+        page_timeout=35000,
+        wait_until="domcontentloaded",
+        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+    )
+
+    crawler = AsyncWebCrawler()
+    await crawler.start()
+
+    try:
+        while True:
+            async with async_session() as session:
+                stmt = (
+                    select(ScrapedPage)
+                    .where(
+                        ScrapedPage.web_id == web_id,
+                        ScrapedPage.status == PageProcessStatus.PENDING,
+                        ScrapedPage.retries < max_retries,
+                    )
+                    .limit(10)
+                )
+                res = await session.execute(stmt)
+                pages = res.scalars().all()
+
+                if not pages:
+                    if is_discovery_done.is_set():
+                        break
+                    await asyncio.sleep(1.0)
+                    continue
+
+                for page in pages:
+                    page.status = PageProcessStatus.IN_PROGRESS
+                await session.commit()
+
+                for page in pages:
+                    try:
+                        crawl_result = await crawler.arun(url=page.url, config=config)
+                        if crawl_result.success and crawl_result.markdown:
+                            _apply_scrape_result(page, str(crawl_result.markdown))
+                            total_scraped += 1
+                        else:
+                            _register_failure(page, max_retries)
+                    except Exception as e:
+                        logger.warning(f"[Scraper Error] {page.url}: {e}")
+                        _register_failure(page, max_retries)
+
+                    await asyncio.sleep(0.5)
+
+                await session.commit()
+    finally:
+        await crawler.close()
+
+    return total_scraped
+
+
+async def _has_pending_chunks_to_create(web_id: int) -> bool:
+    async with async_session() as session:
+        count = await session.scalar(
+            select(func.count(ScrapedPage.id)).where(
+                ScrapedPage.web_id == web_id,
+                ScrapedPage.status == PageProcessStatus.COMPLETED,
+                ScrapedPage.chunked_at.is_(None),
+                ScrapedPage.markdown_content.is_not(None),
+            )
+        )
+        return (count or 0) > 0
+
+
+async def chunker_worker(web_id: int, is_scraping_done: asyncio.Event) -> int:
+    total_chunks = 0
+    while True:
+        try:
+            created = await process_and_chunk_pages(web_id=web_id, batch_size=20)
+            if created > 0:
+                total_chunks += created
+                continue
+
+            if is_scraping_done.is_set():
+                if not await _has_pending_chunks_to_create(web_id):
+                    break
+
+            await asyncio.sleep(1.5)
+        except Exception as e:
+            logger.error(f"[Chunker Worker Exception]: {e}")
+            traceback.print_exc()
+            await asyncio.sleep(2.0)
+
+    return total_chunks
+
+
+async def _has_pending_qgen_chunks(web_id: int) -> bool:
+    async with async_session() as session:
+        count = await session.scalar(
+            select(func.count(Chunk.id))
+            .join(ScrapedPage, Chunk.page_id == ScrapedPage.id)
+            .where(
+                ScrapedPage.web_id == web_id,
+                Chunk.has_qgen.is_(False),
+                Chunk.qgen_attempts < QGEN_MAX_ATTEMPTS,
+            )
+        )
+        return (count or 0) > 0
+
+
+async def qgen_worker(web_id: int, is_chunking_done: asyncio.Event) -> int:
+    total_questions = 0
+    generator = get_question_generator()
+    CHUNK_BATCH_SIZE = 10
+
+    while True:
+        try:
+            async with async_session() as session:
+                stmt = (
+                    select(
+                        Chunk.id,
+                        Chunk.content,
+                        Chunk.heading_path,
+                        ScrapedPage.org_id,
+                        ScrapedPage.url.label("page_url"),
+                    )
+                    .join(ScrapedPage, Chunk.page_id == ScrapedPage.id)
+                    .where(
+                        ScrapedPage.web_id == web_id,
+                        Chunk.has_qgen.is_(False),
+                        Chunk.qgen_attempts < QGEN_MAX_ATTEMPTS,
+                    )
+                    .order_by(Chunk.id)
+                    .limit(CHUNK_BATCH_SIZE)
+                )
+                rows = (await session.execute(stmt)).all()
+
+                if not rows:
+                    if is_chunking_done.is_set():
+                        if not await _has_pending_qgen_chunks(web_id):
+                            break
+                    await asyncio.sleep(2.0)
+                    continue
+
+                chunk_ids = [r.id for r in rows]
+                payloads: List[RawChunk] = []
+                for r in rows:
+                    tenant_str = str(r.org_id)
+                    payloads.append(
+                        RawChunk(
+                            id=str(r.id),
+                            doc_id=generate_doc_id(tenant_id=tenant_str, source_url=r.page_url),
+                            source_url=r.page_url,
+                            title=r.heading_path or r.page_url.split("/")[-1] or "Homepage",
+                            content=r.content,
+                            tags=[tenant_str],
+                        )
+                    )
+
+                try:
+                    generated_map = await generator.generate_questions_batch(payloads)
+
+                    new_questions: List[GeneratedQuestion] = []
+                    done_ids: List[int] = []
+                    for p in payloads:
+                        if p.id not in generated_map:
+                            continue
+                        done_ids.append(int(p.id))
+                        for item in generated_map[p.id]:
+                            q_text = (item.content if hasattr(item, "content") else str(item)).strip()
+                            if q_text:
+                                new_questions.append(
+                                    GeneratedQuestion(
+                                        chunk_id=int(p.id),
+                                        question=q_text,
+                                        is_synced_qdrant=False,
+                                    )
+                                )
+                                total_questions += 1
+
+                    if new_questions:
+                        session.add_all(new_questions)
+                    if done_ids:
+                        await session.execute(
+                            update(Chunk).where(Chunk.id.in_(done_ids)).values(has_qgen=True)
+                        )
+                    missed = [cid for cid in chunk_ids if cid not in done_ids]
+                    if missed:
+                        await session.execute(
+                            update(Chunk)
+                            .where(Chunk.id.in_(missed))
+                            .values(qgen_attempts=Chunk.qgen_attempts + 1)
+                        )
+                    await session.commit()
+
+                except Exception as e:
+                    await session.rollback()
+                    logger.error(f"[QGen Batch Error] chunks={chunk_ids}: {e}")
+                    async with async_session() as err_sess:
+                        await err_sess.execute(
+                            update(Chunk)
+                            .where(Chunk.id.in_(chunk_ids))
+                            .values(qgen_attempts=Chunk.qgen_attempts + 1)
+                        )
+                        await err_sess.commit()
+
+            await asyncio.sleep(2.0)
+        except Exception as outer_e:
+            logger.error(f"[QGen Worker Exception]: {outer_e}")
+            traceback.print_exc()
+            await asyncio.sleep(3.0)
+
+    return total_questions
+
+
+async def _has_pending_sync_questions(web_id: int) -> bool:
+    sync_col = get_active_sync_column()
+    async with async_session() as session:
+        count = await session.scalar(
+            select(func.count(GeneratedQuestion.id))
+            .join(Chunk, GeneratedQuestion.chunk_id == Chunk.id)
+            .join(ScrapedPage, Chunk.page_id == ScrapedPage.id)
+            .where(
+                ScrapedPage.web_id == web_id,
+                sync_col.is_(False),
+            )
+        )
+        return (count or 0) > 0
+
+
+async def qdrant_sync_worker(org_id: int, web_id: int, is_qgen_done: asyncio.Event) -> int:
+    total_synced = 0
+    vector_db = get_vector_db()
+    embedder = get_embedder()
+    sparse_embedder = get_sparse_embedder()
+    target_collection = settings.resolved_collection_name
+    sync_col = get_active_sync_column()
+
+    await vector_db.create_collection_if_not_exists(
+        collection_name=target_collection,
+        dense_vector_size=embedder.dimension,
+        distance="Cosine",
+        enable_quantization=settings.quantization_enabled,
+    )
+
+    tenant_key = str(org_id)
+    EMBED_DB_BATCH_SIZE = 100
+    consecutive_failures = 0
+
+    while True:
+        try:
+            async with async_session() as session:
+                stmt = (
+                    select(
+                        GeneratedQuestion.id.label("q_id"),
+                        GeneratedQuestion.question.label("q_text"),
+                        Chunk.id.label("chunk_id"),
+                        Chunk.content.label("chunk_content"),
+                        Chunk.chunk_index.label("chunk_index"),
+                        Chunk.section_id.label("section_id"),
+                        Chunk.heading_path.label("heading_path"),
+                        Chunk.part_index.label("part_index"),
+                        Chunk.part_total.label("part_total"),
+                        ScrapedPage.id.label("page_id"),
+                        ScrapedPage.url.label("page_url"),
+                        ScrapedPage.doc_period.label("page_doc_period"),
+                        ScrapedPage.content_changed_at.label("page_updated_at"),
+                    )
+                    .join(Chunk, GeneratedQuestion.chunk_id == Chunk.id)
+                    .join(ScrapedPage, Chunk.page_id == ScrapedPage.id)
+                    .where(
+                        ScrapedPage.web_id == web_id,
+                        sync_col.is_(False),
+                    )
+                    .order_by(GeneratedQuestion.id)
+                    .limit(EMBED_DB_BATCH_SIZE)
+                )
+                rows = (await session.execute(stmt)).all()
+
+                if not rows:
+                    if is_qgen_done.is_set():
+                        if not await _has_pending_sync_questions(web_id):
+                            break
+                    await asyncio.sleep(2.0)
+                    continue
+
+                try:
+                    embedded_results = await embedder.embed(
+                        [r.q_text for r in rows], task_type="RETRIEVAL_DOCUMENT"
+                    )
+                    if len(embedded_results) != len(rows):
+                        raise ValueError(
+                            f"Embedding mismatch: expected {len(rows)}, got {len(embedded_results)}"
+                        )
+
+                    chunk_sparse_cache: Dict[int, SparseVectorData] = {}
+                    points_to_upsert: List[VectorPoint] = []
+                    synced_q_ids: List[int] = []
+
+                    for row, emb_res in zip(rows, embedded_results):
+                        doc_type = classify_document_type(row.page_url, row.chunk_content)
+                        campus = extract_sub_entity_from_url(row.page_url)
+                        academic_level = classify_academic_level(row.page_url, row.chunk_content)
+                        doc_period = extract_doc_period(
+                            row.chunk_content, url=row.page_url, heading=row.heading_path or ""
+                        ) or row.page_doc_period
+
+                        if row.chunk_id not in chunk_sparse_cache:
+                            sparse_data = await sparse_embedder.embed_text(row.chunk_content)
+                            if not sparse_data.indices:
+                                sparse_data = SparseVectorData(indices=[0], values=[0.0])
+                            chunk_sparse_cache[row.chunk_id] = sparse_data
+                        sparse_data = chunk_sparse_cache[row.chunk_id]
+
+                        chunk_uuid = generate_chunk_id(
+                            tenant_id=tenant_key,
+                            source_url=row.page_url,
+                            chunk_index=row.chunk_id,
+                            content=row.chunk_content,
+                        )
+                        point_uuid = generate_question_id(chunk_id=chunk_uuid, question=row.q_text)
+
+                        points_to_upsert.append(
+                            VectorPoint(
+                                id=point_uuid,
+                                vector={
+                                    "question_dense": emb_res.values,
+                                    "chunk_sparse": sparse_data,
+                                },
+                                payload={
+                                    "group_id": tenant_key,
+                                    "web_id": web_id,
+                                    "parent_chunk_id": chunk_uuid,
+                                    "question_text": row.q_text,
+                                    "chunk_text": row.chunk_content,
+                                    "source_url": row.page_url,
+                                    "page_id": row.page_id,
+                                    "chunk_id": row.chunk_id,
+                                    "chunk_index": row.chunk_index,
+                                    "section_id": row.section_id,
+                                    "heading_path": row.heading_path,
+                                    "part_index": row.part_index,
+                                    "part_total": row.part_total,
+                                    "doc_type": doc_type,
+                                    "campus": campus,
+                                    "academic_level": academic_level,
+                                    "doc_period": doc_period,
+                                    "page_updated_at": (
+                                        row.page_updated_at.isoformat()
+                                        if row.page_updated_at else None
+                                    ),
+                                },
+                            )
+                        )
+                        synced_q_ids.append(row.q_id)
+
+                    await vector_db.upsert_points(
+                        collection_name=target_collection, points=points_to_upsert
+                    )
+
+                    await session.execute(
+                        update(GeneratedQuestion)
+                        .where(GeneratedQuestion.id.in_(synced_q_ids))
+                        .values({
+                            sync_col.key: True,
+                            GeneratedQuestion.is_synced_qdrant: True,
+                        })
+                    )
+                    await session.commit()
+                    total_synced += len(points_to_upsert)
+                    consecutive_failures = 0
+
+                    await asyncio.sleep(0.3)
+
+                except Exception as e:
+                    await session.rollback()
+                    consecutive_failures += 1
+                    err_msg = str(e)
+                    logger.error(f"[Qdrant Sync Error] attempt {consecutive_failures}: {err_msg[:200]}")
+                    traceback.print_exc()
+
+                    if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg:
+                        logger.warning("[Qdrant Sync Rate Limit] Sleeping 15s...")
+                        await asyncio.sleep(15.0)
+                        consecutive_failures = 0
+                    elif consecutive_failures >= SYNC_MAX_CONSECUTIVE_FAILURES:
+                        logger.warning("[Qdrant Sync Backoff] Sleeping 10s...")
+                        await asyncio.sleep(10.0)
+                        consecutive_failures = 0
+                    else:
+                        await asyncio.sleep(3.0)
+
+        except Exception as loop_e:
+            logger.error(f"[Qdrant Sync Worker Loop Exception]: {loop_e}")
+            traceback.print_exc()
+            await asyncio.sleep(5.0)
+
+    return total_synced
+
+
+async def reconcile_stale_points(org_id: int, web_id: int) -> int:
+    """Removes Qdrant points of re-chunked pages whose chunk_id no longer exists in SQL."""
+    async with async_session() as session:
+        page_ids = list(
+            (
+                await session.execute(
+                    select(ScrapedPage.id).where(
+                        ScrapedPage.web_id == web_id,
+                        ScrapedPage.qdrant_cleanup_pending.is_(True),
+                    )
+                )
+            ).scalars().all()
+        )
+    if not page_ids:
+        return 0
+
+    vector_db = get_vector_db()
+    try:
+        for page_id in page_ids:
+            async with async_session() as session:
+                live_chunk_ids = list(
+                    (
+                        await session.execute(select(Chunk.id).where(Chunk.page_id == page_id))
+                    ).scalars().all()
+                )
+
+            # Purge any points associated with this page that do not match active chunk IDs
+            await vector_db.delete_points(
+                collection_name=settings.resolved_collection_name,
+                filters={"group_id": str(org_id), "page_id": page_id},
+                must_not={"chunk_id": live_chunk_ids} if live_chunk_ids else None,
+            )
+
+            async with async_session() as session:
+                await session.execute(
+                    update(ScrapedPage)
+                    .where(ScrapedPage.id == page_id)
+                    .values(qdrant_cleanup_pending=False)
+                )
+                await session.commit()
+    finally:
+        await vector_db.close()
+
+    logger.info(f"[Reconcile] Swept stale points for {len(page_ids)} pages (web {web_id}).")
+    return len(page_ids)
+
+
+async def purge_missing_pages(
+    org_id: int, web_id: int, run_started_at: datetime, discovered_count: int
+) -> int:
+    """Removes pages (SQL rows + Qdrant points) that were dropped from the site."""
+    async with async_session() as session:
+        total = await session.scalar(
+            select(func.count(ScrapedPage.id)).where(ScrapedPage.web_id == web_id)
+        ) or 0
+        stale_ids = list(
+            (
+                await session.execute(
+                    select(ScrapedPage.id).where(
+                        ScrapedPage.web_id == web_id,
+                        or_(
+                            ScrapedPage.last_seen_at.is_(None),
+                            ScrapedPage.last_seen_at < run_started_at,
+                        ),
+                    )
+                )
+            ).scalars().all()
+        )
+
+    if not stale_ids:
+        return 0
+    if discovered_count <= 0 or len(stale_ids) > PURGE_MAX_FRACTION * max(total, 1):
+        logger.warning(
+            f"[Purge Guard] Skipped: {len(stale_ids)}/{total} missing, {discovered_count} discovered."
+        )
+        return 0
+
+    vector_db = get_vector_db()
+    try:
+        for page_id in stale_ids:
+            await vector_db.delete_points(
+                collection_name=settings.resolved_collection_name,
+                filters={"group_id": str(org_id), "page_id": page_id},
+            )
+    finally:
+        await vector_db.close()
+
+    async with async_session() as session:
+        await session.execute(delete(ScrapedPage).where(ScrapedPage.id.in_(stale_ids)))
+        await session.commit()
+
+    logger.info(f"[Purge] Purged {len(stale_ids)} pages no longer present on web {web_id}.")
+    return len(stale_ids)
+
+
+async def _bump_content_version(org_id: int) -> None:
+    async with async_session() as session:
+        await session.execute(
+            update(Org).where(Org.id == org_id).values(content_version=Org.content_version + 1)
+        )
+        await session.commit()
+
+
+async def run_full_pipeline(
+    website_id: int,
+    refresh_after_hours: Optional[float] = DEFAULT_REFRESH_AFTER_HOURS,
+    force_refresh: bool = False,
+) -> dict:
+    run_started_at = datetime.now(timezone.utc)
+
+    async with async_session() as session:
+        website = await session.get(Website, website_id)
+        if not website:
+            raise ValueError(f"Website with id {website_id} not found")
+
+        website.status = WebsiteScrapeStatus.IN_PROGRESS
+        website.error_message = None
+
+        await session.execute(
+            update(ScrapedPage)
+            .where(
+                ScrapedPage.web_id == website_id,
+                ScrapedPage.status == PageProcessStatus.IN_PROGRESS,
+            )
+            .values(status=PageProcessStatus.PENDING)
+        )
+
+        if force_refresh:
+            await session.execute(
+                update(ScrapedPage)
+                .where(ScrapedPage.web_id == website_id)
+                .values(status=PageProcessStatus.PENDING, retries=0)
+            )
+        elif refresh_after_hours is not None:
+            cutoff = run_started_at - timedelta(hours=refresh_after_hours)
+            await session.execute(
+                update(ScrapedPage)
+                .where(
+                    ScrapedPage.web_id == website_id,
+                    ScrapedPage.status.in_([PageProcessStatus.COMPLETED, PageProcessStatus.FAILED]),
+                    or_(
+                        ScrapedPage.last_scraped_at.is_(None),
+                        ScrapedPage.last_scraped_at < cutoff,
+                    ),
+                )
+                .values(status=PageProcessStatus.PENDING, retries=0)
+            )
+        await session.commit()
+
+        org_id = website.org_id
+        base_url = website.url
+
+    is_discovery_done = asyncio.Event()
+    is_scraping_done = asyncio.Event()
+    is_chunking_done = asyncio.Event()
+    is_qgen_done = asyncio.Event()
+
+    async def _discovery_task():
+        try:
+            return await run_discovery(org_id=org_id, web_id=website_id, base_url=base_url)
+        except Exception as e:
+            logger.error(f"Discovery stage failed: {e}")
+            raise
+        finally:
+            is_discovery_done.set()
+
+    async def _scraper_task():
+        try:
+            return await scraper_worker(web_id=website_id, is_discovery_done=is_discovery_done)
+        except Exception as e:
+            logger.error(f"Scraper stage failed: {e}")
+            raise
+        finally:
+            is_scraping_done.set()
+
+    async def _chunker_task():
+        try:
+            return await chunker_worker(web_id=website_id, is_scraping_done=is_scraping_done)
+        except Exception as e:
+            logger.error(f"Chunker stage failed: {e}")
+            raise
+        finally:
+            is_chunking_done.set()
+
+    async def _qgen_task():
+        try:
+            return await qgen_worker(web_id=website_id, is_chunking_done=is_chunking_done)
+        except Exception as e:
+            logger.error(f"QGen stage failed: {e}")
+            raise
+        finally:
+            is_qgen_done.set()
+
+    async def _sync_task():
+        try:
+            return await qdrant_sync_worker(org_id=org_id, web_id=website_id, is_qgen_done=is_qgen_done)
+        except Exception as e:
+            logger.error(f"Qdrant Sync stage failed: {e}")
+            raise
+
+    results = await asyncio.gather(
+        _discovery_task(),
+        _scraper_task(),
+        _chunker_task(),
+        _qgen_task(),
+        _sync_task(),
+        return_exceptions=True,
+    )
+
+    errors = [r for r in results if isinstance(r, BaseException)]
+
+    def _num(v) -> int:
+        return v if isinstance(v, int) else 0
+
+    cleaned_pages = purged_pages = 0
+    if not errors:
+        try:
+            cleaned_pages = await reconcile_stale_points(org_id, website_id)
+            purged_pages = await purge_missing_pages(
+                org_id, website_id, run_started_at, discovered_count=_num(results[0])
+            )
+        except Exception as e:
+            logger.error(f"Reconciliation error for website {website_id}: {e}")
+            traceback.print_exc()
+            errors.append(e)
+
+    if _num(results[2]) > 0 or cleaned_pages > 0 or purged_pages > 0:
+        try:
+            await _bump_content_version(org_id)
+        except Exception as e:
+            logger.error(f"Failed to bump content_version for org {org_id}: {e}")
+
+    async with async_session() as session:
+        website = await session.get(Website, website_id)
+        if website:
+            if errors:
+                website.status = WebsiteScrapeStatus.FAILED
+                err_strings = [f"{type(e).__name__}: {e}" for e in errors]
+                website.error_message = "; ".join(err_strings)[:2000]
+                logger.error(f"Pipeline failed for website {website_id}: {website.error_message}")
+            else:
+                website.status = WebsiteScrapeStatus.COMPLETED
+                website.error_message = None
+            await session.commit()
+
+    if errors:
+        raise errors[0]
+
+    discovered_urls, scraped_pages, created_chunks, generated_questions, synced_qdrant_points = results
+    return {
+        "discovered_urls": discovered_urls,
+        "scraped_pages": scraped_pages,
+        "created_chunks": created_chunks,
+        "generated_questions": generated_questions,
+        "synced_qdrant_points": synced_qdrant_points,
+        "swept_pages": cleaned_pages,
+        "purged_pages": purged_pages,
+    }
+
+
+
+
+
+
+
+
+
+
+
+
+chunker.py:
+"""
+Structure-aware markdown chunker (dependency-free, pure functions).
+
+Why this exists
+---------------
+The old pipeline split markdown by header, then cut every section into
+800-character windows with a 150-character overlap, and dropped any piece
+under 15 words. For a procedure such as "Admission steps 1-8" that:
+
+  * cut the list after ~3 items (an 800-char window holds very little),
+  * discarded a short trailing piece such as "7. Pay fees  8. Get your ID",
+  * left every piece after the first without its heading,
+  * kept no ordering information, so nothing could ever fetch the rest.
+
+This chunker keeps semantic units whole:
+
+  1. Sections come from the heading hierarchy; each chunk carries its
+     breadcrumb ("Admissions > Freshmen > Steps") as the first line.
+  2. Lists, tables and code fences are atomic blocks. A lead-in line such as
+     "Steps to apply:" is glued to the list that follows it, and a numbered
+     list interrupted by a paragraph is re-joined (1-3 ... para ... 4-8).
+  3. Small sibling sections are packed together up to ``target_chars``;
+     tiny sections are merged into a neighbour instead of being dropped.
+  4. A section is only split when it exceeds ``max_chars``. Splits happen at
+     list-item / row / sentence boundaries, the lead-in (or table header) is
+     repeated in every part, and parts are labelled "(part i of n)".
+  5. Every chunk gets (chunk_index, section_id, part_index, part_total) so
+     the query layer can reload the rest of a section or the neighbours.
+"""
+from __future__ import annotations
+
+import hashlib
+import re
+from dataclasses import dataclass
+from typing import List, Optional
+
+HEADING_RE = re.compile(r"^(#{1,6})\s+(.*\S)\s*$")
+LIST_ITEM_RE = re.compile(r"^\s*(?:[-*+\u2022]|\d{1,3}[.)])\s+\S")
+TOP_NUM_RE = re.compile(r"^(\d{1,3})[.)]\s+")
+TABLE_RE = re.compile(r"^\s*\|")
+TABLE_SEP_RE = re.compile(r"^\s*\|?\s*:?-{2,}")
+FENCE_RE = re.compile(r"^\s*(?:```|~~~)")
+
+DEFAULT_TARGET_CHARS = 1500
+DEFAULT_MAX_CHARS = 3200
+DEFAULT_MIN_CHARS = 250
+
+BOILERPLATE_INDICATORS = [
+    "cookie", "privacy policy", "terms of use", "all rights reserved",
+    "share on facebook", "share on x", "share on linkedin",
+    "agree decline", "_chevron_right_", "navigation", "explore our website",
+    "skip to content", "back to top", "read more", "click here",
+    "related stories", "featured articles", "trending news", "leave a reply",
+]
+
+
+# --------------------------------------------------------------------------- #
+# Shared helpers (re-exported by orchestrator for backward compatibility)
+# --------------------------------------------------------------------------- #
+def estimate_token_count(text: str) -> int:
+    return max(1, len(text.split()))
+
+
+def is_substantive_chunk(text: str, min_words: int = 8) -> bool:
+    """Boilerplate filter. Applied to single-part chunks only (see chunk_markdown)."""
+    words = text.split()
+    if len(words) < min_words:
+        return False
+
+    lower_text = text.lower()
+    matches = sum(1 for indicator in BOILERPLATE_INDICATORS if indicator in lower_text)
+    if matches >= 2:
+        return False
+
+    symbols_count = len(re.findall(r"[_*\[\]\(\)!|#<>]", text))
+    if symbols_count / max(1, len(text)) > 0.25:
+        return False
+
+    sentences = [s for s in re.split(r"[.!?\n]+", text) if len(s.strip().split()) >= 3]
+    return len(sentences) >= 1
+
+
+# --------------------------------------------------------------------------- #
+# Data classes
+# --------------------------------------------------------------------------- #
+@dataclass
+class ChunkDraft:
+    chunk_index: int       # 0-based reading order within the page
+    section_id: str        # same for all parts of one section
+    heading_path: str      # "A > B > C"
+    part_index: int        # 1-based
+    part_total: int
+    content: str           # breadcrumb line + body (what is embedded / indexed / shown to the LLM)
+    body: str              # body only
+
+
+@dataclass
+class _Block:
+    kind: str              # para | list | table | code
+    text: str
+    lead_in: str = ""
+    first_num: Optional[int] = None
+    last_num: Optional[int] = None
+
+
+@dataclass
+class _Section:
+    path: List[str]
+    heading_line: str
+    body: str
+
+
+# --------------------------------------------------------------------------- #
+# Block parsing
+# --------------------------------------------------------------------------- #
+def _numbers(text: str) -> List[int]:
+    nums = []
+    for line in text.split("\n"):
+        m = TOP_NUM_RE.match(line)  # unindented numbered items only
+        if m:
+            nums.append(int(m.group(1)))
+    return nums
+
+
+def _parse_blocks(body: str) -> List[_Block]:
+    lines = body.split("\n")
+    n = len(lines)
+    blocks: List[_Block] = []
+    i = 0
+    while i < n:
+        line = lines[i]
+        if not line.strip():
+            i += 1
+            continue
+
+        if FENCE_RE.match(line):
+            j = i + 1
+            while j < n and not FENCE_RE.match(lines[j]):
+                j += 1
+            blocks.append(_Block("code", "\n".join(lines[i : j + 1])))
+            i = j + 1
+            continue
+
+        if TABLE_RE.match(line):
+            j = i
+            while j < n and TABLE_RE.match(lines[j]):
+                j += 1
+            blocks.append(_Block("table", "\n".join(lines[i:j])))
+            i = j
+            continue
+
+        if LIST_ITEM_RE.match(line):
+            j = i + 1
+            while j < n:
+                nxt = lines[j]
+                if not nxt.strip():
+                    k = j + 1
+                    while k < n and not lines[k].strip():
+                        k += 1
+                    if k < n and (LIST_ITEM_RE.match(lines[k]) or lines[k][:1] in (" ", "\t")):
+                        j = k
+                        continue
+                    break
+                if LIST_ITEM_RE.match(nxt) or nxt[:1] in (" ", "\t"):
+                    j += 1
+                    continue
+                break
+            text = "\n".join(lines[i:j]).rstrip()
+            nums = _numbers(text)
+            blocks.append(
+                _Block("list", text, first_num=nums[0] if nums else None,
+                       last_num=nums[-1] if nums else None)
+            )
+            i = j
+            continue
+
+        j = i + 1
+        while (
+            j < n
+            and lines[j].strip()
+            and not LIST_ITEM_RE.match(lines[j])
+            and not TABLE_RE.match(lines[j])
+            and not FENCE_RE.match(lines[j])
+        ):
+            j += 1
+        blocks.append(_Block("para", "\n".join(lines[i:j])))
+        i = j
+    return blocks
+
+
+def _glue_blocks(blocks: List[_Block]) -> List[_Block]:
+    """Attach lead-ins to their list/table, and re-join interrupted numbered lists."""
+    merged: List[_Block] = []
+    k = 0
+    while k < len(blocks):
+        b = blocks[k]
+        if (
+            b.kind == "para"
+            and k + 1 < len(blocks)
+            and blocks[k + 1].kind in ("list", "table", "code")
+            and b.text.rstrip().endswith(":")
+            and len(b.text) <= 300
+        ):
+            nb = blocks[k + 1]
+            lead = b.text.rstrip()
+            merged.append(
+                _Block(nb.kind, lead + "\n" + nb.text, lead_in=lead,
+                       first_num=nb.first_num, last_num=nb.last_num)
+            )
+            k += 2
+            continue
+        merged.append(b)
+        k += 1
+
+    out: List[_Block] = []
+    for b in merged:
+        if b.kind == "list" and b.first_num and b.first_num > 1:
+            joined = False
+            for p in range(len(out) - 1, max(-1, len(out) - 5), -1):
+                prev = out[p]
+                if prev.kind == "list" and prev.last_num is not None and prev.last_num == b.first_num - 1:
+                    combined = _Block(
+                        "list",
+                        "\n\n".join(x.text for x in out[p:] + [b]),
+                        lead_in=prev.lead_in,
+                        first_num=prev.first_num,
+                        last_num=b.last_num,
+                    )
+                    del out[p:]
+                    out.append(combined)
+                    joined = True
+                    break
+            if joined:
+                continue
+        out.append(b)
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# Splitting oversized material (always at semantic boundaries)
+# --------------------------------------------------------------------------- #
+def _hard_split(text: str, limit: int) -> List[str]:
+    parts: List[str] = []
+    text = text.strip()
+    while len(text) > limit:
+        cut = text.rfind(" ", 0, limit)
+        if cut < limit * 0.5:
+            cut = limit
+        parts.append(text[:cut].strip())
+        text = text[cut:].strip()
+    if text:
+        parts.append(text)
+    return parts
+
+
+def _sentences(text: str) -> List[str]:
+    return [s for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
+
+
+def _list_units(text: str) -> List[str]:
+    units: List[str] = []
+    cur: List[str] = []
+    for line in text.split("\n"):
+        if LIST_ITEM_RE.match(line) and not line[:1].isspace():
+            if cur:
+                units.append("\n".join(cur))
+            cur = [line]
+        else:
+            cur.append(line)
+    if cur:
+        units.append("\n".join(cur))
+    return units
+
+
+def _pack_units(units: List[str], prefix: str, target: int, max_chars: int,
+                min_chars: int, sep: str) -> List[str]:
+    budget_max = max(200, max_chars - len(prefix) - 1)
+    budget_target = max(200, target - len(prefix) - 1)
+
+    flat: List[str] = []
+    for u in units:
+        flat.extend(_hard_split(u, budget_max) if len(u) > budget_max else [u])
+
+    groups: List[List[str]] = []
+    cur: List[str] = []
+    cur_len = 0
+    for u in flat:
+        if cur and cur_len + len(u) + 1 > budget_target:
+            groups.append(cur)
+            cur, cur_len = [], 0
+        cur.append(u)
+        cur_len += len(u) + 1
+    if cur:
+        groups.append(cur)
+
+    if len(groups) > 1:  # never leave a tiny orphan tail ("8. Get your ID")
+        last = sum(len(u) + 1 for u in groups[-1])
+        prev = sum(len(u) + 1 for u in groups[-2])
+        if last < min_chars and prev + last <= budget_max:
+            groups[-2].extend(groups[-1])
+            groups.pop()
+
+    return [(prefix + sep if prefix else "") + sep.join(g) for g in groups]
+
+
+def _split_block(block: _Block, target: int, max_chars: int, min_chars: int) -> List[str]:
+    text = block.text
+    if len(text) <= max_chars:
+        return [text]
+
+    lead = block.lead_in
+    body = text[len(lead):].lstrip("\n") if lead and text.startswith(lead) else text
+
+    if block.kind == "list":
+        return _pack_units(_list_units(body), lead, target, max_chars, min_chars, "\n")
+
+    if block.kind == "table":
+        rows = body.split("\n")
+        header = rows[:2] if len(rows) >= 2 and TABLE_SEP_RE.match(rows[1]) else []
+        units = rows[len(header):]
+        prefix = "\n".join(([lead] if lead else []) + header)
+        return _pack_units(units, prefix, target, max_chars, min_chars, "\n")
+
+    if block.kind == "code":
+        return _pack_units(body.split("\n"), lead, target, max_chars, min_chars, "\n")
+
+    return _pack_units(_sentences(body) or [body], "", target, max_chars, min_chars, " ")
+
+
+def _split_section_body(body: str, target: int, max_chars: int, min_chars: int) -> List[str]:
+    if len(body) <= max_chars:
+        return [body]
+
+    parts: List[str] = []
+    cur: List[str] = []
+    cur_len = 0
+
+    def flush() -> None:
+        nonlocal cur, cur_len
+        if cur:
+            parts.append("\n\n".join(cur))
+        cur, cur_len = [], 0
+
+    for b in _glue_blocks(_parse_blocks(body)):
+        if len(b.text) > max_chars:
+            flush()
+            parts.extend(_split_block(b, target, max_chars, min_chars))
+            continue
+        if cur and cur_len + len(b.text) + 2 > target:
+            flush()
+        cur.append(b.text)
+        cur_len += len(b.text) + 2
+    flush()
+
+    if len(parts) > 1 and len(parts[-1]) < min_chars and len(parts[-2]) + len(parts[-1]) + 2 <= max_chars:
+        parts[-2] = parts[-2] + "\n\n" + parts[-1]
+        parts.pop()
+    return parts
+
+
+# --------------------------------------------------------------------------- #
+# Sections and packing
+# --------------------------------------------------------------------------- #
+def _parse_sections(text: str) -> List[_Section]:
+    sections: List[_Section] = []
+    stack: List[tuple] = []
+    cur_lines: List[str] = []
+    cur_path: List[str] = []
+    cur_head = ""
+    in_fence = False
+
+    def flush() -> None:
+        body = "\n".join(cur_lines).strip()
+        if body:
+            sections.append(_Section(list(cur_path), cur_head, body))
+
+    for line in text.split("\n"):
+        if FENCE_RE.match(line):
+            in_fence = not in_fence
+        m = None if in_fence else HEADING_RE.match(line)
+        if m:
+            flush()
+            level = len(m.group(1))
+            title = m.group(2).strip().strip("#").strip()
+            while stack and stack[-1][0] >= level:
+                stack.pop()
+            stack.append((level, title))
+            cur_path = [t for _, t in stack]
+            cur_head = line.strip()
+            cur_lines = []
+        else:
+            cur_lines.append(line)
+    flush()
+    return sections
+
+
+def _section_text(s: _Section, with_heading: bool) -> str:
+    return (s.heading_line + "\n" + s.body) if (with_heading and s.heading_line) else s.body
+
+
+def _pack_len(pack: List[_Section]) -> int:
+    multi = len(pack) > 1
+    return sum(len(_section_text(s, multi)) + 2 for s in pack)
+
+
+def _render_pack(pack: List[_Section]) -> str:
+    multi = len(pack) > 1
+    return "\n\n".join(_section_text(s, multi) for s in pack)
+
+
+def _pack_path(pack: List[_Section]) -> List[str]:
+    if len(pack) == 1:
+        return pack[0].path
+    common: List[str] = []
+    for parts in zip(*[s.path for s in pack]):
+        if all(p == parts[0] for p in parts):
+            common.append(parts[0])
+        else:
+            break
+    return common
+
+
+def chunk_markdown(
+    markdown: str,
+    *,
+    page_title: str = "",
+    target_chars: int = DEFAULT_TARGET_CHARS,
+    max_chars: int = DEFAULT_MAX_CHARS,
+    min_chars: int = DEFAULT_MIN_CHARS,
+) -> List[ChunkDraft]:
+    """Chunk already-cleaned markdown. See module docstring for the strategy."""
+    text = (markdown or "").strip()
+    if not text:
+        return []
+
+    sections = _parse_sections(text)
+    if not sections:
+        return []
+
+    # Pass 1: pack consecutive siblings (same parent) up to target size.
+    packs: List[List[_Section]] = []
+    for s in sections:
+        if (
+            packs
+            and packs[-1][0].path[:-1] == s.path[:-1]
+            and _pack_len(packs[-1]) + len(s.body) + 2 <= target_chars
+        ):
+            packs[-1].append(s)
+        else:
+            packs.append([s])
+
+    # Pass 2: merge tiny packs into a neighbour of the same top-level topic.
+    merged: List[List[_Section]] = []
+    for pack in packs:
+        if (
+            merged
+            and merged[-1][0].path[:1] == pack[0].path[:1]
+            and (_pack_len(pack) < min_chars or _pack_len(merged[-1]) < min_chars)
+            and _pack_len(merged[-1]) + _pack_len(pack) <= max_chars
+        ):
+            merged[-1].extend(pack)
+        else:
+            merged.append(pack)
+
+    drafts: List[ChunkDraft] = []
+    for ordinal, pack in enumerate(merged):
+        path = _pack_path(pack)
+        heading_path = " > ".join(path)
+        crumb = heading_path or page_title
+        parts = _split_section_body(_render_pack(pack), target_chars, max_chars, min_chars)
+        total = len(parts)
+        section_id = hashlib.sha1(f"{ordinal}|{heading_path}".encode("utf-8")).hexdigest()[:16]
+
+        for idx, part in enumerate(parts, start=1):
+            part = part.strip()
+            if not part:
+                continue
+            # Boilerplate filtering only for stand-alone chunks. A part of a
+            # multi-part section is never dropped: that is how steps 7-8 got lost.
+            if total == 1 and not is_substantive_chunk(part):
+                continue
+            header = f"Section: {crumb}" if crumb else ""
+            if header and total > 1:
+                header += f" (part {idx} of {total})"
+            content = f"{header}\n\n{part}" if header else part
+            drafts.append(
+                ChunkDraft(
+                    chunk_index=0,
+                    section_id=section_id,
+                    heading_path=heading_path,
+                    part_index=idx,
+                    part_total=total,
+                    content=content,
+                    body=part,
+                )
+            )
+
+    for i, d in enumerate(drafts):  # contiguous reading order, gaps from dropped chunks removed
+        d.chunk_index = i
+    return drafts

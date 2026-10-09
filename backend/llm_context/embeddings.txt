@@ -1,0 +1,440 @@
+from app/services/embeddings/
+
+base.py:
+from abc import ABC, abstractmethod
+from typing import List, Optional
+from app.services.embeddings.schema import EmbedderConfig, EmbeddingResult
+
+
+class BaseEmbedder(ABC):
+    def __init__(self, config: EmbedderConfig) -> None:
+        self.config = config
+
+    @abstractmethod
+    async def embed(
+        self, texts: List[str], task_type: Optional[str] = None
+    ) -> List[EmbeddingResult]:
+        """Embed a list of texts into vectors asynchronously."""
+        pass
+
+    async def embed_one(
+        self, text: str, task_type: Optional[str] = None
+    ) -> EmbeddingResult:
+        """Convenience method to embed a single text string asynchronously."""
+        res = await self.embed([text], task_type=task_type)
+        return res[0]
+
+    @property
+    @abstractmethod
+    def dimension(self) -> int:
+        """Return the vector dimensionality."""
+        pass
+
+
+
+
+factory.py:
+from functools import lru_cache
+from typing import Dict, Optional, Type
+
+from app.core.config import settings
+from app.services.embeddings.base import BaseEmbedder
+from app.services.embeddings.schema import EmbedderConfig
+
+
+class EmbedderFactory:
+    _registry: Dict[str, Type[BaseEmbedder]] = {}
+
+    @classmethod
+    def register_provider(
+        cls, provider_name: str, embedder_cls: Type[BaseEmbedder]
+    ) -> None:
+        cls._registry[provider_name.strip().lower()] = embedder_cls
+
+    @classmethod
+    def create_from_config(cls, config: EmbedderConfig) -> BaseEmbedder:
+        provider_key = config.provider.strip().lower()
+        embedder_class = cls._registry.get(provider_key)
+
+        if not embedder_class:
+            if provider_key == "gemini":
+                from app.services.embeddings.gemini_embedder import GeminiEmbedder
+                cls.register_provider("gemini", GeminiEmbedder)
+                embedder_class = GeminiEmbedder
+            elif provider_key in ("fastembed", "local"):
+                from app.services.embeddings.fastembed_embedder import FastEmbedEmbedder
+                cls.register_provider("fastembed", FastEmbedEmbedder)
+                embedder_class = FastEmbedEmbedder
+            elif provider_key in ("sentence_transformers", "hf", "huggingface"):
+                from app.services.embeddings.sentence_transformer_embedder import SentenceTransformerEmbedder
+                cls.register_provider("sentence_transformers", SentenceTransformerEmbedder)
+                embedder_class = SentenceTransformerEmbedder
+            elif provider_key == "ollama":
+                from app.services.embeddings.ollama_embedder import OllamaEmbedder
+                cls.register_provider("ollama", OllamaEmbedder)
+                embedder_class = OllamaEmbedder
+            else:
+                available = list(cls._registry.keys()) + ["gemini", "fastembed"]
+                raise ValueError(
+                    f"Unsupported embedding provider: '{config.provider}'. Available: {available}"
+                )
+
+        return embedder_class(config)
+
+    @classmethod
+    def create_from_env(cls) -> BaseEmbedder:
+        config = EmbedderConfig(
+            provider=settings.embedding_provider,
+            model_name=settings.embedding_model,
+            api_key=settings.embedding_api_key,
+            output_dimensionality=settings.embedding_dimension,
+            task_type=settings.embedding_task_type,
+        )
+        return cls.create_from_config(config)
+
+    @classmethod
+    def get_embedder(cls, config: Optional[EmbedderConfig] = None) -> BaseEmbedder:
+        if config is not None:
+            return cls.create_from_config(config)
+        return _get_cached_default_embedder()
+
+
+@lru_cache(maxsize=1)
+def _get_cached_default_embedder() -> BaseEmbedder:
+    return EmbedderFactory.create_from_env()
+
+
+def get_embedder(config: Optional[EmbedderConfig] = None) -> BaseEmbedder:
+    return EmbedderFactory.get_embedder(config)
+
+
+
+
+
+
+
+
+
+gemini_embedder.py:
+import asyncio
+from typing import List, Optional
+from google import genai
+from google.genai import types
+from app.services.embeddings.base import BaseEmbedder
+from app.services.embeddings.schema import EmbedderConfig, EmbeddingResult
+
+
+class GeminiEmbedder(BaseEmbedder):
+    def __init__(self, config: EmbedderConfig) -> None:
+        super().__init__(config)
+        self.client = genai.Client(api_key=config.api_key)
+        self._cached_dimension: Optional[int] = config.output_dimensionality
+
+        model_id = config.model_name
+        if not model_id.startswith("models/"):
+            model_id = f"models/{model_id}"
+        self.model_name = model_id
+
+    def _build_config(
+        self, task_type: Optional[str] = None
+    ) -> Optional[types.EmbedContentConfig]:
+        target_task_type = task_type or self.config.task_type or "RETRIEVAL_QUERY"
+        if not target_task_type and not self.config.output_dimensionality:
+            return None
+        return types.EmbedContentConfig(
+            task_type=target_task_type,
+            output_dimensionality=self.config.output_dimensionality,
+        )
+
+    async def embed(
+        self, texts: List[str], task_type: Optional[str] = None
+    ) -> List[EmbeddingResult]:
+        if not texts:
+            return []
+
+        config = self._build_config(task_type=task_type)
+        results: List[EmbeddingResult] = []
+        max_retries = 5
+        base_delay = 3.0
+
+        # Maximum batch size supported by Gemini embed_content
+        BATCH_SIZE = 100
+
+        for i in range(0, len(texts), BATCH_SIZE):
+            chunk = texts[i : i + BATCH_SIZE]
+            
+            # Format each text as an independent Content document
+            content_batch = [
+                types.Content(parts=[types.Part.from_text(text=t)])
+                for t in chunk
+            ]
+
+            response = None
+            for attempt in range(max_retries):
+                try:
+                    response = await self.client.aio.models.embed_content(
+                        model=self.model_name,
+                        contents=content_batch,
+                        config=config,
+                    )
+                    break
+                except Exception as e:
+                    err_msg = str(e)
+                    if (
+                        "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg or "503" in err_msg
+                    ) and attempt < max_retries - 1:
+                        sleep_time = base_delay * (2 ** attempt)
+                        print(f"[Gemini Embed Retry] Rate limit hit. Waiting {sleep_time:.1f}s...")
+                        await asyncio.sleep(sleep_time)
+                    else:
+                        raise e
+
+            if response and response.embeddings:
+                for emb in response.embeddings:
+                    results.append(EmbeddingResult(values=emb.values))
+            else:
+                raise ValueError(f"Failed to retrieve embeddings for batch {i}..{i+len(chunk)}")
+
+        return results
+
+    @property
+    def dimension(self) -> int:
+        if self._cached_dimension is None:
+            return self.config.output_dimensionality or 3072
+        return self._cached_dimension
+
+
+
+
+
+sparse_embedder.py:
+import asyncio
+from functools import lru_cache
+from typing import List
+from fastembed import SparseTextEmbedding
+
+from app.services.vector_db.schema import SparseVectorData
+
+
+class FastEmbedSparseEmbedder:
+    def __init__(self, model_name: str = "Qdrant/bm25"):
+        self.model = SparseTextEmbedding(model_name=model_name)
+
+    def _sync_embed_text(self, text: str) -> SparseVectorData:
+        """Document-side embedding (used at ingestion for chunk text)."""
+        clean_text = text.strip()
+        if not clean_text:
+            return SparseVectorData(indices=[], values=[])
+
+        result = list(self.model.embed([clean_text]))[0]
+        return SparseVectorData(
+            indices=result.indices.tolist(),
+            values=result.values.tolist(),
+        )
+
+    def _sync_embed_query(self, text: str) -> SparseVectorData:
+        """Query-side BM25 embedding (no document-length normalisation)."""
+        clean_text = text.strip()
+        if not clean_text:
+            return SparseVectorData(indices=[], values=[])
+
+        result = list(self.model.query_embed(clean_text))[0]
+        return SparseVectorData(
+            indices=result.indices.tolist(),
+            values=result.values.tolist(),
+        )
+
+    async def embed_text(self, text: str) -> SparseVectorData:
+        """Executes in a threadpool worker to keep the async event loop responsive."""
+        return await asyncio.to_thread(self._sync_embed_text, text)
+
+    async def embed_query(self, text: str) -> SparseVectorData:
+        return await asyncio.to_thread(self._sync_embed_query, text)
+
+    def _sync_embed_batch(self, texts: List[str]) -> List[SparseVectorData]:
+        if not texts:
+            return []
+        results = list(self.model.embed(texts))
+        return [
+            SparseVectorData(
+                indices=res.indices.tolist(),
+                values=res.values.tolist(),
+            )
+            for res in results
+        ]
+
+    async def embed_batch(self, texts: List[str]) -> List[SparseVectorData]:
+        return await asyncio.to_thread(self._sync_embed_batch, texts)
+
+
+@lru_cache(maxsize=1)
+def get_sparse_embedder() -> FastEmbedSparseEmbedder:
+    return FastEmbedSparseEmbedder()
+
+
+
+
+
+
+
+
+
+
+
+fastembed_embedder.py:
+import asyncio
+from typing import List, Optional
+from fastembed import TextEmbedding
+
+from app.services.embeddings.base import BaseEmbedder
+from app.services.embeddings.schema import EmbedderConfig, EmbeddingResult
+
+
+class FastEmbedEmbedder(BaseEmbedder):
+    """
+    In-process CPU-optimized dense embedder using FastEmbed (ONNX Runtime).
+    Supports BAAI/bge-m3, BAAI/bge-small-en-v1.5, etc.
+    """
+
+    def __init__(self, config: EmbedderConfig) -> None:
+        super().__init__(config)
+        self.model_name = config.model_name or "BAAI/bge-m3"
+        # Download once to cache and load into ONNX Runtime
+        self.model = TextEmbedding(model_name=self.model_name)
+        self._dim = config.output_dimensionality or 1024
+
+    def _sync_embed(self, texts: List[str]) -> List[EmbeddingResult]:
+        if not texts:
+            return []
+        embeddings_generator = self.model.embed(texts)
+        return [EmbeddingResult(values=emb.tolist()) for emb in embeddings_generator]
+
+    async def embed(
+        self, texts: List[str], task_type: Optional[str] = None
+    ) -> List[EmbeddingResult]:
+        """Runs embedding in a thread worker so the async loop is never blocked."""
+        return await asyncio.to_thread(self._sync_embed, texts)
+
+    @property
+    def dimension(self) -> int:
+        return self._dim
+
+
+
+
+
+
+
+
+sentence_transformer_embedder.py:
+import asyncio
+import os
+from typing import List, Optional
+from huggingface_hub import login
+from sentence_transformers import SentenceTransformer
+
+from app.core.config import settings
+from app.services.embeddings.base import BaseEmbedder
+from app.services.embeddings.schema import EmbedderConfig, EmbeddingResult
+
+
+class SentenceTransformerEmbedder(BaseEmbedder):
+    """
+    Standard PyTorch / SentenceTransformers embedder.
+    Supports BAAI/bge-m3, Qwen, or any HuggingFace model.
+    """
+
+    def __init__(self, config: EmbedderConfig) -> None:
+        super().__init__(config)
+        self.model_name = config.model_name or "BAAI/bge-m3"
+
+        # Resolve token from settings or system environment
+        token = settings.hf_token or os.getenv("HF_TOKEN")
+        if token:
+            # Login globally so all internal transformers requests include the token
+            try:
+                login(token=token, add_to_git_credential=False)
+            except Exception as e:
+                print(f"[HF Login Warning]: {e}")
+
+        # Pass token to model constructor as well
+        self.model = SentenceTransformer(
+            self.model_name,
+            device="cpu",
+            token=token,
+            model_kwargs={"token": token} if token else None,
+        )
+        self._dim = config.output_dimensionality or 1024
+
+    def _sync_embed(self, texts: List[str]) -> List[EmbeddingResult]:
+        if not texts:
+            return []
+        embeddings = self.model.encode(
+            texts, normalize_embeddings=True, show_progress_bar=False
+        )
+        return [EmbeddingResult(values=emb.tolist()) for emb in embeddings]
+
+    async def embed(
+        self, texts: List[str], task_type: Optional[str] = None
+    ) -> List[EmbeddingResult]:
+        return await asyncio.to_thread(self._sync_embed, texts)
+
+    @property
+    def dimension(self) -> int:
+        return self._dim
+
+
+
+
+
+
+
+
+ollama_embedder.py:
+from typing import List, Optional
+import httpx
+
+from app.services.embeddings.base import BaseEmbedder
+from app.services.embeddings.schema import EmbedderConfig, EmbeddingResult
+
+
+class OllamaEmbedder(BaseEmbedder):
+    """
+    High-performance local embedding provider using Ollama.
+    Bypasses Hugging Face completely and executes locally on CPU.
+    """
+
+    def __init__(self, config: EmbedderConfig) -> None:
+        super().__init__(config)
+        self.model_name = config.model_name or "bge-m3"
+        self._dim = config.output_dimensionality or 1024
+        # Defaults to local Ollama daemon port
+        self.base_url = "http://localhost:11434"
+
+    async def embed(
+        self, texts: List[str], task_type: Optional[str] = None
+    ) -> List[EmbeddingResult]:
+        if not texts:
+            return []
+
+        results: List[EmbeddingResult] = []
+        async with httpx.AsyncClient(base_url=self.base_url, timeout=60.0) as client:
+            for text in texts:
+                clean_text = text.strip()
+                if not clean_text:
+                    results.append(EmbeddingResult(values=[0.0] * self._dim))
+                    continue
+
+                response = await client.post(
+                    "/api/embeddings",
+                    json={"model": self.model_name, "prompt": clean_text},
+                )
+                response.raise_for_status()
+                data = response.json()
+                results.append(EmbeddingResult(values=data["embedding"]))
+
+        return results
+
+    @property
+    def dimension(self) -> int:
+        return self._dim

@@ -1,0 +1,1776 @@
+backend/
+--/app
+----/core
+----/models
+----/routes
+----/schemas
+----/services
+----/utils
+----main.py
+--/scripts
+--/tests
+
+
+
+from app/core/
+
+config.py:
+from functools import lru_cache
+from typing import Optional
+from pydantic import HttpUrl, computed_field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+class Settings(BaseSettings):
+    # App & Server Configuration
+    development: bool = True
+    host: str
+    port: int = 8000
+
+    # Target Domains
+    target_domain: str
+    test_target_domain: str
+
+    # Vector Database Settings
+    vector_db_provider: str
+    vector_db_embedding_model: str
+    qdrant_embedding_model: str
+    use_test_qdrant_db: bool = True
+
+    # Production Qdrant
+    qdrant_api_key: Optional[str] = None
+    qdrant_cluster_endpoint: Optional[str] = None
+
+    # --- Database ---
+    DATABASE_URL: str | None = None
+    DATABASE_URL_NOT_PROD: str | None = None
+    DATABASE_URL_USE_PROD: bool
+    
+    # --- Auth ---
+    SECRET_KEY: str
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
+    
+    @property
+    def SERVER_BIND_HOST(self) -> str:
+        """Strips protocol prefixes for Uvicorn binding."""
+        return (
+            self.HOST
+            .replace("http://", "")
+            .replace("https://", "")
+            .split(":")[0]
+            .split("/")[0]
+        )
+    # Test Qdrant
+    test_qdrant_api_key: Optional[str] = None
+    test_qdrant_cluster_endpoint: Optional[str] = None
+
+    # Collection Names
+    dense_collection_name: str = "questions_collection"
+    sparse_collection_name: str = "sparse_collection"
+    chunk_collection_name: str = "chunks_collection"
+
+    collection_name: str
+    collection_name_not_prod: str
+    collection_name_use_prod: bool
+
+    @computed_field
+    @property
+    def resolved_collection_name(self) -> str:
+        return (
+            self.collection_name
+            if self.collection_name_use_prod
+            else self.collection_name_not_prod
+        )
+
+    # Retrieval Constraints
+    default_top_k: int = 5
+    min_top_k: int = 1
+    max_top_k: int = 20
+
+    # LLM QGEN Settings
+    llm_qgen_provider: str
+    llm_qgen_api_key: str
+    llm_qgen_model: str
+
+    # LLM QA Settings
+    llm_qa_provider: str
+    llm_qa_api_key: str
+    llm_qa_model: str
+
+    # Embedding Service Settings
+    embedding_provider: str
+    embedding_model: str
+    embedding_api_key: Optional[str] = None
+    embedding_dimension: Optional[int]
+    embedding_task_type: Optional[str] = None
+
+    # Quantization Settings
+    quantization_enabled: bool = True
+    quantization_type: str = "scalar"  # "scalar" or "binary"
+    quantization_always_ram: bool = True
+    quantization_rescore: bool = True
+    quantization_oversampling: float = 2.0
+
+    vector_dim: int
+
+    # Semantic Cache Settings
+    semantic_cache_provider: str
+    semantic_cache_url: Optional[str] = None
+    semantic_cache_threshold: float = 0.25
+    semantic_cache_ttl_seconds: int = 604800
+    semantic_cache_index_name: str = "thesis_semantic_cache"
+    semantic_cache_index_name_not_prod: str
+    semantic_cache_index_name_use_prod: bool
+
+    database_url: str
+    database_url_not_prod: str
+    database_url_use_prod: bool
+
+    # Question Generation Script Settings
+    script_qgen_use_real_data: bool = False
+    script_qgen_min_words_per_chunk: int = 10
+
+    telegram_bot_token: str
+    telegram_bot_fastapi_key: str
+    telegram_bot_token_not_prod: Optional[str]
+    telegram_bot_token_fastapi_key_not_prod: Optional[str] = ""
+    telegram_bot_use_prod: bool
+
+    model_config = SettingsConfigDict(
+        env_file=None,
+        env_file_encoding="utf-8",
+        extra="ignore",
+        case_sensitive=False,  # Reads uppercase .env keys into lowercase attributes
+    )
+
+    # Reranker Settings
+    reranker_provider: str = "fastembed"
+    reranker_model_name: str = "Xenova/ms-marco-MiniLM-L-12-v2"
+    reranker_top_k: int = 5
+    reranker_score_threshold: Optional[float] = None  # e.g., 0.05 or 0.1 for out-of-scope gating
+    reranker_batch_size: int = 16
+    reranker_max_length: int = 512
+
+    # Huggingface Token
+    hf_token: Optional[str] = None
+
+    @computed_field
+    @property
+    def active_qdrant_endpoint(self) -> Optional[str]:
+        """Dynamically returns test or production endpoint based on USE_TEST_QDRANT_DB."""
+        return (
+            self.test_qdrant_cluster_endpoint
+            if self.use_test_qdrant_db
+            else self.qdrant_cluster_endpoint
+        )
+
+    @computed_field
+    @property
+    def active_qdrant_api_key(self) -> Optional[str]:
+        """Dynamically returns test or production API key based on USE_TEST_QDRANT_DB."""
+        return (
+            self.test_qdrant_api_key
+            if self.use_test_qdrant_db
+            else self.qdrant_api_key
+        )
+
+
+@lru_cache
+def get_settings() -> Settings:
+    """Cached singleton instance of the settings."""
+    return Settings()
+
+
+settings = get_settings()
+
+
+
+
+
+
+
+
+
+database.py:
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
+from sqlalchemy.orm import DeclarativeBase
+from app.core.config import settings
+
+engine = create_async_engine(settings.DATABASE_URL, echo=False)
+async_session = async_sessionmaker(engine, expire_on_commit=False)
+
+class Base(DeclarativeBase):
+    pass
+
+async def get_db():
+    async with async_session() as session:
+        yield session
+
+
+
+
+
+security.py:
+
+from datetime import datetime, timedelta, timezone
+
+from jose import jwt
+from pwdlib import PasswordHash
+from pwdlib.hashers.bcrypt import BcryptHasher
+
+from app.core.config import settings
+
+pwd_hash = PasswordHash((BcryptHasher(),))
+
+def _truncate_password(password: str) -> str:
+    # bcrypt only supports passwords up to 72 bytes.
+    return password.encode("utf-8")[:72].decode("utf-8", errors="ignore")
+
+
+def hash_password(password: str) -> str:
+    return pwd_hash.hash(_truncate_password(password))
+
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    return pwd_hash.verify(
+        _truncate_password(plain_password),
+        hashed_password,
+    )
+
+
+def create_access_token(data: dict) -> str:
+    to_encode = data.copy()
+
+    expire = datetime.now(timezone.utc) + timedelta(
+        minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES
+    )
+
+    to_encode.update({"exp": expire})
+
+    return jwt.encode(
+        to_encode,
+        settings.SECRET_KEY,
+        algorithm="HS256",
+    )
+
+
+def decode_access_token(token: str) -> dict | None:
+    try:
+        payload = jwt.decode(
+            token,
+            settings.SECRET_KEY,
+            algorithms=["HS256"],
+        )
+        return payload
+    except jwt.JWTError:
+        return None
+
+
+
+
+
+
+
+from app/models/
+
+__init__.py:
+from app.models.user import User
+from app.models.org import Org
+from app.models.org_member import OrgMember
+from app.models.website import Website
+from app.models.website_schedule import WebsiteScrapeSchedule
+from app.models.scraped_page import ScrapedPage
+from app.models.chunk import Chunk
+from app.models.generated_question import GeneratedQuestion
+
+
+
+
+
+chunk.py:
+from typing import TYPE_CHECKING, Optional
+from sqlalchemy import Boolean, ForeignKey, Index, Integer, String, Text
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+from app.core.database import Base
+
+if TYPE_CHECKING:
+    from app.models.scraped_page import ScrapedPage
+    from app.models.generated_question import GeneratedQuestion
+
+
+class Chunk(Base):
+    __tablename__ = "chunks"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    page_id: Mapped[int] = mapped_column(
+        ForeignKey("scraped_pages.id", ondelete="CASCADE"), index=True
+    )
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    token_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    has_qgen: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+    # Structure-aware chunk metadata
+    chunk_index: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    section_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    heading_path: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    part_index: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    part_total: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    qgen_attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    chunk_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+
+    # Relationships
+    page: Mapped["ScrapedPage"] = relationship(back_populates="chunks")
+    questions: Mapped[list["GeneratedQuestion"]] = relationship(
+        back_populates="chunk",
+        cascade="all, delete-orphan",
+    )
+
+    __table_args__ = (
+        Index("ix_chunks_has_qgen_attempts", "has_qgen", "qgen_attempts"),
+        Index("ix_chunks_page_chunk_index", "page_id", "chunk_index"),
+    )
+
+
+
+
+
+
+
+
+
+generated_question.py:
+from typing import TYPE_CHECKING
+from sqlalchemy import Boolean, ForeignKey, Index, Integer, Text
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+from app.core.database import Base
+
+if TYPE_CHECKING:
+    from app.models.chunk import Chunk
+
+
+class GeneratedQuestion(Base):
+    __tablename__ = "generated_questions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    chunk_id: Mapped[int] = mapped_column(
+        ForeignKey("chunks.id", ondelete="CASCADE"), index=True
+    )
+    question: Mapped[str] = mapped_column(Text, nullable=False)
+    
+    # Legacy flag (kept for backwards compatibility)
+    is_synced_qdrant: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    
+    # Model-specific tracking flags for multi-model benchmarking
+    is_synced_gemini: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False) # 3072-dim run
+    is_synced_gemini_768: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False) # New 768-dim run
+    is_synced_bge_m3: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+    chunk: Mapped["Chunk"] = relationship(back_populates="questions")
+
+    __table_args__ = (
+        Index("ix_gen_questions_bge_m3", "is_synced_bge_m3"),
+        Index("ix_gen_questions_gemini", "is_synced_gemini"),
+        Index("ix_gen_questions_gemini_768", "is_synced_gemini_768"),
+    )
+
+
+
+
+
+
+
+
+
+org_member.py:
+from sqlalchemy import String, ForeignKey
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+from app.core.database import Base
+
+class OrgMember(Base):
+    __tablename__ = "org_members"
+
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), primary_key=True)
+    org_id: Mapped[int] = mapped_column(ForeignKey("orgs.id"), primary_key=True)
+    roles: Mapped[str] = mapped_column(String(50))  # e.g. "admin", "member"
+
+    user: Mapped["User"] = relationship(back_populates="memberships")
+    org: Mapped["Org"] = relationship(back_populates="members")
+
+
+
+
+
+
+
+
+
+org.py:
+from typing import TYPE_CHECKING
+
+from sqlalchemy import Integer, String, ForeignKey
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+from app.core.database import Base
+
+if TYPE_CHECKING:
+    from app.models.org_member import OrgMember
+    from app.models.website import Website
+
+
+class Org(Base):
+    __tablename__ = "orgs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    creator_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    name: Mapped[str] = mapped_column(String(255))
+    # Bumped whenever indexed content changes. Part of the semantic-cache scope,
+    # so old cached answers become unreachable instantly (and expire via TTL).
+    content_version: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+
+    members: Mapped[list["OrgMember"]] = relationship(back_populates="org")
+    websites: Mapped[list["Website"]] = relationship(
+        back_populates="org", cascade="all, delete-orphan"
+    )
+
+
+
+
+
+
+
+
+
+
+scraped_page.py:
+import enum
+from datetime import datetime
+from typing import TYPE_CHECKING
+from sqlalchemy import (
+    Boolean, DateTime, Enum, ForeignKey, Integer, String, Text, UniqueConstraint, false,
+)
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+from app.core.database import Base
+
+if TYPE_CHECKING:
+    from app.models.org import Org
+    from app.models.website import Website
+    from app.models.chunk import Chunk
+
+
+class PageProcessStatus(str, enum.Enum):
+    PENDING = "pending"
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class ScrapedPage(Base):
+    __tablename__ = "scraped_pages"
+    __table_args__ = (
+        UniqueConstraint("org_id", "web_id", "url", name="uq_scraped_pages_org_web_url"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    org_id: Mapped[int] = mapped_column(ForeignKey("orgs.id", ondelete="CASCADE"), index=True)
+    web_id: Mapped[int] = mapped_column(ForeignKey("websites.id", ondelete="CASCADE"), index=True)
+    url: Mapped[str] = mapped_column(String(2048), nullable=False)
+    markdown_content: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[PageProcessStatus] = mapped_column(
+        Enum(PageProcessStatus),
+        default=PageProcessStatus.PENDING,
+        nullable=False,
+    )
+    chunked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    retries: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+    # --- Freshness / change tracking ---
+    # sha256 of whitespace-normalised cleaned markdown; unchanged hash => skip re-chunk/qgen/embed
+    content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # start year of the academic period this page is about (2025 => AY 2025-2026), if detectable
+    doc_period: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # when WE first saw this version of the content
+    content_changed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_scraped_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # stamped by discovery; pages not seen in a later successful discovery are purged
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # True when old Qdrant points of this page may exist and must be swept
+    qdrant_cleanup_pending: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=false(), nullable=False
+    )
+
+    # Relationships
+    org: Mapped["Org"] = relationship()
+    website: Mapped["Website"] = relationship(back_populates="pages")
+    chunks: Mapped[list["Chunk"]] = relationship(
+        back_populates="page",
+        cascade="all, delete-orphan",
+    )
+
+
+
+
+
+
+
+
+
+
+user.py:
+from sqlalchemy import String
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+from app.core.database import Base
+
+class User(Base):
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    password_hash: Mapped[str] = mapped_column(String(255))
+    first_name: Mapped[str] = mapped_column(String(100))
+    last_name: Mapped[str] = mapped_column(String(100))
+
+    memberships: Mapped[list["OrgMember"]] = relationship(back_populates="user")
+
+
+
+
+
+
+
+
+
+
+
+website_schedule.py:
+from datetime import time, datetime
+from typing import TYPE_CHECKING
+from sqlalchemy import ForeignKey, Integer, Time, DateTime
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+from app.core.database import Base
+
+if TYPE_CHECKING:
+    from app.models.website import Website
+
+
+class WebsiteScrapeSchedule(Base):
+    __tablename__ = "website_scrape_schedules"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    web_id: Mapped[int] = mapped_column(
+        ForeignKey("websites.id", ondelete="CASCADE"),
+        unique=True,
+        index=True,
+    )
+    interval_days: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    time_of_scrape: Mapped[time] = mapped_column(Time, nullable=False)
+    last_scraped_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    next_scraped_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    # Relationships
+    website: Mapped["Website"] = relationship(back_populates="schedule")
+
+
+
+
+
+
+
+
+
+
+website.py:
+import enum
+from typing import TYPE_CHECKING
+from sqlalchemy import String, Text, ForeignKey, Enum
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+from app.core.database import Base
+
+if TYPE_CHECKING:
+    from app.models.org import Org
+    from app.models.website_schedule import WebsiteScrapeSchedule
+    from app.models.scraped_page import ScrapedPage
+
+
+class WebsiteScrapeStatus(str, enum.Enum):
+    PENDING = "PENDING"
+    IN_PROGRESS = "IN_PROGRESS"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+
+
+class Website(Base):
+    __tablename__ = "websites"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    org_id: Mapped[int] = mapped_column(ForeignKey("orgs.id", ondelete="CASCADE"), index=True)
+    url: Mapped[str] = mapped_column(String(2048), nullable=False)
+    status: Mapped[WebsiteScrapeStatus] = mapped_column(
+        Enum(WebsiteScrapeStatus),
+        default=WebsiteScrapeStatus.PENDING,
+        nullable=False,
+    )
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Relationships
+    org: Mapped["Org"] = relationship(back_populates="websites")
+    schedule: Mapped["WebsiteScrapeSchedule | None"] = relationship(
+        back_populates="website",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
+    pages: Mapped[list["ScrapedPage"]] = relationship(
+        back_populates="website",
+        cascade="all, delete-orphan",
+    )
+
+
+
+
+
+
+
+
+
+
+
+from app/routes/
+
+auth.py:
+from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer
+from pydantic import BaseModel, EmailStr
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
+from app.core.database import get_db
+from app.models.user import User
+from app.core.security import decode_access_token, hash_password, verify_password, create_access_token
+
+router = APIRouter(prefix="/auth", tags=["auth"])
+
+class RegisterRequest(BaseModel):
+    email: EmailStr
+    password: str
+    first_name: str
+    last_name: str
+
+class LoginRequest(BaseModel):
+    email: EmailStr
+    password: str
+
+@router.post("/register")
+async def register(payload: RegisterRequest, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(User).where(User.email == payload.email))
+    if result.scalar_one_or_none():
+        raise HTTPException(400, "Email already registered")
+
+    user = User(
+        email=payload.email,
+        password_hash=hash_password(payload.password),
+        first_name=payload.first_name,
+        last_name=payload.last_name,
+    )
+    db.add(user)
+    await db.commit()
+    return {"message": "User created"}
+
+@router.post("/login")
+async def login(payload: LoginRequest, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(User).where(User.email == payload.email))
+    user = result.scalar_one_or_none()
+    if not user or not verify_password(payload.password, user.password_hash):
+        raise HTTPException(401, "Invalid credentials")
+
+    token = create_access_token({"sub": str(user.id)})
+    return {"access_token": token, "token_type": "bearer"}
+
+
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
+
+async def get_current_user(
+    token: str = Depends(oauth2_scheme),
+    db: AsyncSession = Depends(get_db),
+) -> User:
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+    payload = decode_access_token(token)
+    if payload is None:
+        raise credentials_exception
+
+    # Usually stored under "sub" (either user email or user ID)
+    user_id_or_email = payload.get("sub")
+    if user_id_or_email is None:
+        raise credentials_exception
+
+    # Query the user from PostgreSQL
+    if str(user_id_or_email).isdigit():
+        stmt = select(User).where(User.id == int(user_id_or_email))
+    else:
+        stmt = select(User).where(User.email == str(user_id_or_email))
+
+    result = await db.execute(stmt)
+    user = result.scalar_one_or_none()
+
+    if user is None:
+        raise credentials_exception
+
+    return user
+
+
+
+
+
+ingest.py:
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, func
+
+from app.core.config import settings
+from app.core.database import get_db
+from app.models.user import User
+from app.models.org_member import OrgMember
+from app.models.website import Website, WebsiteScrapeStatus
+from app.models.scraped_page import ScrapedPage, PageProcessStatus
+from app.models.chunk import Chunk
+from app.models.generated_question import GeneratedQuestion
+from app.services.ingest_pipeline.orchestrator import run_full_pipeline, get_active_sync_column
+from app.routes.auth import get_current_user
+
+router = APIRouter(prefix="/ingest", tags=["Ingest Pipeline"])
+
+@router.post("/run/{website_id}", status_code=status.HTTP_202_ACCEPTED)
+async def trigger_ingestion(
+    website_id: int,
+    background_tasks: BackgroundTasks,
+    force_refresh: bool = Query(
+        False, description="Forces re-scraping and re-chunking of pages regardless of age"
+    ),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    stmt = (
+        select(Website)
+        .join(OrgMember, Website.org_id == OrgMember.org_id)
+        .where(
+            Website.id == website_id,
+            OrgMember.user_id == current_user.id,
+        )
+    )
+    res = await db.execute(stmt)
+    website = res.scalar_one_or_none()
+
+    if not website:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Website {website_id} not found or you lack access permissions.",
+        )
+
+    if website.status == WebsiteScrapeStatus.IN_PROGRESS:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Scrape and ingestion pipeline is already running for this site.",
+        )
+
+    background_tasks.add_task(
+        run_full_pipeline, website_id=website_id, force_refresh=force_refresh
+    )
+
+    return {
+        "message": f"Pipeline triggered for {website.url} (force_refresh={force_refresh})",
+        "website_id": website.id,
+        "status": WebsiteScrapeStatus.IN_PROGRESS,
+    }
+
+
+@router.get("/status/{website_id}")
+async def get_ingestion_status(
+    website_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    stmt = (
+        select(Website)
+        .join(OrgMember, Website.org_id == OrgMember.org_id)
+        .where(
+            Website.id == website_id,
+            OrgMember.user_id == current_user.id,
+        )
+    )
+    res = await db.execute(stmt)
+    website = res.scalar_one_or_none()
+
+    if not website:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Website {website_id} not found or you lack access permissions.",
+        )
+
+    page_counts_res = await db.execute(
+        select(ScrapedPage.status, func.count(ScrapedPage.id))
+        .where(ScrapedPage.web_id == website_id)
+        .group_by(ScrapedPage.status)
+    )
+    page_stats = {status_val.value: count for status_val, count in page_counts_res.all()}
+    total_pages = sum(page_stats.values())
+
+    chunks_count_res = await db.execute(
+        select(func.count(Chunk.id))
+        .join(ScrapedPage, Chunk.page_id == ScrapedPage.id)
+        .where(ScrapedPage.web_id == website_id)
+    )
+    total_chunks = chunks_count_res.scalar_one() or 0
+
+    sync_col = get_active_sync_column()
+
+    q_stats_res = await db.execute(
+        select(
+            func.count(GeneratedQuestion.id),
+            func.count(GeneratedQuestion.id).filter(sync_col.is_(True)),
+        )
+        .join(Chunk, GeneratedQuestion.chunk_id == Chunk.id)
+        .join(ScrapedPage, Chunk.page_id == ScrapedPage.id)
+        .where(ScrapedPage.web_id == website_id)
+    )
+    total_questions, synced_model_count = q_stats_res.one()
+
+    return {
+        "website_id": website.id,
+        "url": website.url,
+        "status": website.status,
+        "error_message": website.error_message,
+        "active_target": {
+            "collection_name": settings.resolved_collection_name,
+            "sync_column": sync_col.key,
+            "provider": settings.embedding_provider,
+            "dimension": getattr(settings, "embedding_dimension", settings.vector_dim),
+        },
+        "checkpoints": {
+            "pages": {
+                "total_discovered": total_pages,
+                "pending": page_stats.get(PageProcessStatus.PENDING.value, 0),
+                "in_progress": page_stats.get(PageProcessStatus.IN_PROGRESS.value, 0),
+                "completed": page_stats.get(PageProcessStatus.COMPLETED.value, 0),
+                "failed": page_stats.get(PageProcessStatus.FAILED.value, 0),
+            },
+            "chunks": {
+                "total": total_chunks,
+            },
+            "questions": {
+                "total_generated": total_questions or 0,
+                "synced_active_model": synced_model_count or 0,
+            },
+        },
+    }
+
+
+
+
+
+
+
+
+
+
+
+orgs.py:
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
+
+from app.core.database import get_db
+from app.models.org import Org
+from app.models.org_member import OrgMember
+from app.models.user import User
+from app.schemas.tenant import OrgCreate, OrgResponse, PublicOrgResponse
+from app.routes.auth import get_current_user
+
+router = APIRouter(prefix="/orgs", tags=["Organizations"])
+
+
+@router.get("/public/{org_id}", response_model=PublicOrgResponse)
+async def get_public_org_info(
+    org_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Public initialization endpoint for frontend chat widgets.
+    Allows unauthenticated visitors to verify organization existence
+    and load institutional branding (e.g. organization name).
+    """
+    org = await db.get(Org, org_id)
+    if not org:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Organization with ID {org_id} does not exist.",
+        )
+    return org
+
+
+@router.post("/", response_model=OrgResponse, status_code=status.HTTP_201_CREATED)
+async def create_organization(
+    payload: OrgCreate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Creates a new organization and assigns the creator as an admin."""
+    # Check if org name already exists
+    existing = await db.execute(select(Org).where(Org.name == payload.name))
+    if existing.scalar_one_or_none():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Organization with this name already exists",
+        )
+
+    new_org = Org(
+        name=payload.name,
+        creator_id=current_user.id,
+    )
+    db.add(new_org)
+    await db.flush()  # Populates new_org.id
+
+    # Create membership record for the creator
+    membership = OrgMember(
+        user_id=current_user.id,
+        org_id=new_org.id,
+        roles="admin",
+    )
+    db.add(membership)
+    await db.commit()
+    await db.refresh(new_org)
+
+    return new_org
+
+
+@router.get("/", response_model=list[OrgResponse])
+async def list_user_organizations(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Lists all organizations the current user belongs to."""
+    stmt = (
+        select(Org)
+        .join(OrgMember, Org.id == OrgMember.org_id)
+        .where(OrgMember.user_id == current_user.id)
+    )
+    res = await db.execute(stmt)
+    return res.scalars().all()
+
+
+
+
+
+
+
+
+
+query.py:
+from functools import lru_cache
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.ext.asyncio import AsyncSession # type: ignore
+
+from app.core.database import get_db
+from app.models.org import Org
+from app.services.query_pipeline.schema import (
+    QueryBodyRequest,
+    PipelineQueryRequest,
+    PipelineQueryResponse,
+)
+from app.services.query_pipeline.query_pipeline import QueryPipeline
+
+router = APIRouter(prefix="/query", tags=["Query Pipeline"])
+
+
+@lru_cache(maxsize=1)
+def get_query_pipeline() -> QueryPipeline:
+    return QueryPipeline()
+
+
+@router.post("/{org_id}/", response_model=PipelineQueryResponse)
+async def execute_query(
+    org_id: int,
+    body: QueryBodyRequest,
+    db: AsyncSession = Depends(get_db),
+    pipeline: QueryPipeline = Depends(get_query_pipeline),
+):
+    org = await db.get(Org, org_id)
+    if not org:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Organization {org_id} not found.",
+        )
+
+    pipeline_req = PipelineQueryRequest(
+        org_id=org_id,
+        query=body.query,
+        session_id=body.session_id,
+    )
+
+    return await pipeline.execute(pipeline_req)
+
+
+
+
+
+
+
+
+
+websites.py:
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, delete
+
+from app.core.config import settings
+from app.core.database import get_db
+from app.models.user import User
+from app.models.org_member import OrgMember
+from app.models.website import Website, WebsiteScrapeStatus
+from app.models.website_schedule import WebsiteScrapeSchedule
+from app.models.scraped_page import ScrapedPage
+from app.schemas.tenant import WebsiteCreate, WebsiteResponse
+from app.services.vector_db.factory import get_vector_db
+from app.routes.auth import get_current_user
+
+router = APIRouter(prefix="/websites", tags=["Websites"])
+
+
+@router.post("/", response_model=WebsiteResponse, status_code=status.HTTP_201_CREATED)
+async def create_website(
+    payload: WebsiteCreate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    membership_res = await db.execute(
+        select(OrgMember).where(
+            OrgMember.org_id == payload.org_id,
+            OrgMember.user_id == current_user.id,
+        )
+    )
+    if not membership_res.scalar_one_or_none():
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have access to this organization.",
+        )
+
+    clean_url = str(payload.url).rstrip("/")
+    existing_site = await db.execute(
+        select(Website).where(
+            Website.org_id == payload.org_id,
+            Website.url == clean_url,
+        )
+    )
+    if existing_site.scalar_one_or_none():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This website URL is already registered under this organization.",
+        )
+
+    new_website = Website(
+        org_id=payload.org_id,
+        url=clean_url,
+        status=WebsiteScrapeStatus.PENDING,
+        error_message=None,
+    )
+    db.add(new_website)
+    await db.flush()
+
+    schedule = WebsiteScrapeSchedule(
+        web_id=new_website.id,
+        interval_days=payload.interval_days,
+        time_of_scrape=payload.time_of_scrape,
+        last_scraped_at=None,
+        next_scraped_at=None,
+    )
+    db.add(schedule)
+
+    await db.commit()
+    await db.refresh(new_website)
+
+    return new_website
+
+
+@router.get("/org/{org_id}", response_model=list[WebsiteResponse])
+async def list_websites_by_org(
+    org_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    membership_res = await db.execute(
+        select(OrgMember).where(
+            OrgMember.org_id == org_id,
+            OrgMember.user_id == current_user.id,
+        )
+    )
+    if not membership_res.scalar_one_or_none():
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have access to this organization.",
+        )
+
+    stmt = select(Website).where(Website.org_id == org_id)
+    res = await db.execute(stmt)
+    return res.scalars().all()
+
+
+@router.delete("/{website_id}", status_code=status.HTTP_200_OK)
+async def delete_website(
+    website_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Deletes a website, clearing its Qdrant vectors before executing the
+    PostgreSQL cascade deletion.
+    """
+    stmt = (
+        select(Website)
+        .join(OrgMember, Website.org_id == OrgMember.org_id)
+        .where(
+            Website.id == website_id,
+            OrgMember.user_id == current_user.id,
+        )
+    )
+    res = await db.execute(stmt)
+    website = res.scalar_one_or_none()
+
+    if not website:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Website not found or unauthorized.",
+        )
+
+    # Clean up Qdrant points across all pages for this website
+    vector_db = get_vector_db()
+    try:
+        await vector_db.delete_points(
+            collection_name=settings.resolved_collection_name,
+            filters={"group_id": str(website.org_id), "web_id": website.id},
+        )
+    except Exception as e:
+        # Proceed with deletion if collection or points do not exist
+        pass
+    finally:
+        await vector_db.close()
+
+    # PostgreSQL CASCADE cleans up pages, schedules, chunks, and questions
+    await db.delete(website)
+    await db.commit()
+
+    return {"message": f"Website {website_id} and its vector indices were deleted."}
+
+
+
+
+
+
+
+
+
+
+
+
+
+from app/schemas/
+
+tenant.py:
+from datetime import datetime, time
+from typing import Optional
+from pydantic import BaseModel, HttpUrl
+
+from app.models.website import WebsiteScrapeStatus
+
+
+# --- Org Schemas ---
+class OrgCreate(BaseModel):
+    name: str
+
+
+class OrgResponse(BaseModel):
+    id: int
+    creator_id: int
+    name: str
+
+    class Config:
+        from_attributes = True
+
+
+class PublicOrgResponse(BaseModel):
+    """Publicly visible metadata used by the frontend chat page without requiring auth."""
+    id: int
+    name: str
+
+    class Config:
+        from_attributes = True
+
+
+# --- Website Schemas ---
+class WebsiteCreate(BaseModel):
+    org_id: int
+    url: HttpUrl
+    # Optional scrape schedule configuration
+    interval_days: int = 1
+    time_of_scrape: time = time(hour=2, minute=0)
+
+
+class WebsiteResponse(BaseModel):
+    id: int
+    org_id: int
+    url: str
+    status: WebsiteScrapeStatus
+    error_message: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class WebsiteScrapeSchedulesResponse(BaseModel):
+    id: int
+    web_id: int
+    interval_days: int
+    time_of_scrape: time
+    last_scraped_at: Optional[datetime] = None
+    next_scraped_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+
+
+
+
+
+
+
+
+
+
+from app/utils/
+
+telegram_bot.py:
+import asyncio
+import httpx
+from typing import Optional
+from sqlalchemy import select, func
+
+from app.core.config import settings
+from app.core.database import async_session
+from app.models.website import Website, WebsiteScrapeStatus
+from app.models.scraped_page import ScrapedPage, PageProcessStatus
+from app.models.chunk import Chunk
+from app.models.generated_question import GeneratedQuestion
+from app.services.ingest_pipeline.orchestrator import run_full_pipeline
+
+
+async def send_reply(chat_id: int | str, text: str):
+    if not settings.telegram_bot_token:
+        return
+
+    url = f"https://api.telegram.org/bot{settings.telegram_bot_token}/sendMessage"
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "Markdown",
+        "disable_web_page_preview": True,
+    }
+    async with httpx.AsyncClient() as client:
+        try:
+            await client.post(url, json=payload, timeout=10.0)
+        except Exception as e:
+            print(f"[Telegram] Failed to send message to {chat_id}: {e}")
+
+
+async def run_pipeline_with_notifications(website_id: int, chat_id: Optional[int | str] = None):
+    async with async_session() as session:
+        website = await session.get(Website, website_id)
+        if not website:
+            if chat_id:
+                await send_reply(chat_id, f"❌ Website ID `{website_id}` not found.")
+            return
+        target_url = website.url
+        org_id = website.org_id
+
+    if chat_id:
+        await send_reply(
+            chat_id,
+            f"🚀 *Ingestion Started*\n"
+            f"• *Website ID:* `{website_id}`\n"
+            f"• *Org ID:* `{org_id}`\n"
+            f"• *Target URL:* {target_url}",
+        )
+
+    try:
+        results = await run_full_pipeline(website_id=website_id)
+        if chat_id:
+            await send_reply(
+                chat_id,
+                f"✅ *Pipeline Completed Successfully!*\n"
+                f"• *URLs Discovered:* `{results['discovered_urls']}`\n"
+                f"• *Pages Scraped:* `{results['scraped_pages']}`\n"
+                f"• *Chunks Created:* `{results['created_chunks']}`\n"
+                f"• *Questions Generated:* `{results['generated_questions']}`\n"
+                f"• *Qdrant Points Synced:* `{results['synced_qdrant_points']}`",
+            )
+    except Exception as e:
+        print(f"[Website {website_id}] Pipeline error: {e}")
+        if chat_id:
+            await send_reply(chat_id, f"❌ *Pipeline Failed:*\n`{str(e)[:300]}`")
+
+
+async def handle_status_command(chat_id: int | str, website_id: int):
+    async with async_session() as session:
+        website = await session.get(Website, website_id)
+        if not website:
+            await send_reply(chat_id, f"⚠️ Website `{website_id}` not found.")
+            return
+
+        pages_count = await session.scalar(
+            select(func.count(ScrapedPage.id)).where(ScrapedPage.web_id == website_id)
+        )
+        chunks_count = await session.scalar(
+            select(func.count(Chunk.id))
+            .join(ScrapedPage, Chunk.page_id == ScrapedPage.id)
+            .where(ScrapedPage.web_id == website_id)
+        )
+        questions_count = await session.scalar(
+            select(func.count(GeneratedQuestion.id))
+            .join(Chunk, GeneratedQuestion.chunk_id == Chunk.id)
+            .join(ScrapedPage, Chunk.page_id == ScrapedPage.id)
+            .where(ScrapedPage.web_id == website_id)
+        )
+
+        await send_reply(
+            chat_id,
+            f"📊 *Status for Website `{website_id}` ({website.url})*\n"
+            f"• *Status:* `{website.status}`\n"
+            f"• *Pages Discovered:* `{pages_count}`\n"
+            f"• *Chunks Stored:* `{chunks_count}`\n"
+            f"• *Questions Generated:* `{questions_count}`",
+        )
+
+
+async def start_telegram_bot_listener():
+    if not settings.telegram_bot_token:
+        print("[Telegram] TELEGRAM_BOT_TOKEN not configured. Skipping listener.")
+        return
+
+    url = f"https://api.telegram.org/bot{settings.telegram_bot_token}/getUpdates"
+    offset = None
+    print("[Telegram] Poller active. Listening for commands...")
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        while True:
+            try:
+                params = {"timeout": 20}
+                if offset:
+                    params["offset"] = offset
+
+                resp = await client.get(url, params=params)
+                if resp.status_code != 200:
+                    await asyncio.sleep(5)
+                    continue
+
+                data = resp.json()
+                for update in data.get("result", []):
+                    offset = update["update_id"] + 1
+                    message = update.get("message", {})
+                    chat_id = message.get("chat", {}).get("id")
+                    text = message.get("text", "").strip()
+
+                    if not chat_id or not text:
+                        continue
+
+                    cmd_parts = text.split()
+                    command = cmd_parts[0].split("@")[0].lower()
+
+                    if command == "/scrape":
+                        if len(cmd_parts) < 2 or not cmd_parts[1].isdigit():
+                            await send_reply(
+                                chat_id,
+                                "⚠️ *Invalid Format!*\n"
+                                "Usage: `/scrape <website_id>`\n"
+                                "Example: `/scrape 1`",
+                            )
+                            continue
+
+                        web_id = int(cmd_parts[1])
+                        asyncio.create_task(
+                            run_pipeline_with_notifications(website_id=web_id, chat_id=chat_id)
+                        )
+
+                    elif command == "/status":
+                        if len(cmd_parts) < 2 or not cmd_parts[1].isdigit():
+                            await send_reply(
+                                chat_id,
+                                "⚠️ *Usage:* `/status <website_id>`\nExample: `/status 1`",
+                            )
+                            continue
+
+                        web_id = int(cmd_parts[1])
+                        asyncio.create_task(handle_status_command(chat_id, web_id))
+
+                    elif command in ["/help", "/start"]:
+                        await send_reply(
+                            chat_id,
+                            "🤖 *Knowledge Base Ingestion Bot*\n\n"
+                            "*Commands:*\n"
+                            "• `/scrape <website_id>` - Runs discovery, scraping, chunking, and Qdrant sync\n"
+                            "• `/status <website_id>` - Check checkpoint progress in PostgreSQL\n"
+                            "• `/help` - Show instructions",
+                        )
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                print(f"[Telegram Poller Error]: {e}")
+                await asyncio.sleep(5)
+
+
+
+
+
+uuid_generator.py:
+import uuid
+from typing import Optional
+
+KB_NAMESPACE: uuid.UUID = uuid.UUID("a3bb189e-8bf9-4888-9912-ace4e6543002")
+
+
+def generate_uuid(*, seed: str) -> str:
+    """Generates a deterministic UUIDv5 within the KB namespace."""
+    return str(uuid.uuid5(KB_NAMESPACE, seed))
+
+def generate_doc_id(
+    *,
+    tenant_id: str,
+    source_url: str,
+) -> str:
+    """Generates a deterministic document-level ID based on source URL."""
+    seed = f"doc::{tenant_id}::{source_url.strip()}"
+    return generate_uuid(seed=seed)
+
+
+def generate_chunk_id(
+    *,
+    tenant_id: str,
+    source_url: str,
+    chunk_index: int,
+    content: str,
+) -> str:
+    """Combines document origin, sequential index, and text to prevent collisions."""
+    seed = f"chunk::{tenant_id}::{source_url}#{chunk_index}:{content.strip()}"
+    return generate_uuid(seed=seed)
+
+
+def generate_question_id(
+    *,
+    chunk_id: str,
+    question: str,
+) -> str:
+    """Generates a deterministic ID bound to the parent chunk and question text."""
+    seed = f"question::{chunk_id}:{question.strip()}"
+    return generate_uuid(seed=seed)
+
+
+def generate_sparse_id(
+    *,
+    parent_id: str,
+    model_name: Optional[str] = "bm25",
+) -> str:
+    """Generates a deterministic ID for a sparse representation tied to its source entity."""
+    seed = f"sparse::{model_name}:{parent_id}"
+    return generate_uuid(seed=seed)
+
+
+
+
+
+
+
+
+app/utils/temporal.py:
+"""Academic-period and temporal helpers shared by ingestion and query time."""
+import re
+from collections import Counter
+from datetime import date, datetime
+from typing import Optional, Tuple
+from urllib.parse import urlparse
+
+# Standard academic periods: "AY 2025-2026", "A.Y. 2025-26", "SY2025/2026", "academic year 2025-2026"
+_AY_RE = re.compile(
+    r"(?:\ba\.?\s?y\.?|\bs\.?\s?y\.?|academic\s+year|school\s+year)\s*[:\-]?\s*"
+    r"((?:19|20)\d{2})\s*[-\u2013\u2014/]\s*((?:19|20)?\d{2})(?!\d)",
+    re.IGNORECASE,
+)
+
+# Term/Semester anchors: "1st Sem 2025-2026", "Term 2 2026"
+_SEM_RE = re.compile(
+    r"\b(?:1st|2nd|3rd|first|second|third|midyear|summer)?\s*(?:sem(?:ester)?|term|trimester)\s*"
+    r"[:\-]?\s*(?:ay|sy)?\s*((?:19|20)\d{2})",
+    re.IGNORECASE,
+)
+
+# Standard four-digit consecutive year ranges: "2025-2026"
+_RANGE_RE = re.compile(r"(?<!\d)((?:19|20)\d{2})\s*[-\u2013\u2014/]\s*((?:19|20)\d{2})(?!\d)")
+
+# ISO Dates: "2026-08-15" or "2026/08/15"
+_ISO_DATE_RE = re.compile(r"(?<!\d)((?:19|20)\d{2})[-/](?:0[1-9]|1[0-2])[-/](?:0[1-9]|[12]\d|3[01])(?!\d)")
+
+# Bare Year: "2025" or "2026"
+_YEAR_RE = re.compile(r"(?<!\d)((?:19|20)\d{2})(?!\d)")
+
+
+def _end_year(start: int, raw: str) -> int:
+    end = int(raw)
+    if end < 100:
+        end += (start // 100) * 100
+    return end
+
+
+def extract_doc_period(
+    text: str,
+    *,
+    url: str = "",
+    heading: str = "",
+    allow_bare_year: bool = False,
+) -> Optional[int]:
+    """
+    Returns the target starting year of the academic or institutional period.
+    Captures academic years, semesters, ISO document stamps, and URL structures.
+    """
+    hay = f"{heading}\n{text}"
+    counts: Counter = Counter()
+
+    # 1. Direct AY/SY notation (strongest signal: weight 4)
+    for m in _AY_RE.finditer(hay):
+        start = int(m.group(1))
+        if _end_year(start, m.group(2)) == start + 1:
+            counts[start] += 4
+
+    # 2. Semester with year reference (weight 3)
+    for m in _SEM_RE.finditer(hay):
+        start = int(m.group(1))
+        counts[start] += 3
+
+    # 3. ISO format timestamps (weight 3)
+    for m in _ISO_DATE_RE.finditer(hay):
+        start = int(m.group(1))
+        counts[start] += 3
+
+    # 4. Standard year range "2025-2026" (weight 2)
+    for m in _RANGE_RE.finditer(hay):
+        start = int(m.group(1))
+        if int(m.group(2)) == start + 1:
+            counts[start] += 2
+
+    # 5. URL path patterns: /2025/ or /ay-2025-2026/ (weight 2)
+    path = urlparse(url).path if url else ""
+    for m in _YEAR_RE.finditer(path):
+        counts[int(m.group(1))] += 2
+
+    # 6. Bare year extraction for user queries (e.g., "admissions 2026")
+    if allow_bare_year:
+        for m in _YEAR_RE.finditer(hay):
+            counts[int(m.group(1))] += 1
+
+    if not counts:
+        return None
+
+    top_count = max(counts.values())
+    return max(year for year, count in counts.items() if count == top_count)
+
+
+def current_academic_year_start(today: Optional[date] = None) -> int:
+    """Calculates active academic anchor safely without regional month bias."""
+    today = today or date.today()
+    # If past Q1, current year is typically the active starting academic cycle
+    return today.year if today.month >= 5 else today.year - 1
+
+
+def format_period(start_year: Optional[int]) -> Optional[str]:
+    return f"{start_year}-{start_year + 1}" if isinstance(start_year, int) else None
+
+
+
+
+
+
+
+
+
+backend/app/main.py:
+import asyncio
+from contextlib import asynccontextmanager
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+import uvicorn
+
+from app.core.config import settings
+from app.core.database import engine, Base
+from app.routes.auth import router as auth_router
+from app.routes.ingest import router as ingest_router
+from app.routes.orgs import router as orgs_router
+from app.routes.query import router as query_router
+from app.routes.websites import router as websites_router
+from app.services.embeddings.factory import get_embedder
+from app.services.vector_db.factory import get_vector_db
+from app.utils.telegram_bot import start_telegram_bot_listener
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # 1. Database schema migrations / creation
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    # 2. Vector DB bootstrap: guarantees collection and group_id payload index exist
+    vector_db = get_vector_db()
+    embedder = get_embedder()
+    await vector_db.create_collection_if_not_exists(
+        collection_name=settings.resolved_collection_name,
+        dense_vector_size=embedder.dimension,
+        distance="Cosine",
+    )
+
+    # 3. Background services
+    poller_task = asyncio.create_task(start_telegram_bot_listener())
+
+    yield
+
+    # Teardown
+    poller_task.cancel()
+    try:
+        await poller_task
+    except asyncio.CancelledError:
+        pass
+
+    await vector_db.close()
+
+
+app = FastAPI(lifespan=lifespan)
+
+origins = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "https://mseuf-rag.vercel.app"
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.include_router(auth_router)
+app.include_router(orgs_router)
+app.include_router(websites_router)
+app.include_router(ingest_router)
+app.include_router(query_router)
+
+if __name__ == "__main__":
+    uvicorn.run(
+        "app.main:app",
+        host=settings.SERVER_BIND_HOST,
+        port=settings.PORT,
+        reload=True,
+    )
+
+
+
+
+
+
+
+
+
+
+
+
+backend/app/qdrant_duplicate_collection.py:
+import os
+import tempfile
+import httpx
+from qdrant_client import QdrantClient
+from app.core.config import settings
+
+CLUSTER_URL = settings.test_qdrant_cluster_endpoint.rstrip("/")
+API_KEY = settings.test_qdrant_api_key
+
+client = QdrantClient(
+    url=CLUSTER_URL,
+    api_key=API_KEY,
+    timeout=900.0  # 15 minutes
+)
+
+source_collection = settings.resolved_collection_name
+target_collection = f"improve-and-benchmarks_{source_collection}"
+
+print(f"Checking existing snapshots for '{source_collection}'...")
+existing_snapshots = client.list_snapshots(collection_name=source_collection)
+
+if existing_snapshots:
+    latest = sorted(existing_snapshots, key=lambda s: s.creation_time or "", reverse=True)[0]
+    snapshot_name = latest.name
+    print(f"Found existing snapshot: {snapshot_name} (size: {latest.size / (1024 * 1024):.2f} MB)")
+else:
+    print(f"Creating new snapshot for '{source_collection}'...")
+    snapshot_info = client.create_snapshot(
+        collection_name=source_collection,
+        wait=True
+    )
+    snapshot_name = snapshot_info.name
+    print(f"Snapshot created successfully: {snapshot_name}")
+
+with tempfile.TemporaryDirectory() as tmp_dir:
+    temp_snapshot_path = os.path.join(tmp_dir, snapshot_name)
+
+    headers = {"api-key": API_KEY} if API_KEY else {}
+
+    # 1. Download snapshot via standard HTTP stream
+    download_url = f"{CLUSTER_URL}/collections/{source_collection}/snapshots/{snapshot_name}"
+    print("Downloading snapshot archive to Codespaces temporary disk...")
+    with httpx.Client(timeout=900.0) as http_client:
+        with http_client.stream("GET", download_url, headers=headers) as response:
+            response.raise_for_status()
+            with open(temp_snapshot_path, "wb") as f:
+                for chunk in response.iter_bytes(chunk_size=1024 * 1024):  # 1MB chunks
+                    f.write(chunk)
+    
+    print(f"Downloaded {os.path.getsize(temp_snapshot_path) / (1024 * 1024):.2f} MB.")
+
+    # 2. Upload and restore into the new target collection via multipart POST
+    upload_url = f"{CLUSTER_URL}/collections/{target_collection}/snapshots/upload?wait=true"
+    print(f"Restoring into new collection '{target_collection}' on Qdrant Cloud...")
+    with open(temp_snapshot_path, "rb") as snapshot_file:
+        files = {"snapshot": (snapshot_name, snapshot_file, "application/octet-stream")}
+        with httpx.Client(timeout=900.0) as http_client:
+            res = http_client.post(upload_url, headers=headers, files=files)
+            res.raise_for_status()
+
+# 3. Final validation
+src_count = client.count(source_collection).count
+tgt_count = client.count(target_collection).count
+
+print("\nVerification Results:")
+print(f"  Source collection ('{source_collection}'): {src_count} points (untouched)")
+print(f"  Target collection ('{target_collection}'): {tgt_count} points (ready for testing)")
+assert src_count == tgt_count, "Point count mismatch between source and target!"
+print("\nDuplication complete!")
+
+
+
+
+
+
+
+
+
+
