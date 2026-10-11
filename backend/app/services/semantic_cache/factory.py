@@ -27,8 +27,8 @@ def get_semantic_cache() -> BaseSemanticCache:
 
         index_name = (
             settings.semantic_cache_index_name
-            if settings.semantic_cache_use_prod
-            else settings.semantic_cache_not_prod
+            if settings.semantic_cache_index_name_use_prod
+            else settings.semantic_cache_index_name_not_prod
         )
         if not index_name:
             raise ValueError("SEMANTIC_CACHE_INDEX_NAME environment variable is required.")
