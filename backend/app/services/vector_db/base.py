@@ -60,5 +60,24 @@ class BaseVectorDB(ABC):
         pass
 
     @abstractmethod
+    async def delete_points(
+        self,
+        collection_name: str,
+        filters: Dict[str, Any],
+        must_not: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Deletes points matching `filters` (and not matching `must_not`). `filters` MUST contain group_id."""
+        pass
+
+    @abstractmethod
+    async def delete_points_by_ids(
+        self,
+        collection_name: str,
+        point_ids: List[str],
+    ) -> None:
+        """Explicitly deletes a list of point IDs."""
+        pass
+
+    @abstractmethod
     async def close(self) -> None:
         pass

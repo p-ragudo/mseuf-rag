@@ -18,6 +18,14 @@ class PipelineQueryRequest(BaseModel):
     top_k: Optional[int] = Field(None, description="Internal top-k override, defaults to server configuration")
 
 
+class SupersededInfo(BaseModel):
+    """Telemetry: a retrieved document removed because a fresher near-duplicate exists."""
+    source_url: str
+    heading_path: str = ""
+    reason: str
+    superseded_by: str = ""
+
+
 class PipelineQueryResponse(BaseModel):
     query: Optional[str] = Field(default=None, description="The incoming user query")
     answer: str
@@ -25,3 +33,6 @@ class PipelineQueryResponse(BaseModel):
     source: str = Field(..., description="'cache', 'llm', or 'fallback'")
     sources: List[str] = Field(default_factory=list, description="Source URLs or reference links")
     contexts: List[RetrievedContextItem] = Field(default_factory=list, description="Passages passed to QA LLM")
+    superseded: List[SupersededInfo] = Field(
+        default_factory=list, description="Stale documents dropped in favour of fresher ones"
+    )

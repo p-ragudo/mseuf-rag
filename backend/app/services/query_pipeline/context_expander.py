@@ -28,6 +28,14 @@ from app.services.reranker.schema import RerankResult
 def _slug_title(url: str) -> str:
     return url.rstrip("/").split("/")[-1] or "Document"
 
+def _freshness_fields(payload: dict) -> dict:
+    period = payload.get("doc_period")
+    updated = payload.get("page_updated_at") or ""
+    return {
+        "doc_type": payload.get("doc_type"),
+        "doc_period": f"{period}-{period + 1}" if isinstance(period, int) else None,
+        "last_updated": updated[:10] or None,
+    }
 
 class ContextExpander:
     def __init__(self, window: int = 1, expand_top_n: int = 3, max_chars: int = 16000):
@@ -140,6 +148,7 @@ class ContextExpander:
                             source_url=url_by_page[page_id],
                             campus=anchor.payload.get("campus") or "main",
                             academic_level=anchor.payload.get("academic_level") or "general",
+                            **_freshness_fields(anchor.payload),
                             initial_score=max(results[rk].initial_score for rk in ranks),
                             rerank_score=max(results[rk].rerank_score for rk in ranks),
                             matched_questions=matched,
@@ -152,6 +161,8 @@ class ContextExpander:
             ch = hit_rows.get(cid) if cid is not None else None
             if ch is not None and ch.chunk_index is not None:
                 continue
+            if cid is not None and ch is None:
+                continue  # orphaned point: its chunk no longer exists in Postgres => stale, never serve it
             url = r.payload.get("source_url") or ""
             entries.append(
                 (
@@ -162,6 +173,7 @@ class ContextExpander:
                         source_url=url,
                         campus=r.payload.get("campus") or "main",
                         academic_level=r.payload.get("academic_level") or "general",
+                        **_freshness_fields(r.payload),
                         initial_score=r.initial_score,
                         rerank_score=r.rerank_score,
                         matched_questions=r.matched_questions,

@@ -1,0 +1,267 @@
+from app/services/llm_qgen/
+
+base_qgen.py:
+from abc import ABC, abstractmethod
+from typing import Dict, List
+from .schema import RawChunk, GeneratedQuestion
+
+
+class BaseQuestionGenerator(ABC):
+    @abstractmethod
+    async def generate_questions(self, chunk: RawChunk) -> List[GeneratedQuestion]:
+        """Accepts a RawChunk and returns a list of GeneratedQuestion objects."""
+        pass
+
+    @abstractmethod
+    async def generate_questions_batch(self, chunks: List[RawChunk]) -> Dict[str, List[GeneratedQuestion]]:
+        """
+        Accepts a batch of RawChunks and returns a mapping of chunk_id to GeneratedQuestions.
+        Contract: a chunk id is present in the result ONLY if the model actually answered for it
+        (an empty list means "boilerplate, no questions"). Missing ids mean "retry later".
+        Raises on unparseable output.
+        """
+        pass
+
+
+
+
+
+
+factory.py:
+from .base_qgen import BaseQuestionGenerator
+from .gemini_provider import GeminiQuestionGenerator
+from app.core.config import settings
+
+def get_question_generator(provider: str = None) -> BaseQuestionGenerator:
+    provider = provider or settings.llm_qgen_provider.lower()
+    model = settings.llm_qgen_model
+
+    if provider == "gemini":
+        return GeminiQuestionGenerator(model_name=model)
+    
+    # add some more here if ever
+    # elif provider in ("openai", "openrouter", "vllm", "ollama"):
+    #     return OpenAICompatibleQuestionGenerator(model_name=os.getenv("OPENAI_MODEL", "gpt-4o-mini"))
+
+    raise ValueError(f"Unsupported LLM provider: {provider}")
+
+
+
+
+gemini_provider.py:
+import asyncio
+import json
+import re
+from typing import List, Dict
+from google import genai
+from google.genai import types
+
+from app.core.config import settings
+from .base_qgen import BaseQuestionGenerator
+from .schema import RawChunk, GeneratedQuestion
+from ...utils.uuid_generator import generate_question_id
+from .sys_instructions import SYSTEM_INSTRUCTION
+
+
+def extract_clean_json(text: str) -> str:
+    """Extract strictly from the first '{' to the last '}' or '[' to ']' and strip backticks."""
+    cleaned = re.sub(r"^```(?:json)?\s*", "", text.strip(), flags=re.MULTILINE)
+    cleaned = re.sub(r"\s*```$", "", cleaned.strip(), flags=re.MULTILINE)
+
+    start_brace = cleaned.find("{")
+    end_brace = cleaned.rfind("}")
+    start_bracket = cleaned.find("[")
+    end_bracket = cleaned.rfind("]")
+
+    if start_bracket != -1 and (start_brace == -1 or start_bracket < start_brace):
+        if end_bracket != -1 and end_bracket > start_bracket:
+            return cleaned[start_bracket : end_bracket + 1]
+
+    if start_brace != -1 and end_brace != -1 and end_brace > start_brace:
+        return cleaned[start_brace : end_brace + 1]
+
+    return cleaned.strip()
+
+
+class GeminiQuestionGenerator(BaseQuestionGenerator):
+    def __init__(self, model_name: str = "gemini-2.5-flash", temperature: float = 0.2):
+        self.model_name = model_name
+        self.temperature = temperature
+
+        api_key = settings.llm_qgen_api_key
+        if not api_key:
+            raise ValueError("No API key found. Please set LLM_QGEN_API_KEY in your .env file.")
+
+        self.client = genai.Client(api_key=api_key)
+
+    async def generate_questions(self, chunk: RawChunk) -> List[GeneratedQuestion]:
+        """Single-chunk backward compatibility."""
+        batch_res = await self.generate_questions_batch([chunk])
+        return batch_res.get(chunk.id, [])
+
+    async def generate_questions_batch(self, chunks: List[RawChunk]) -> Dict[str, List[GeneratedQuestion]]:
+        """Batches multiple chunks into a single LLM prompt to save cost and quota."""
+        if not chunks:
+            return {}
+
+        formatted_chunks = []
+        for c in chunks:
+            tags_str = ", ".join(c.tags) if c.tags else "N/A"
+            formatted_chunks.append(
+                f"--- START CHUNK ID: {c.id} ---\n"
+                f"Title: {c.title.strip() or 'N/A'}\n"
+                f"Source URL: {c.source_url.strip() or 'N/A'}\n"
+                f"Tags: {tags_str}\n"
+                f"Content:\n{c.content.strip()}\n"
+                f"--- END CHUNK ID: {c.id} ---"
+            )
+
+        prompt = (
+            "Analyze each of the following content chunks independently.\n"
+            "For each chunk, generate 3 to 5 realistic, concrete questions that it directly answers.\n"
+            "If a chunk lacks substantive content (e.g. navigation menu, cookie policy, generic announcement), map its ID to an empty list [].\n\n"
+            "Return a strictly valid JSON object where keys are the CHUNK IDs and values are arrays of strings:\n"
+            "{\n"
+            '  "<chunk_id>": ["question 1", "question 2", ...]\n'
+            "}\n\n"
+            f"{chr(10).join(formatted_chunks)}"
+        )
+
+        max_retries = 5
+        base_delay = 5.0
+        response = None
+
+        for attempt in range(max_retries):
+            try:
+                response = await self.client.aio.models.generate_content(
+                    model=self.model_name,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        system_instruction=SYSTEM_INSTRUCTION,
+                        response_mime_type="application/json",
+                        temperature=self.temperature,
+                        max_output_tokens=8000,
+                        automatic_function_calling=types.AutomaticFunctionCallingConfig(
+                            disable=True
+                        ),
+                    ),
+                )
+                break
+            except Exception as e:
+                err_text = str(e)
+                retryable_errors = ("429", "RESOURCE_EXHAUSTED", "503", "UNAVAILABLE", "high demand")
+                if any(err in err_text for err in retryable_errors) and attempt < max_retries - 1:
+                    wait_sec = base_delay * (2 ** attempt)
+                    print(
+                        f"[Gemini QGen Retry] Rate/capacity hit on batch of {len(chunks)} chunks. "
+                        f"Retrying in {wait_sec:.1f}s..."
+                    )
+                    await asyncio.sleep(wait_sec)
+                else:
+                    raise
+
+        raw_text = (response.text or "") if response else ""
+        if not raw_text.strip():
+            raise ValueError("QGen returned an empty response (possibly truncated by thinking tokens).")
+
+        # Parse failures RAISE. The old code swallowed them and returned {}, which made
+        # the worker mark every chunk of the batch as done with zero questions.
+        try:
+            parsed = json.loads(extract_clean_json(raw_text))
+        except Exception as e:
+            raise ValueError(f"QGen JSON parse error: {e}. Raw: {raw_text[:200]}") from e
+
+        if not isinstance(parsed, dict):
+            raise ValueError("QGen response is not a JSON object keyed by chunk id.")
+        parsed_map: Dict[str, List[str]] = (
+            parsed["chunks"] if isinstance(parsed.get("chunks"), dict) else parsed
+        )
+
+        output_map: Dict[str, List[GeneratedQuestion]] = {}
+        for c in chunks:
+            key = str(c.id)
+            if key not in parsed_map:
+                continue  # not answered -> caller retries; do NOT treat as "no questions"
+            q_strings = parsed_map[key]
+            chunk_questions: List[GeneratedQuestion] = []
+            if isinstance(q_strings, list):
+                for q_text in q_strings:
+                    clean_text = str(q_text).strip()
+                    if clean_text:
+                        chunk_questions.append(
+                            GeneratedQuestion(
+                                id=generate_question_id(chunk_id=c.id, question=clean_text),
+                                chunk_id=c.id,
+                                content=clean_text,
+                                tags=c.tags,
+                            )
+                        )
+            output_map[c.id] = chunk_questions
+
+        return output_map
+
+
+
+
+
+
+
+
+schema.py:
+from typing import List, Dict, Any
+from pydantic import BaseModel, Field
+
+class RawChunk(BaseModel):
+    """The raw chunk after scraping, cleaning, and chunking"""
+    id: str
+    doc_id: str = Field(..., description="Unique hash/ID of the parent scraped document/URL")
+    source_url: str
+    title: str
+    content: str
+    tags: List[str]
+
+class GeneratedQuestion(BaseModel):
+    """Question generated by the LLM from a chunk"""
+    id: str
+    chunk_id: str
+    content: str
+    tags: List[str]
+
+class BatchGeneratedQuestionSet(BaseModel):
+    """Batched response schema: mapping of chunk_id to list of generated questions."""
+    chunks: Dict[str, List[str]] = Field(
+        default_factory=dict,
+        description="Dictionary where each key is a chunk_id, mapping to 3-5 realistic questions answering that chunk."
+    )
+
+
+
+
+sys_instructions.py:
+SYSTEM_INSTRUCTION = """
+You are a high-precision question-generation engine for an enterprise multi-tenant RAG system.
+You will receive multiple numbered content chunks simultaneously. Your objective is to analyze each chunk independently and generate 3 to 5 realistic, concrete questions that the specific passage directly and completely answers.
+
+Each chunk starts with a "Section: <breadcrumb>" line. The breadcrumb tells you which topic the chunk belongs to; use it to make questions self-contained (name the topic, not "this section"). If the line ends with "(part i of n)", the chunk is only one part of a longer section.
+
+RULES:
+1. Strict Grounding: Every generated question must be fully answerable using ONLY the provided chunk content. Never invent questions about topics that are merely hinted at or require external knowledge.
+2. Concrete Information: Formulate self-contained questions seeking factual details (e.g., procedures, requirements, eligibility, deadlines, contact details, dates, or institutional policies).
+3. Partial Sections: For a chunk marked "(part i of n)", ask about the specific items that are present in THIS part (e.g. "What do I do after submitting my application form?"). Do NOT ask for the complete procedure or the total number of steps unless this chunk is the only part.
+4. Handling Mixed or Secondary Content:
+   - If a chunk contains valuable, concrete informational content (e.g., a specific policy, office procedure, deadline, contact detail, requirement, or fee) that represents only a minor portion of the text alongside unrelated stories or announcements, DO NOT discard it.
+   - Formulate self-contained, highly specific questions targeting ONLY that substantive fact or policy.
+   - Ensure the generated questions do NOT reference or pull from the surrounding unrelated stories, feature articles, or decorative side content.
+5. Noise Elimination: If a chunk is ENTIRELY boilerplate (e.g., navigation breadcrumbs, cookie policies, terms of use, generic header/footer links, social media sharing tags, sidebar teasers, or vague announcement headers with ZERO explanatory body text), output an EMPTY list [] for that chunk's ID.
+6. No Meta Questions: Never generate questions like "What does this page link to?", "Where can I find more info?", or "What is the cookie policy?".
+
+OUTPUT FORMAT:
+Return a strictly valid JSON object where every key is the exact CHUNK ID and the value is an array of strings:
+{
+  "<chunk_id>": [
+    "question 1",
+    "question 2",
+    "question 3"
+  ]
+}
+"""

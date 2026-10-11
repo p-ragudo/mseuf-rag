@@ -1,0 +1,893 @@
+from app/services/query_pipeline/
+
+query_pipeline.py:
+import asyncio
+import logging
+import re
+import time
+from typing import Dict, List, Optional, Tuple
+
+from app.core.config import settings
+from app.core.database import async_session
+from app.models.org import Org
+from app.services.embeddings.factory import get_embedder
+from app.services.embeddings.sparse_embedder import get_sparse_embedder
+from app.services.llm_qa.factory import get_qa_synthesizer
+from app.services.llm_qa.schema import (
+    MatchedQuestionDetail,
+    QARequest,
+    RetrievedContextItem,
+)
+from app.services.query_pipeline.context_expander import ContextExpander
+from app.services.query_pipeline.intent_classifier import QueryClassifier
+from app.services.query_pipeline.schema import (
+    PipelineQueryRequest,
+    PipelineQueryResponse,
+)
+from app.services.query_pipeline.temporal_resolver import resolve_temporal_conflicts
+from app.services.reranker.factory import get_reranker
+from app.services.reranker.schema import RerankCandidate
+from app.services.semantic_cache.factory import get_semantic_cache
+from app.services.semantic_cache.schemas import CacheMetadata
+from app.services.vector_db.factory import get_vector_db
+
+logger = logging.getLogger(__name__)
+
+_ORG_CACHE_TTL_SECONDS = 30.0
+# org_id -> (fetched_at_monotonic, org_name, content_version)
+_org_cache: Dict[int, Tuple[float, str, int]] = {}
+
+def _normalize_campus(value: Optional[str]) -> Optional[str]:
+    """Payload campus values are lowercase URL slugs; make classifier output match."""
+    if not value:
+        return None
+    slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
+    return slug if slug and slug != "main" else None
+
+
+def _cache_scope(org_id: int, campus: Optional[str], version: int) -> str:
+    """
+    Tenant tag used for the semantic cache. Includes the tenant's content_version so
+    a re-ingest makes all previously cached answers unreachable.
+    """
+    base = f"{org_id}_v{version}"
+    if campus:
+        return f"{base}_{campus.replace('-', '_')}"
+    return base
+
+
+class QueryPipeline:
+    def __init__(self):
+        self.vector_db = get_vector_db()
+        self.embedder = get_embedder()
+        self.sparse_embedder = get_sparse_embedder()
+        self.qa_synthesizer = get_qa_synthesizer()
+        self.semantic_cache = get_semantic_cache()
+        self.classifier = QueryClassifier()
+        self.reranker = get_reranker()
+        self.expander = ContextExpander(window=1, expand_top_n=3, max_chars=16000)
+
+    @property
+    def collection_name(self) -> str:
+        """Always resolves dynamically from settings."""
+        return settings.resolved_collection_name
+
+    async def _resolve_org_details(self, org_id: int) -> Tuple[str, List[str], int]:
+        now = time.monotonic()
+        hit = _org_cache.get(org_id)
+        if hit and now - hit[0] < _ORG_CACHE_TTL_SECONDS:
+            return hit[1], [], hit[2]
+
+        async with async_session() as session:
+            org = await session.get(Org, org_id)
+            if org:
+                version = int(org.content_version or 0)
+                _org_cache[org_id] = (now, org.name, version)
+                return org.name, [], version
+        return "the organization", [], 0
+
+    def _reciprocal_rank_fusion(
+        self,
+        dense_hits: list,
+        sparse_hits: list,
+        k: int = 60,
+    ) -> List[Tuple[str, float, dict, List[MatchedQuestionDetail]]]:
+        chunk_scores: Dict[str, float] = {}
+        chunk_payloads: Dict[str, dict] = {}
+        chunk_matched: Dict[str, List[MatchedQuestionDetail]] = {}
+
+        for rank, hit in enumerate(dense_hits):
+            parent_id = hit.payload.get("parent_chunk_id") or hit.id
+            q_text = hit.payload.get("question_text") or ""
+            chunk_payloads.setdefault(parent_id, hit.payload)
+            chunk_matched.setdefault(parent_id, [])
+            if q_text:
+                chunk_matched[parent_id].append(
+                    MatchedQuestionDetail(
+                        question=q_text, score=float(hit.score), method="dense", rank=rank
+                    )
+                )
+            chunk_scores[parent_id] = chunk_scores.get(parent_id, 0.0) + 1.0 / (k + rank + 1)
+
+        seen_sparse: set = set()
+        for point_rank, hit in enumerate(sparse_hits):
+            parent_id = hit.payload.get("parent_chunk_id") or hit.id
+            q_text = hit.payload.get("question_text") or ""
+            chunk_payloads.setdefault(parent_id, hit.payload)
+            chunk_matched.setdefault(parent_id, [])
+
+            existing = {m.question for m in chunk_matched[parent_id]}
+            if q_text and q_text not in existing:
+                chunk_matched[parent_id].append(
+                    MatchedQuestionDetail(
+                        question=q_text, score=float(hit.score), method="sparse", rank=point_rank
+                    )
+                )
+            if parent_id not in seen_sparse:
+                chunk_rank = len(seen_sparse)
+                seen_sparse.add(parent_id)
+                chunk_scores[parent_id] = chunk_scores.get(parent_id, 0.0) + 1.0 / (k + chunk_rank + 1)
+
+        ordered = sorted(chunk_scores.items(), key=lambda item: item[1], reverse=True)
+        return [
+            (pid, score, chunk_payloads[pid], chunk_matched.get(pid, []))
+            for pid, score in ordered
+        ]
+
+    async def _hybrid_search(self, dense_vec, sparse_data, flt, limit):
+        dense_task = self.vector_db.search(
+            collection_name=self.collection_name,
+            query_vector=dense_vec,
+            limit=limit,
+            filters=flt,
+            using_vector_name="question_dense",
+        )
+
+        async def _sparse():
+            if not sparse_data.indices:
+                return []
+            return await self.vector_db.search_sparse(
+                collection_name=self.collection_name,
+                sparse_indices=sparse_data.indices,
+                sparse_values=sparse_data.values,
+                limit=limit,
+                filters=flt,
+                using_vector_name="chunk_sparse",
+            )
+
+        return await asyncio.gather(dense_task, _sparse())
+
+    @staticmethod
+    def _cached_response(req: PipelineQueryRequest, cache_entry) -> PipelineQueryResponse:
+        cached_contexts = [
+            RetrievedContextItem(**item) if isinstance(item, dict) else item
+            for item in cache_entry.metadata.extra.get("contexts", [])
+        ]
+        return PipelineQueryResponse(
+            query=req.query,
+            answer=cache_entry.response,
+            is_cached=True,
+            source="cache",
+            sources=cache_entry.metadata.extra.get("sources", []),
+            contexts=cached_contexts,
+        )
+
+    async def execute(self, req: PipelineQueryRequest) -> PipelineQueryResponse:
+        # Server-enforced top_k resolution
+        chosen_top_k = req.top_k or settings.default_top_k
+        top_k = max(settings.min_top_k, min(chosen_top_k, settings.max_top_k))
+
+        # 1. Dense query vector + org details (name, content_version) in parallel
+        dense_embed, (org_name, known_locations, content_version) = await asyncio.gather(
+            self.embedder.embed_one(req.query, task_type="RETRIEVAL_QUERY"),
+            self._resolve_org_details(req.org_id),
+        )
+        dense_vec = dense_embed.values
+
+        # 2. Semantic cache fast-path (tenant scope, tied to the tenant's content version)
+        base_cache_scope = _cache_scope(req.org_id, None, content_version)
+        cache_entry = await self.semantic_cache.get(vector=dense_vec, org_id=base_cache_scope)
+        if cache_entry:
+            return self._cached_response(req, cache_entry)
+
+        # 3. Cache MISS: Run classifier & sparse BM25 encoding
+        intent, sparse_data = await asyncio.gather(
+            self.classifier.classify_intent(
+                req.query, org_name=org_name, known_locations=known_locations
+            ),
+            self.sparse_embedder.embed_query(req.query),
+        )
+
+        campus = _normalize_campus(intent.detected_sub_entity)
+        final_cache_scope = _cache_scope(req.org_id, campus, content_version)
+
+        # If campus is detected, check campus-specific cache scope
+        if campus and final_cache_scope != base_cache_scope:
+            cache_entry = await self.semantic_cache.get(vector=dense_vec, org_id=final_cache_scope)
+            if cache_entry:
+                return self._cached_response(req, cache_entry)
+
+        # 4. Hybrid Retrieval in Active Collection
+        tenant_filter: Dict[str, str] = {"group_id": str(req.org_id)}
+        if campus:
+            tenant_filter["campus"] = campus
+
+        candidate_limit = max(top_k * 6, 30)
+        dense_hits, sparse_hits = await self._hybrid_search(
+            dense_vec, sparse_data, tenant_filter, candidate_limit
+        )
+
+        # If campus filter returned nothing, fallback to tenant-wide
+        if not dense_hits and not sparse_hits and campus:
+            logger.info("No hits with campus=%s, retrying tenant-wide", campus)
+            dense_hits, sparse_hits = await self._hybrid_search(
+                dense_vec, sparse_data, {"group_id": str(req.org_id)}, candidate_limit
+            )
+
+        # 5. RRF Fusion
+        fused = self._reciprocal_rank_fusion(dense_hits, sparse_hits, k=60)
+        if not fused:
+            return PipelineQueryResponse(
+                query=req.query,
+                answer="No relevant institutional documents could be found for your query.",
+                is_cached=False,
+                source="fallback",
+            )
+
+        # 6. Cross-Encoder Reranking. Over-fetch (2x) so that dropping stale
+        #    duplicates below still leaves a full top_k of distinct, current evidence.
+        rerank_pool_size = max(top_k * 4, 25)
+        candidates = [
+            RerankCandidate(
+                chunk_id=pid,
+                content=payload.get("chunk_text") or "",
+                initial_score=score,
+                payload=payload,
+                matched_questions=mqs,
+            )
+            for pid, score, payload, mqs in fused[:rerank_pool_size]
+            if (payload.get("chunk_text") or "").strip()
+        ]
+        reranked = await self.reranker.rerank(
+            query=req.query,
+            candidates=candidates,
+            top_k=top_k * 2,
+            score_threshold=settings.reranker_score_threshold,
+        )
+        if not reranked:
+            return PipelineQueryResponse(
+                query=req.query,
+                answer="No sufficiently relevant institutional information was found to answer your inquiry.",
+                is_cached=False,
+                source="fallback",
+            )
+
+        # 6b. Temporal conflict resolution: drop versions provably superseded by a fresher one
+        reranked, superseded = resolve_temporal_conflicts(req.query, reranked)
+        if superseded:
+            logger.info(
+                "Dropped %d superseded docs for org %s: %s",
+                len(superseded),
+                req.org_id,
+                [(s.source_url, s.reason) for s in superseded],
+            )
+        reranked = reranked[:top_k]
+
+        # 7. Context Expansion (Postgres small-to-big)
+        contexts = await self.expander.expand(req.org_id, reranked)
+        if not contexts:
+            return PipelineQueryResponse(
+                query=req.query,
+                answer="No sufficiently relevant institutional information was found to answer your inquiry.",
+                is_cached=False,
+                source="fallback",
+                superseded=superseded,
+            )
+        source_urls: List[str] = []
+        for c in contexts:
+            if c.source_url and c.source_url not in source_urls:
+                source_urls.append(c.source_url)
+
+        # 8. LLM QA Answer Synthesis
+        qa_response = await self.qa_synthesizer.generate_answer(
+            QARequest(query=req.query, contexts=contexts), org_name=org_name
+        )
+        final_answer = qa_response.answer
+        if intent.is_ambiguous and intent.clarification_message:
+            final_answer += f"\n\n---\n*Note*: {intent.clarification_message}"
+
+        # 9. Store in Semantic Cache (scope carries the tenant's content_version)
+        await self.semantic_cache.set(
+            query=req.query,
+            vector=dense_vec,
+            response=final_answer,
+            org_id=final_cache_scope,
+            metadata=CacheMetadata(
+                extra={
+                    "sources": qa_response.sources,
+                    "org_id": req.org_id,
+                    "contexts": [c.model_dump() for c in contexts],
+                }
+            ),
+        )
+
+        return PipelineQueryResponse(
+            query=req.query,
+            answer=final_answer,
+            is_cached=False,
+            source="llm",
+            sources=qa_response.sources,
+            contexts=contexts,
+            superseded=superseded,
+        )
+
+
+
+
+
+
+
+
+
+
+schema.py:
+from typing import List, Optional
+from pydantic import BaseModel, Field
+
+from app.services.llm_qa.schema import RetrievedContextItem
+
+
+class QueryBodyRequest(BaseModel):
+    """Client-facing request body schema shown in OpenAPI / Swagger UI."""
+    query: str = Field(..., min_length=2, max_length=1000, description="User question")
+    session_id: Optional[str] = Field(None, description="Optional chat session identifier")
+
+
+class PipelineQueryRequest(BaseModel):
+    """Internal schema passed across the query pipeline stages."""
+    query: str = Field(..., min_length=2, max_length=1000, description="User question")
+    org_id: int = Field(..., description="Tenant organization ID passed via URL path")
+    session_id: Optional[str] = Field(None, description="Optional chat session identifier")
+    top_k: Optional[int] = Field(None, description="Internal top-k override, defaults to server configuration")
+
+
+class SupersededInfo(BaseModel):
+    """Telemetry: a retrieved document removed because a fresher near-duplicate exists."""
+    source_url: str
+    heading_path: str = ""
+    reason: str
+    superseded_by: str = ""
+
+
+class PipelineQueryResponse(BaseModel):
+    query: Optional[str] = Field(default=None, description="The incoming user query")
+    answer: str
+    is_cached: bool = False
+    source: str = Field(..., description="'cache', 'llm', or 'fallback'")
+    sources: List[str] = Field(default_factory=list, description="Source URLs or reference links")
+    contexts: List[RetrievedContextItem] = Field(default_factory=list, description="Passages passed to QA LLM")
+    superseded: List[SupersededInfo] = Field(
+        default_factory=list, description="Stale documents dropped in favour of fresher ones"
+    )
+
+
+
+
+
+
+
+
+
+
+intent_classifier.py:
+import asyncio
+import json
+import logging
+import random
+from typing import List, Optional
+from google import genai
+from google.genai import types
+from pydantic import BaseModel, Field
+
+from app.core.config import settings
+
+logger = logging.getLogger(__name__)
+
+
+class QueryIntent(BaseModel):
+    is_ambiguous: bool = Field(
+        ...,
+        description="True if the user query is broad and lacks necessary entity, campus, branch, or level specifics",
+    )
+    detected_sub_entity: Optional[str] = Field(
+        default=None,
+        description="Detected campus, branch, or sub-department name, or null if unspecified",
+    )
+    detected_academic_level: Optional[str] = Field(
+        default=None,
+        description="'undergraduate', 'graduate', 'shs', 'basic_ed', or null if not applicable",
+    )
+    clarification_message: Optional[str] = Field(
+        default=None,
+        description="Follow-up clarification to ask the user if the query is too ambiguous to answer definitively without context",
+    )
+
+
+class QueryClassifier:
+    def __init__(self):
+        api_key = settings.llm_qa_api_key or settings.llm_qgen_api_key
+        self.client = genai.Client(api_key=api_key)
+        self.model_name = "gemini-3.5-flash-lite"
+        self.max_retries = 3
+        self.base_delay = 1.5
+
+    async def classify_intent(
+        self,
+        query: str,
+        org_name: str = "the institution",
+        known_locations: Optional[List[str]] = None,
+    ) -> QueryIntent:
+        locations_hint = (
+            f"Known campuses/branches/locations for this organization: {', '.join(known_locations)}."
+            if known_locations
+            else "The organization may have multiple branches, locations, or academic levels."
+        )
+
+        system_instruction = (
+            f"You are a query intent classification engine for {org_name}. "
+            f"{locations_hint}\n"
+            "Analyze the user query. Determine if the user is asking a broad question (such as admission requirements, "
+            "tuition fees, or program offerings) that typically depends on knowing the specific campus/branch or education level.\n"
+            "If the query is broad and lacks necessary location or academic level context, set is_ambiguous=true and formulate "
+            "a concise clarification message asking which specific location, campus, or level they are inquiring about.\n"
+            "If the user specifies a location or if the question is general institutional policy, set is_ambiguous=false."
+        )
+
+        prompt = f"User Query: {query}"
+
+        for attempt in range(self.max_retries):
+            try:
+                response = await self.client.aio.models.generate_content(
+                    model=self.model_name,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        system_instruction=system_instruction,
+                        response_mime_type="application/json",
+                        response_schema=QueryIntent,
+                        temperature=0.0,
+                        max_output_tokens=300,
+                    ),
+                )
+                data = json.loads(response.text)
+                return QueryIntent(**data)
+            except Exception as e:
+                err_text = str(e)
+                transient_indicators = (
+                    "503",
+                    "UNAVAILABLE",
+                    "high demand",
+                    "overloaded",
+                    "429",
+                    "RESOURCE_EXHAUSTED",
+                )
+                is_transient = any(indicator in err_text for indicator in transient_indicators)
+
+                if is_transient and attempt < self.max_retries - 1:
+                    sleep_time = (self.base_delay * (2 ** attempt)) + random.uniform(0.1, 0.5)
+                    logger.warning(
+                        "[QueryClassifier] Hit transient error (%s). Retrying %d/%d in %.2fs...",
+                        err_text[:120],
+                        attempt + 1,
+                        self.max_retries,
+                        sleep_time,
+                    )
+                    await asyncio.sleep(sleep_time)
+                else:
+                    logger.warning("[QueryClassifier Warning] Intent classification bypassed: %s", e)
+                    break
+
+        return QueryIntent(
+            is_ambiguous=False,
+            detected_sub_entity=None,
+            detected_academic_level=None,
+        )
+
+
+
+
+
+
+
+
+
+
+context_expander.py:
+"""
+Query-time "small-to-big" expansion.
+
+Retrieval finds the best chunk, but a chunk can be one part of a longer
+procedure (steps 1-3 of 8). Before the LLM sees the context we reload the
+rest from PostgreSQL (the source of truth):
+
+  * every part of the same section (section_id)  -> a procedure is never partial
+  * +/- ``window`` neighbouring chunks of the top ``expand_top_n`` hits
+    -> covers "continued below" content that landed in the next section
+
+Contiguous chunks of a page are merged into ONE context item in reading
+order. Tenant isolation is enforced again in SQL (ScrapedPage.org_id).
+Hits whose chunk no longer exists in Postgres (orphaned Qdrant points) or
+legacy chunks without chunk_index fall back to the payload text.
+"""
+from typing import Dict, List, Optional, Sequence, Set, Tuple
+
+from sqlalchemy import and_, or_, select
+
+from app.core.database import async_session
+from app.models.chunk import Chunk
+from app.models.scraped_page import ScrapedPage
+from app.services.llm_qa.schema import MatchedQuestionDetail, RetrievedContextItem
+from app.services.reranker.schema import RerankResult
+
+
+def _slug_title(url: str) -> str:
+    return url.rstrip("/").split("/")[-1] or "Document"
+
+def _freshness_fields(payload: dict) -> dict:
+    period = payload.get("doc_period")
+    updated = payload.get("page_updated_at") or ""
+    return {
+        "doc_type": payload.get("doc_type"),
+        "doc_period": f"{period}-{period + 1}" if isinstance(period, int) else None,
+        "last_updated": updated[:10] or None,
+    }
+
+class ContextExpander:
+    def __init__(self, window: int = 1, expand_top_n: int = 3, max_chars: int = 16000):
+        self.window = window
+        self.expand_top_n = expand_top_n
+        self.max_chars = max_chars
+
+    async def expand(
+        self, org_id: int, results: Sequence[RerankResult]
+    ) -> List[RetrievedContextItem]:
+        if not results:
+            return []
+
+        hit_ids: List[Optional[int]] = []
+        for r in results:
+            try:
+                hit_ids.append(int(r.payload.get("chunk_id")))
+            except (TypeError, ValueError):
+                hit_ids.append(None)
+
+        valid_ids = [i for i in hit_ids if i is not None]
+        hit_rows: Dict[int, Chunk] = {}
+        chunks_by_page: Dict[int, Dict[int, Chunk]] = {}
+        url_by_page: Dict[int, str] = {}
+
+        if valid_ids:
+            async with async_session() as session:
+                res = await session.execute(
+                    select(Chunk, ScrapedPage.url)
+                    .join(ScrapedPage, Chunk.page_id == ScrapedPage.id)
+                    .where(Chunk.id.in_(valid_ids), ScrapedPage.org_id == org_id)
+                )
+                for chunk, url in res.all():
+                    hit_rows[chunk.id] = chunk
+                    url_by_page[chunk.page_id] = url
+
+                wanted_sections: Dict[int, Set[str]] = {}
+                wanted_indices: Dict[int, Set[int]] = {}
+                for rank, cid in enumerate(hit_ids):
+                    ch = hit_rows.get(cid) if cid is not None else None
+                    if ch is None or ch.chunk_index is None:
+                        continue
+                    wanted_indices.setdefault(ch.page_id, set()).add(ch.chunk_index)
+                    if ch.section_id:
+                        wanted_sections.setdefault(ch.page_id, set()).add(ch.section_id)
+                    if rank < self.expand_top_n:
+                        for d in range(-self.window, self.window + 1):
+                            if ch.chunk_index + d >= 0:
+                                wanted_indices[ch.page_id].add(ch.chunk_index + d)
+
+                conds = []
+                for page_id, idxs in wanted_indices.items():
+                    inner = [Chunk.chunk_index.in_(sorted(idxs))]
+                    if wanted_sections.get(page_id):
+                        inner.append(Chunk.section_id.in_(sorted(wanted_sections[page_id])))
+                    conds.append(and_(Chunk.page_id == page_id, or_(*inner)))
+
+                if conds:
+                    res = await session.execute(
+                        select(Chunk, ScrapedPage.url)
+                        .join(ScrapedPage, Chunk.page_id == ScrapedPage.id)
+                        .where(ScrapedPage.org_id == org_id, or_(*conds))
+                    )
+                    for ch, url in res.all():
+                        if ch.chunk_index is None:
+                            continue
+                        chunks_by_page.setdefault(ch.page_id, {})[ch.chunk_index] = ch
+                        url_by_page[ch.page_id] = url
+
+        # (best_rank, item)
+        entries: List[Tuple[int, RetrievedContextItem]] = []
+
+        # Per page: contiguous runs in reading order.
+        hit_info: Dict[Tuple[int, int], int] = {}  # (page_id, chunk_index) -> best hit rank
+        for rank, cid in enumerate(hit_ids):
+            ch = hit_rows.get(cid) if cid is not None else None
+            if ch is not None and ch.chunk_index is not None:
+                hit_info.setdefault((ch.page_id, ch.chunk_index), rank)
+
+        for page_id, by_index in chunks_by_page.items():
+            indices = sorted(by_index)
+            runs: List[List[int]] = []
+            for i in indices:
+                if runs and i == runs[-1][-1] + 1:
+                    runs[-1].append(i)
+                else:
+                    runs.append([i])
+
+            for run in runs:
+                ranks = [hit_info[(page_id, i)] for i in run if (page_id, i) in hit_info]
+                if not ranks:
+                    continue  # run made only of expansion extras that no hit anchors
+                best_rank = min(ranks)
+                anchor = results[best_rank]
+                matched: List[MatchedQuestionDetail] = []
+                seen_q: Set[str] = set()
+                for rk in ranks:
+                    for mq in results[rk].matched_questions:
+                        if mq.question not in seen_q:
+                            seen_q.add(mq.question)
+                            matched.append(mq)
+
+                first_chunk = by_index[run[0]]
+                entries.append(
+                    (
+                        best_rank,
+                        RetrievedContextItem(
+                            title=first_chunk.heading_path or _slug_title(url_by_page[page_id]),
+                            content="\n\n".join(by_index[i].content for i in run),
+                            source_url=url_by_page[page_id],
+                            campus=anchor.payload.get("campus") or "main",
+                            academic_level=anchor.payload.get("academic_level") or "general",
+                            **_freshness_fields(anchor.payload),
+                            initial_score=max(results[rk].initial_score for rk in ranks),
+                            rerank_score=max(results[rk].rerank_score for rk in ranks),
+                            matched_questions=matched,
+                        ),
+                    )
+                )
+
+        # Hits that could not be resolved in Postgres: use the payload text.
+        for rank, (r, cid) in enumerate(zip(results, hit_ids)):
+            ch = hit_rows.get(cid) if cid is not None else None
+            if ch is not None and ch.chunk_index is not None:
+                continue
+            if cid is not None and ch is None:
+                continue  # orphaned point: its chunk no longer exists in Postgres => stale, never serve it
+            url = r.payload.get("source_url") or ""
+            entries.append(
+                (
+                    rank,
+                    RetrievedContextItem(
+                        title=r.payload.get("heading_path") or _slug_title(url),
+                        content=r.content,
+                        source_url=url,
+                        campus=r.payload.get("campus") or "main",
+                        academic_level=r.payload.get("academic_level") or "general",
+                        **_freshness_fields(r.payload),
+                        initial_score=r.initial_score,
+                        rerank_score=r.rerank_score,
+                        matched_questions=r.matched_questions,
+                    ),
+                )
+            )
+
+        entries.sort(key=lambda e: e[0])
+
+        out: List[RetrievedContextItem] = []
+        used = 0
+        for best_rank, item in entries:
+            if out and best_rank > 0 and used + len(item.content) > self.max_chars:
+                continue  # budget: the top hit is always kept in full
+            out.append(item)
+            used += len(item.content)
+        return out
+
+
+
+
+
+
+
+
+
+
+temporal_resolver.py:
+"""
+Query-time supersession of stale documents.
+
+Clusters retrieved candidate documents by structural hierarchy (heading path, 
+URL stem, and content overlap). Suppresses older versions when a newer version 
+covering a later academic period or fresher update date is present.
+"""
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from typing import Dict, List, Optional, Tuple
+from urllib.parse import urlparse
+
+from app.services.query_pipeline.schema import SupersededInfo
+from app.services.reranker.schema import RerankResult
+from app.utils.temporal import extract_doc_period, format_period
+
+NEAR_DUPLICATE_JACCARD = 0.75  # Lowered from 0.90 to account for rewritten fee/course updates
+SAME_HEADING_JACCARD = 0.40
+SAME_URL_STEM_JACCARD = 0.45
+UPDATE_GAP = timedelta(days=1)
+
+_WORD_RE = re.compile(r"[a-z]{3,}")
+
+
+@dataclass
+class _Item:
+    r: RerankResult
+    period: Optional[int]
+    updated: Optional[datetime]
+    tokens: frozenset
+    heading: str
+    stem: str
+    campus: str
+
+    @property
+    def url(self) -> str:
+        return self.r.payload.get("source_url") or ""
+
+
+def _parse_dt(value) -> Optional[datetime]:
+    if not value or not isinstance(value, str):
+        return None
+    try:
+        dt = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _norm_heading(h: str) -> str:
+    return " ".join(w for w in re.sub(r"[^a-z]+", " ", (h or "").lower()).split() if len(w) > 2)
+
+
+def _url_stem(url: str) -> str:
+    return re.sub(r"\d+", "", urlparse(url).path.lower()).rstrip("/")
+
+
+def _jaccard(a: frozenset, b: frozenset) -> float:
+    if not a or not b:
+        return 0.0
+    return len(a & b) / len(a | b)
+
+
+def _build(r: RerankResult) -> _Item:
+    p = r.payload or {}
+    period = p.get("doc_period")
+    if not isinstance(period, int):
+        period = extract_doc_period(
+            r.content, url=p.get("source_url") or "", heading=p.get("heading_path") or ""
+        )
+    return _Item(
+        r=r,
+        period=period,
+        updated=_parse_dt(p.get("page_updated_at")),
+        tokens=frozenset(_WORD_RE.findall((r.content or "").lower())),
+        heading=_norm_heading(p.get("heading_path") or ""),
+        stem=_url_stem(p.get("source_url") or ""),
+        campus=(p.get("campus") or "main"),
+    )
+
+
+def _same_topic(a: _Item, b: _Item) -> bool:
+    if a.campus != b.campus:
+        return False
+    j = _jaccard(a.tokens, b.tokens)
+    if j >= NEAR_DUPLICATE_JACCARD:
+        return True
+    if a.heading and a.heading == b.heading and j >= SAME_HEADING_JACCARD:
+        return True
+    if a.stem and a.stem == b.stem and j >= SAME_URL_STEM_JACCARD:
+        return True
+    return False
+
+
+def _supersedes(w: _Item, m: _Item) -> Optional[str]:
+    """Returns the supersession reason if winner `w` invalidates `m`."""
+    if w.period is not None and m.period is not None:
+        if w.period > m.period:
+            return (
+                f"newer academic period ({format_period(w.period)} vs {format_period(m.period)})"
+            )
+        if w.period < m.period:
+            return None
+    elif w.period is not None or m.period is not None:
+        return None
+
+    if w.updated and m.updated and (w.updated - m.updated) > UPDATE_GAP:
+        return "same topic, more recently updated source"
+    return None
+
+
+def _clusters(items: List[_Item]) -> List[List[int]]:
+    parent = list(range(len(items)))
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for i in range(len(items)):
+        for j in range(i + 1, len(items)):
+            if _same_topic(items[i], items[j]):
+                parent[find(i)] = find(j)
+
+    groups: Dict[int, List[int]] = {}
+    for i in range(len(items)):
+        groups.setdefault(find(i), []).append(i)
+    return list(groups.values())
+
+
+def resolve_temporal_conflicts(
+    query: str, results: List[RerankResult]
+) -> Tuple[List[RerankResult], List[SupersededInfo]]:
+    if len(results) < 2:
+        return results, []
+
+    items = [_build(r) for r in results]
+    dropped_idx: Dict[int, Tuple[str, str]] = {}
+
+    # 1. User specified an explicit target period (e.g., "tuition fees 2024")
+    q_period = extract_doc_period(query, allow_bare_year=True)
+    if q_period is not None and any(it.period == q_period for it in items):
+        for i, it in enumerate(items):
+            if it.period is not None and it.period != q_period:
+                dropped_idx[i] = (
+                    f"query requests {format_period(q_period)}, document covers {format_period(it.period)}",
+                    "",
+                )
+
+    # 2. Cluster candidates and prune superseded older documents
+    alive = [i for i in range(len(items)) if i not in dropped_idx]
+    sub = [items[i] for i in alive]
+    for cluster in _clusters(sub):
+        if len(cluster) < 2:
+            continue
+        ranked = sorted(
+            cluster,
+            key=lambda k: (
+                sub[k].period if sub[k].period is not None else -1,
+                sub[k].updated.timestamp() if sub[k].updated else 0.0,
+                sub[k].r.rerank_score,
+            ),
+            reverse=True,
+        )
+        winner = sub[ranked[0]]
+        for k in ranked[1:]:
+            reason = _supersedes(winner, sub[k])
+            if reason:
+                dropped_idx[alive[k]] = (reason, winner.url)
+
+    kept = [r for i, r in enumerate(results) if i not in dropped_idx]
+    dropped = [
+        SupersededInfo(
+            source_url=items[i].url,
+            heading_path=items[i].r.payload.get("heading_path") or "",
+            reason=reason,
+            superseded_by=by,
+        )
+        for i, (reason, by) in dropped_idx.items()
+    ]
+    return kept, dropped

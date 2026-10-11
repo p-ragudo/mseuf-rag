@@ -90,3 +90,38 @@ pkill -9 -f "python" || true
 pkill -9 -f "uvicorn" || true
 pkill -9 -f "telegram_bot" || true
 ```
+
+## Environment variables to watch out for
+```bash
+# ==============================================================================
+# Production & Base Environments
+# ==============================================================================
+DATABASE_URL=value
+SEMANTIC_CACHE_INDEX_NAME=value
+COLLECTION_NAME=value
+TELEGRAM_BOT_TOKEN=value
+TELEGRAM_BOT_FASTAPI_KEY=value
+
+# ==============================================================================
+# Test / Non-Prod Environments
+# ==============================================================================
+DATABASE_URL_NOT_PROD=value
+SEMANTIC_CACHE_INDEX_NAME_NOT_PROD=value
+COLLECTION_NAME_NOT_PROD=value
+TELEGRAM_BOT_TOKEN_NOT_PROD=value
+TELEGRAM_BOT_FASTAPI_KEY_NOT_PROD=value
+
+# ==============================================================================
+# "On-Off" Environment Routing Flags
+# ==============================================================================
+# Toggle to switch individual resources between Production and Non-Production
+DATABASE_URL_USE_PROD=true
+SEMANTIC_CACHE_INDEX_NAME_USE_PROD=true
+COLLECTION_NAME_USE_PROD=true
+
+# (Current prod is on the test Qdrant DB)
+USE_TEST_QDRANT_DB=false
+
+# Telegram Bot Environment Switch
+TELEGRAM_BOT_USE_PROD=false
+```

@@ -10,8 +10,9 @@ from app.models.scraped_page import ScrapedPage, PageProcessStatus
 from app.models.chunk import Chunk
 from app.models.generated_question import GeneratedQuestion
 from app.services.ingest_pipeline.orchestrator import run_full_pipeline, get_active_sync_column
-from app.services.query_pipeline.query_pipeline import QueryPipeline
-from app.services.query_pipeline.schema import PipelineQueryRequest
+
+TELEGRAM_BOT_TOKEN = settings.resolved_telegram_token
+COLLECTION_NAME = settings.resolved_collection_name
 
 
 def _build_progress_bar(current: int, total: int, length: int = 10) -> str:
@@ -24,10 +25,10 @@ def _build_progress_bar(current: int, total: int, length: int = 10) -> str:
 
 
 async def send_reply(chat_id: int | str, text: str, parse_mode: Optional[str] = "Markdown"):
-    if not settings.telegram_bot_token:
+    if not TELEGRAM_BOT_TOKEN:
         return
 
-    url = f"https://api.telegram.org/bot{settings.telegram_bot_token}/sendMessage"
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": chat_id,
         "text": text,
@@ -39,7 +40,6 @@ async def send_reply(chat_id: int | str, text: str, parse_mode: Optional[str] = 
     async with httpx.AsyncClient() as client:
         try:
             resp = await client.post(url, json=payload, timeout=10.0)
-            # If Telegram rejects Markdown entities, re-send as clean plain text
             if resp.status_code == 400 and parse_mode:
                 payload.pop("parse_mode", None)
                 await client.post(url, json=payload, timeout=10.0)
@@ -55,45 +55,11 @@ def _get_model_telemetry():
     return sync_col, dense_model, sparse_model
 
 
-async def handle_query_command(chat_id: int | str, org_id: int, query_text: str):
-    """Executes the full hybrid retrieval + cross-encoder + QA pipeline for a specific org."""
-    if not query_text:
-        await send_reply(
-            chat_id,
-            "⚠️ *Usage:* `/query <org_id> <your question>`\n"
-            "Example: `/query 1 What are the admission requirements for BSCS?`",
-        )
-        return
-
-    await send_reply(
-        chat_id, 
-        f"🔍 *[Org #{org_id}] Searching knowledge base for:*\n_{query_text[:120]}_..."
-    )
-
-    try:
-        pipeline = QueryPipeline()
-        req = PipelineQueryRequest(query=query_text, org_id=org_id, top_k=5)
-        response = await pipeline.execute(req)
-
-        source_icon = "⚡" if response.is_cached else "🤖"
-        msg = f"{source_icon} Answer:\n\n{response.answer}\n"
-
-        if response.sources:
-            msg += "\n🔗 Sources:\n"
-            for s in response.sources[:4]:
-                msg += f"• {s}\n"
-
-        msg += f"\n---\nOrg: #{org_id} | Source: {response.source.upper()} | Collection: {pipeline.collection_name}"
-        
-        # Sent with None parse_mode to ensure raw LLM formatting doesn't trigger Telegram 400 Bad Request
-        await send_reply(chat_id, msg, parse_mode=None)
-
-    except Exception as e:
-        print(f"[Telegram Query Error]: {e}")
-        await send_reply(chat_id, f"❌ Query Failed:\n{str(e)[:300]}", parse_mode=None)
-
-
-async def run_pipeline_with_notifications(website_id: int, chat_id: Optional[int | str] = None):
+async def run_pipeline_with_notifications(
+    website_id: int,
+    chat_id: Optional[int | str] = None,
+    force_refresh: bool = False,
+):
     async with async_session() as session:
         website = await session.get(Website, website_id)
         if not website:
@@ -106,32 +72,33 @@ async def run_pipeline_with_notifications(website_id: int, chat_id: Optional[int
     sync_col, dense_info, sparse_info = _get_model_telemetry()
 
     if chat_id:
+        force_tag = " *(FORCED RE-SCRAPE)*" if force_refresh else ""
         await send_reply(
             chat_id,
-            f"🚀 *Ingestion Started*\n"
+            f"🚀 *Ingestion Started*{force_tag}\n"
             f"• *Website ID:* `{website_id}`\n"
             f"• *Org ID:* `{org_id}`\n"
             f"• *Target URL:* {target_url}\n"
-            f"• *Target Collection:* `{settings.collection_name}`\n"
+            f"• *Target Collection:* `{COLLECTION_NAME}`\n"
             f"• *Dense Model:* `{dense_info}`\n"
             f"• *Sparse Model:* `{sparse_info}`\n"
             f"• *Active Sync Flag:* `{sync_col.key}`",
         )
 
     try:
-        results = await run_full_pipeline(website_id=website_id)
+        results = await run_full_pipeline(website_id=website_id, force_refresh=force_refresh)
         if chat_id:
             await send_reply(
                 chat_id,
                 f"✅ *Pipeline Completed Successfully!*\n"
-                f"• *Target Collection:* `{settings.collection_name}`\n"
-                f"• *Dense Model:* `{dense_info}`\n"
-                f"• *Sparse Model:* `{sparse_info}`\n"
+                f"• *Target Collection:* `{COLLECTION_NAME}`\n"
                 f"• *URLs Discovered:* `{results['discovered_urls']}`\n"
                 f"• *Pages Scraped:* `{results['scraped_pages']}`\n"
                 f"• *Chunks Created:* `{results['created_chunks']}`\n"
                 f"• *Questions Generated:* `{results['generated_questions']}`\n"
-                f"• *Points Synced ({sync_col.key}):* `{results['synced_qdrant_points']}`",
+                f"• *Points Synced ({sync_col.key}):* `{results['synced_qdrant_points']}`\n"
+                f"• *Swept Pages:* `{results['swept_pages']}`\n"
+                f"• *Purged Pages:* `{results['purged_pages']}`",
             )
     except Exception as e:
         print(f"[Website {website_id}] Pipeline error: {e}")
@@ -207,7 +174,7 @@ async def handle_status_command(chat_id: int | str, website_id: int):
             f"📊 *Ingestion Status — Site #{website_id}*\n"
             f"🌐 `{website.url}`\n"
             f"• *Status:* {status_label}\n"
-            f"• *Target Collection:* `{settings.collection_name}`\n"
+            f"• *Target Collection:* `{COLLECTION_NAME}`\n"
             f"• *Dense Embedder:* `{dense_info}`\n"
             f"• *Sparse Embedder:* `{sparse_info}`\n"
             f"• *Tracking Column:* `{sync_col.key}`\n"
@@ -237,11 +204,11 @@ async def handle_status_command(chat_id: int | str, website_id: int):
 
 
 async def start_telegram_bot_listener():
-    if not settings.telegram_bot_token:
+    if not TELEGRAM_BOT_TOKEN:
         print("[Telegram] TELEGRAM_BOT_TOKEN not configured. Skipping listener.")
         return
 
-    url = f"https://api.telegram.org/bot{settings.telegram_bot_token}/getUpdates"
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
     offset = None
     print("[Telegram] Poller active. Listening for commands...")
 
@@ -258,16 +225,16 @@ async def start_telegram_bot_listener():
                     continue
 
                 data = resp.json()
-                for update in data.get("result", []):
-                    offset = update["update_id"] + 1
-                    message = update.get("message", {})
+                for update_obj in data.get("result", []):
+                    offset = update_obj["update_id"] + 1
+                    message = update_obj.get("message", {})
                     chat_id = message.get("chat", {}).get("id")
-                    raw_text = message.get("text", "").strip()
+                    text = message.get("text", "").strip()
 
-                    if not chat_id or not raw_text:
+                    if not chat_id or not text:
                         continue
 
-                    cmd_parts = raw_text.split()
+                    cmd_parts = text.split()
                     command = cmd_parts[0].split("@")[0].lower()
 
                     if command == "/scrape":
@@ -275,14 +242,17 @@ async def start_telegram_bot_listener():
                             await send_reply(
                                 chat_id,
                                 "⚠️ *Invalid Format!*\n"
-                                "Usage: `/scrape <website_id>`\n"
-                                "Example: `/scrape 1`",
+                                "Usage: `/scrape <website_id> [force]`\n"
+                                "Examples:\n"
+                                "• `/scrape 1` (Standard refresh check)\n"
+                                "• `/scrape 1 force` (Force re-crawl & re-chunk all pages)",
                             )
                             continue
 
                         web_id = int(cmd_parts[1])
+                        force = len(cmd_parts) >= 3 and cmd_parts[2].lower() in ("force", "true", "yes", "1")
                         asyncio.create_task(
-                            run_pipeline_with_notifications(website_id=web_id, chat_id=chat_id)
+                            run_pipeline_with_notifications(website_id=web_id, chat_id=chat_id, force_refresh=force)
                         )
 
                     elif command == "/status":
@@ -296,30 +266,13 @@ async def start_telegram_bot_listener():
                         web_id = int(cmd_parts[1])
                         asyncio.create_task(handle_status_command(chat_id, web_id))
 
-                    elif command == "/query":
-                        # Requires: /query <org_id> <question>
-                        if len(cmd_parts) < 3 or not cmd_parts[1].isdigit():
-                            await send_reply(
-                                chat_id,
-                                "⚠️ *Invalid Format!*\n"
-                                "Usage: `/query <org_id> <your question>`\n"
-                                "Example: `/query 1 What are the admission requirements for BSCS?`",
-                            )
-                            continue
-
-                        org_id = int(cmd_parts[1])
-                        # Slice off "/query" and "<org_id>"
-                        user_query = " ".join(cmd_parts[2:]).strip()
-                        asyncio.create_task(handle_query_command(chat_id, org_id, user_query))
-
                     elif command in ["/help", "/start"]:
                         await send_reply(
                             chat_id,
                             "🤖 *Knowledge Base Assistant Bot*\n\n"
                             "*Commands:*\n"
-                            "• `/query <org_id> <question>` - Ask anything about the organization\n"
-                            "• `/scrape <website_id>` - Runs discovery, chunking, and vector indexing\n"
-                            "• `/status <website_id>` - Check pipeline progress\n"
+                            "• `/scrape <id> [force]` - Run ingestion (add `force` to bypass 12h cooldown)\n"
+                            "• `/status <id>` - Check pipeline progress\n"
                             "• `/help` - Show instructions",
                         )
 

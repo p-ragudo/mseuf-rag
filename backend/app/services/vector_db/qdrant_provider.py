@@ -31,24 +31,27 @@ class QdrantVectorDB(BaseVectorDB):
 
         self.client = AsyncQdrantClient(url=cluster_endpoint, api_key=api_key)
 
-    def _build_filter(self, filters: Optional[Dict[str, Any]]) -> Optional[rest_models.Filter]:
-        if not filters:
+    def _build_filter(
+        self,
+        filters: Optional[Dict[str, Any]],
+        must_not: Optional[Dict[str, Any]] = None,
+    ) -> Optional[rest_models.Filter]:
+        if not filters and not must_not:
             return None
-        conditions = []
-        for key, val in filters.items():
-            if isinstance(val, list):
-                conditions.append(
-                    rest_models.FieldCondition(
-                        key=key, match=rest_models.MatchAny(any=val)
-                    )
-                )
-            else:
-                conditions.append(
-                    rest_models.FieldCondition(
-                        key=key, match=rest_models.MatchValue(value=val)
-                    )
-                )
-        return rest_models.Filter(must=conditions)
+
+        def _conds(d: Optional[Dict[str, Any]]) -> List[rest_models.FieldCondition]:
+            out: List[rest_models.FieldCondition] = []
+            for key, val in (d or {}).items():
+                if isinstance(val, list):
+                    out.append(rest_models.FieldCondition(key=key, match=rest_models.MatchAny(any=val)))
+                else:
+                    out.append(rest_models.FieldCondition(key=key, match=rest_models.MatchValue(value=val)))
+            return out
+
+        return rest_models.Filter(
+            must=_conds(filters) or None,
+            must_not=_conds(must_not) or None,
+        )
 
     def _get_quantization_config(self) -> Optional[rest_models.QuantizationConfig]:
         if not settings.quantization_enabled:
@@ -62,7 +65,6 @@ class QdrantVectorDB(BaseVectorDB):
                 )
             )
         else:
-            # Default to scalar int8 quantization
             return rest_models.ScalarQuantization(
                 scalar=rest_models.ScalarQuantizationConfig(
                     type=rest_models.ScalarType.INT8,
@@ -78,11 +80,6 @@ class QdrantVectorDB(BaseVectorDB):
         distance: str = "Cosine",
         enable_quantization: Optional[bool] = None,
     ) -> None:
-        """
-        Creates a multi-tenant collection with named dense & sparse vectors,
-        root HNSW m=0, server-side BM25/IDF modifier, tenant indexing on `group_id`,
-        and configurable quantization for the ingestion phase.
-        """
         collections = await self.client.get_collections()
         existing_names = {col.name for col in collections.collections}
 
@@ -113,7 +110,7 @@ class QdrantVectorDB(BaseVectorDB):
                     "question_dense": rest_models.VectorParams(
                         size=dense_vector_size,
                         distance=selected_distance,
-                        on_disk=True,  # Raw float32 vectors stay on disk for rescoring
+                        on_disk=True,
                         hnsw_config=rest_models.HnswConfigDiff(
                             m=0,
                             payload_m=16,
@@ -129,7 +126,6 @@ class QdrantVectorDB(BaseVectorDB):
                 },
             )
         else:
-            # If the collection exists without quantization, update it dynamically
             collection_info = await self.client.get_collection(collection_name)
             existing_params = collection_info.config.params.vectors
             target_params = None
@@ -162,6 +158,20 @@ class QdrantVectorDB(BaseVectorDB):
                 field_schema=rest_models.KeywordIndexParams(
                     type="keyword",
                 ),
+            )
+
+        if "page_id" not in payload_schema:
+            await self.client.create_payload_index(
+                collection_name=collection_name,
+                field_name="page_id",
+                field_schema=rest_models.PayloadSchemaType.INTEGER,
+            )
+
+        if "chunk_id" not in payload_schema:
+            await self.client.create_payload_index(
+                collection_name=collection_name,
+                field_name="chunk_id",
+                field_schema=rest_models.PayloadSchemaType.INTEGER,
             )
 
     async def upsert_points(
@@ -308,6 +318,38 @@ class QdrantVectorDB(BaseVectorDB):
             )
             for hit in response.points
         ]
+
+    async def delete_points(
+        self,
+        collection_name: str,
+        filters: Dict[str, Any],
+        must_not: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        if not filters or "group_id" not in filters:
+            raise ValueError("delete_points requires a group_id (tenant) filter.")
+        await self.client.delete(
+            collection_name=collection_name,
+            points_selector=rest_models.FilterSelector(
+                filter=self._build_filter(filters, must_not)
+            ),
+            wait=True,
+        )
+
+    async def delete_points_by_ids(
+        self,
+        collection_name: str,
+        point_ids: List[str],
+    ) -> None:
+        if not point_ids:
+            return
+        BATCH_SIZE = 500
+        for i in range(0, len(point_ids), BATCH_SIZE):
+            batch = point_ids[i : i + BATCH_SIZE]
+            await self.client.delete(
+                collection_name=collection_name,
+                points_selector=rest_models.PointIdsList(points=batch),
+                wait=True,
+            )
 
     async def close(self) -> None:
         if hasattr(self, "client") and self.client is not None:

@@ -26,7 +26,7 @@ async def lifespan(app: FastAPI):
     vector_db = get_vector_db()
     embedder = get_embedder()
     await vector_db.create_collection_if_not_exists(
-        collection_name=settings.collection_name,
+        collection_name=settings.resolved_collection_name,
         dense_vector_size=embedder.dimension,
         distance="Cosine",
     )

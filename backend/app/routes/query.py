@@ -1,3 +1,4 @@
+from functools import lru_cache
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession # type: ignore
 
@@ -13,6 +14,7 @@ from app.services.query_pipeline.query_pipeline import QueryPipeline
 router = APIRouter(prefix="/query", tags=["Query Pipeline"])
 
 
+@lru_cache(maxsize=1)
 def get_query_pipeline() -> QueryPipeline:
     return QueryPipeline()
 
