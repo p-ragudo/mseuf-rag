@@ -8,6 +8,11 @@
     url?: string;
   };
 
+  type ContextItem = {
+    title?: string;
+    source_url?: string;
+  };
+
   type Message = {
     id: string;
     role: "user" | "assistant";
@@ -21,8 +26,8 @@
     answer: string;
     is_cached?: boolean;
     source?: string;
-    sources?: Source[];
-    contexts?: unknown[];
+    sources?: (string | Source)[]; // backend sends plain URL strings
+    contexts?: ContextItem[];
   };
 
   // Gets :id from the svelte-spa-router route
@@ -108,6 +113,52 @@
     return DOMPurify.sanitize(html as string);
   }
 
+  function titleFromUrl(url: string): string {
+    try {
+      const u = new URL(url);
+      const last = u.pathname.split("/").filter(Boolean).pop();
+      if (!last) return u.hostname;
+      return decodeURIComponent(last).replace(/[-_]+/g, " ");
+    } catch {
+      return url;
+    }
+  }
+
+  // Turns the backend's URL strings into { title, url } objects.
+  // Titles come from the matching context chunk when there is one.
+  function normalizeSources(
+    raw: (string | Source)[] = [],
+    contexts: ContextItem[] = [],
+  ): Source[] {
+    const titles = new Map<string, string>();
+    for (const c of contexts) {
+      if (c.source_url && c.title && !titles.has(c.source_url)) {
+        titles.set(c.source_url, c.title);
+      }
+    }
+
+    const seen = new Set<string>();
+    const result: Source[] = [];
+
+    for (const item of raw) {
+      const url = typeof item === "string" ? item : item.url;
+      const title = typeof item === "string" ? undefined : item.title;
+      if (!url && !title) continue;
+
+      const key = (url ?? title)!;
+      if (seen.has(key)) continue;
+      seen.add(key);
+
+      result.push({
+        url,
+        title:
+          title ?? (url ? (titles.get(url) ?? titleFromUrl(url)) : undefined),
+      });
+    }
+
+    return result;
+  }
+
   async function send() {
     const content = input.trim();
 
@@ -179,7 +230,7 @@
         id: crypto.randomUUID(),
         role: "assistant",
         content: data.answer,
-        sources: data.sources,
+        sources: normalizeSources(data.sources, data.contexts),
       });
     } catch (error) {
       // Don't update the old chat if the user changed organizations.
@@ -287,31 +338,37 @@
             {/if}
 
             {#if message.sources?.length}
-              <div
-                class="mt-3 border-t border-outline pt-2 text-xs text-gray-500"
-              >
-                <p class="mb-1 font-bold uppercase tracking-wider text-primary">
+              <div class="mt-3 border-t border-outline pt-2">
+                <p
+                  class="mb-1.5 text-xs font-bold uppercase tracking-wider text-primary"
+                >
                   Sources
                 </p>
 
-                <ul class="space-y-0.5">
-                  {#each message.sources as source}
-                    <li>
+                <ol class="flex flex-col gap-1.5">
+                  {#each message.sources as source, i}
+                    <li class="flex flex-row gap-2 text-xs">
+                      <span class="shrink-0 font-bold text-gray-500"
+                        >{i + 1}.</span
+                      >
+
                       {#if source.url}
                         <a
                           href={source.url}
                           target="_blank"
                           rel="noopener noreferrer"
-                          class="font-semibold text-primary hover:underline"
+                          class="min-w-0 break-words font-semibold text-primary hover:underline"
                         >
                           {source.title ?? source.url}
                         </a>
                       {:else}
-                        {source.title}
+                        <span class="min-w-0 break-words text-gray-500"
+                          >{source.title}</span
+                        >
                       {/if}
                     </li>
                   {/each}
-                </ul>
+                </ol>
               </div>
             {/if}
           </div>
