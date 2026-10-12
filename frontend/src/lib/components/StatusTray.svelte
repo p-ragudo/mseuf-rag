@@ -43,22 +43,7 @@
 
   <WhiteCard>
     <div class="flex flex-row items-start justify-between">
-      <h4 class="text-xs">High-confidence answers</h4>
-      <div class="p-3 bg-accent rounded-lg"><ConfidentAnswersIcon /></div>
-    </div>
-    <h1 class="font-semibold text-2xl flex flex-row items-end gap-2">
-      87.4% <span
-        class="flex flex-row items-center text-sm font-normal text-[#097349]"
-      >
-        <ArrowUpIcon /> +3.2%</span
-      >
-    </h1>
-    <p class="text-xs text-gray-500">Above 85% RAG confidence · 12.6% low</p>
-  </WhiteCard>
-
-  <WhiteCard>
-    <div class="flex flex-row items-start justify-between">
-      <h4 class="text-xs">Cost & latency</h4>
+      <h4 class="text-xs">Satisfaction</h4>
       <div class="p-3 bg-accent rounded-lg"><SatisfactionIcon /></div>
     </div>
     <h1 class="font-semibold text-2xl flex flex-row items-end gap-2">

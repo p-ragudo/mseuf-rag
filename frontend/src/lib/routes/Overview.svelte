@@ -119,7 +119,7 @@
     </h3>
     <h1 class="text-3xl font-bold">Overview</h1>
     <p class=" text-gray-600">
-      See what students ask, how (boot name here) responds, and where your team
+      See what students ask, and where your team
       is needed.
     </p>
 
@@ -131,12 +131,6 @@
           options={timeframeOptions}
           bind:selected={selectedTimeframe}
           icon={CalendarIcon}
-        />
-        <SelectDropdown
-          label="Visitor Type"
-          options={visitorOptions}
-          bind:selected={selectedVisitor}
-          icon={PersonsIcon}
         />
       </div>
       <div class="flex flex-row items-center gap-3">
@@ -162,7 +156,7 @@
 
     <StatusTray />
 
-    <div class="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-[3fr_2fr]">
+    <div class="my-4 grid grid-cols-1 gap-4 lg:grid-cols-[3fr_2fr]">
       <TrendChart
         eyebrow="Conversation sessions"
         title="2,847"
@@ -177,17 +171,11 @@
         subtitle="Top categories across student conversations"
         items={topics}
       />
+    </div>
 
-      <KnowledgeAssetsTable
+    <KnowledgeAssetsTable
         {documents}
         onViewAll={() => push("/knowledge-base")}
       />
-
-      <HumanHandoffCard
-        openCount={5}
-        inquiries={pendingInquiries}
-        onReview={() => push("/escalation")}
-      />
-    </div>
   </div>
 </AppLayout>

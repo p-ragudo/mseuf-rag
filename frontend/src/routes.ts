@@ -28,7 +28,7 @@ const protectedRoute = (component: any) =>
 const routes: RouteDefinition = {
   "/overview": protectedRoute(Overview),
   "/knowledge-base": protectedRoute(KnowledgeBase),
-  "/escalation": protectedRoute(Escalation),
+  // "/escalation": protectedRoute(Escalation),
   "/mascot": protectedRoute(Mascot),
   "/login": wrap({ component: Login, conditions: [requireGuest] }),
   "/chat/:id": Chat,

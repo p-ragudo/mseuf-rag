@@ -45,46 +45,9 @@
       <span class="bg-primary w-1 rounded-2xl"></span>INSTITUTION COMMAND CENTER
     </h3>
     <h1 class="text-3xl font-bold">Knowledge & ingestion</h1>
-    <p class=" text-gray-600">
+    <p class="mb-4 text-gray-600">
       Review the content powering Rooney’s answers and prepare new sources.
     </p>
-
-    <WhiteCard style="my-4 flex flex-row justify-between gap-4">
-      <div class="flex flex-row gap-4 items-center">
-        <FilterIcon />
-        <SelectDropdown
-          label="Timeframe"
-          options={timeframeOptions}
-          bind:selected={selectedTimeframe}
-          icon={CalendarIcon}
-        />
-        <SelectDropdown
-          label="Visitor Type"
-          options={visitorOptions}
-          bind:selected={selectedVisitor}
-          icon={PersonsIcon}
-        />
-      </div>
-      <div class="flex flex-row items-center gap-3">
-        <span
-          transition:fade={{ duration: 150 }}
-          class="text-sm font-medium text-gray-500"
-        >
-          {#if isRefreshed}
-            Data refreshed!
-          {:else}
-            Last refreshed: 5 minutes ago
-          {/if}
-        </span>
-
-        <button
-          class="border border-outline bg-[#F5F8FB] px-3 py-2 text-sm shadow-sm rounded-lg hover:cursor-pointer flex flex-row items-center gap-2"
-          onclick={refreshData}
-        >
-          <RefreshIcon /> Refresh
-        </button>
-      </div>
-    </WhiteCard>
 
     <KnowledgeIngestionCenter {categories} />
   </div>

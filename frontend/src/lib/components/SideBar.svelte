@@ -38,7 +38,7 @@
         text="Knowledge Base"
         icon={KnowledgeBaseIcon}
       />
-      <NavItem href="/escalation" text="Escalation" icon={EscalationIcon} />
+      <!-- <NavItem href="/escalation" text="Escalation" icon={EscalationIcon} /> -->
       <NavItem href="/mascot" text="Mascot" icon={MascotIcon} />
     </ul>
   </nav>

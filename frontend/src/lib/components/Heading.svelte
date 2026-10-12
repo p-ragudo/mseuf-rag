@@ -112,11 +112,11 @@
         transition:fly={{ y: -8, duration: 150 }}
         class="absolute right-0 top-full z-50 mt-2 w-64 overflow-hidden rounded-lg border border-outline bg-white shadow-lg"
       >
-        <div
+        <!-- <div
           class="[&>*]:!static [&>*]:!inset-auto [&>*]:!m-0 [&>*]:!w-full [&>*]:!rounded-none [&>*]:!border-0 [&>*]:!shadow-none"
         >
           <ProfileMenu title="User Menu" {profiles} onSelect={handleSelect} />
-        </div>
+        </div> -->
 
         <div class="border-t border-outline p-1">
           <button

@@ -80,14 +80,6 @@
           >Document Title</th
         >
         <th
-          class="px-6 py-3 text-left text-xs font-bold uppercase tracking-wider text-gray-500"
-          >Source</th
-        >
-        <th
-          class="px-6 py-3 text-right text-xs font-bold uppercase tracking-wider text-gray-500"
-          >Chunks</th
-        >
-        <th
           class="px-6 py-3 text-right text-xs font-bold uppercase tracking-wider text-gray-500"
           >Accessed</th
         >
@@ -128,13 +120,13 @@
               <span class="text-sm font-semibold">{doc.title}</span>
             </div>
           </td>
-          <td class="px-6 py-4">
+          <!-- <td class="px-6 py-4">
             <span
               class="inline-block rounded-md border border-outline px-3 py-1 text-xs text-gray-500"
               >{doc.source}</span
             >
           </td>
-          <td class="px-6 py-4 text-right text-sm">{doc.chunks}</td>
+          <td class="px-6 py-4 text-right text-sm">{doc.chunks}</td> -->
           <td class="px-6 py-4 text-right text-sm"
             >{formatNumber(doc.accessed)}</td
           >
