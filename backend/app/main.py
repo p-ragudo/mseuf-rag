@@ -51,7 +51,8 @@ app = FastAPI(lifespan=lifespan)
 origins = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
-    "https://mseuf-rag.vercel.app"
+    "https://mseuf-rag.vercel.app",
+    "https://mseuf-rag-test.netlify.app"
 ]
 
 app.add_middleware(
