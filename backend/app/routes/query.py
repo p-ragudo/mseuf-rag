@@ -14,7 +14,7 @@ from app.services.query_pipeline.schema import (
     PipelineQueryResponse,
 )
 from app.services.query_pipeline.query_pipeline import QueryPipeline
-from backend.app.schemas.tenant import FeedbackBodyRequest
+from app.schemas.tenant import FeedbackBodyRequest
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/query", tags=["Query Pipeline"])
