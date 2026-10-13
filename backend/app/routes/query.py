@@ -67,17 +67,17 @@ async def execute_query(
     
     try:
         log = ResponseLog(
-            org_id=org_id,
-            latency_ms=latency_ms,
-            accessed_chunks=titles,
-            accessed_generated_questions=questions,
-            satisfied=None,
-        )
+                    org_id=org_id,
+                    latency_ms=latency_ms,
+                    accessed_chunks=titles,
+                    accessed_generated_questions=questions,
+                    satisfied=None,
+                )
         db.add(log)
         await db.flush()
-
-        result.response_id = log.id
+        new_id = log.id
         await db.commit()
+        result.response_id = new_id
     except Exception:
         await db.rollback()
         logger.exception("Failed to record response for org %s", org_id)
