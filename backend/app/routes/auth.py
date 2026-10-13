@@ -19,6 +19,11 @@ class LoginRequest(BaseModel):
     email: EmailStr
     password: str
 
+class MeResponse(BaseModel):
+    email: EmailStr
+    first_name: str
+    last_name: str
+
 @router.post("/register")
 async def register(payload: RegisterRequest, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(User).where(User.email == payload.email))
@@ -81,3 +86,13 @@ async def get_current_user(
         raise credentials_exception
 
     return user
+
+@router.get("/me", response_model=MeResponse)
+async def get_current_user_profile(
+    current_user: User = Depends(get_current_user)
+):
+    return MeResponse(
+        email=current_user.email,
+        first_name=current_user.first_name,
+        last_name=current_user.last_name
+    )
