@@ -63,22 +63,29 @@ async def execute_query(
     result = await pipeline.execute(pipeline_req)  # raises -> nothing below runs
     latency_ms = int((time.perf_counter() - started) * 1000)
 
+    titles, questions = _collect_titles(result)
+    
     try:
-        titles, questions = _collect_titles(result)
         log = ResponseLog(
-                        org_id=org_id,
-                        latency_ms=latency_ms,
-                        accessed_chunks=titles,
-                        accessed_generated_questions=questions,
-                    )
+            org_id=org_id,
+            latency_ms=latency_ms,
+            accessed_chunks=titles,
+            accessed_generated_questions=questions,
+            satisfied=None,
+        )
         db.add(log)
         await db.flush()
-        new_id = log.id
+
+        result.response_id = log.id
         await db.commit()
-        result.response_id = new_id
     except Exception:
         await db.rollback()
         logger.exception("Failed to record response for org %s", org_id)
+
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to save response log; feedback is unavailable.",
+        )
 
     return result
 
