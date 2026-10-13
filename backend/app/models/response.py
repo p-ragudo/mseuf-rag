@@ -11,7 +11,9 @@ class Response(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     org_id: Mapped[int] = mapped_column(ForeignKey("orgs.id"), index=True)
-    satisfied: Mapped[bool] = mapped_column(Boolean, default=False)
+    satisfied: Mapped[bool | None] = mapped_column(
+        Boolean, default=None, nullable=True
+    )
     latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, nullable=False

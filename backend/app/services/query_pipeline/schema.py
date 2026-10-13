@@ -36,3 +36,5 @@ class PipelineQueryResponse(BaseModel):
     superseded: List[SupersededInfo] = Field(
         default_factory=list, description="Stale documents dropped in favour of fresher ones"
     )
+    
+    response_id: int | None = None

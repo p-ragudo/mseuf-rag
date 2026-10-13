@@ -58,3 +58,6 @@ class WebsiteScrapeSchedulesResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+class FeedbackBodyRequest(BaseModel):
+    satisfied: bool | None    

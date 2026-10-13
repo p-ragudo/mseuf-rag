@@ -19,6 +19,8 @@
     content: string;
     sources?: Source[];
     error?: boolean;
+    responseId?: number;
+    feedback?: boolean | null;
   };
 
   type QueryResponse = {
@@ -28,6 +30,7 @@
     source?: string;
     sources?: (string | Source)[]; // backend sends plain URL strings
     contexts?: ContextItem[];
+    response_id?: number | null;
   };
 
   // Gets :id from the svelte-spa-router route
@@ -159,6 +162,30 @@
     return result;
   }
 
+  async function sendFeedback(message: Message, value: boolean) {
+    if (message.responseId == null) return;
+
+    const previous = message.feedback ?? null;
+    // Clicking the active button again clears the rating.
+    const next = previous === value ? null : value;
+    message.feedback = next; // optimistic update
+
+    try {
+      const res = await fetch(
+        `${API_URL}/query/${message.responseId}/feedback`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ satisfied: next }),
+        },
+      );
+
+      if (!res.ok) throw new Error(`Request failed (${res.status})`);
+    } catch {
+      message.feedback = previous; // roll back
+    }
+  }
+
   async function send() {
     const content = input.trim();
 
@@ -231,6 +258,8 @@
         role: "assistant",
         content: data.answer,
         sources: normalizeSources(data.sources, data.contexts),
+        responseId: data.response_id ?? undefined,
+        feedback: null,
       });
     } catch (error) {
       // Don't update the old chat if the user changed organizations.
@@ -369,6 +398,74 @@
                     </li>
                   {/each}
                 </ol>
+              </div>
+            {/if}
+
+            {#if message.role === "assistant" && !message.error}
+              <div
+                class="mt-3 flex flex-row items-center gap-1 border-t border-outline pt-2"
+              >
+                <button
+                  type="button"
+                  aria-label="Helpful"
+                  aria-pressed={message.feedback === true}
+                  disabled={message.responseId == null}
+                  title={message.responseId == null
+                    ? "Feedback unavailable for this answer"
+                    : "Helpful"}
+                  class="rounded-md p-1.5 transition-colors hover:cursor-pointer hover:bg-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent {message.feedback ===
+                  true
+                    ? 'text-primary'
+                    : 'text-gray-400'}"
+                  onclick={() => sendFeedback(message, true)}
+                >
+                  <svg
+                    class="h-4 w-4"
+                    viewBox="0 0 24 24"
+                    fill={message.feedback === true ? "currentColor" : "none"}
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    aria-hidden="true"
+                  >
+                    <path d="M7 10v12" />
+                    <path
+                      d="M15 5.88 14 10h5.83a2 2 0 0 1 1.92 2.56l-2.33 8A2 2 0 0 1 17.5 22H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h2.76a2 2 0 0 0 1.79-1.11L12 2a3.13 3.13 0 0 1 3 3.88Z"
+                    />
+                  </svg>
+                </button>
+
+                <button
+                  type="button"
+                  aria-label="Not helpful"
+                  aria-pressed={message.feedback === false}
+                  disabled={message.responseId == null}
+                  title={message.responseId == null
+                    ? "Feedback unavailable for this answer"
+                    : "Not helpful"}
+                  class="rounded-md p-1.5 transition-colors hover:cursor-pointer hover:bg-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent {message.feedback ===
+                  false
+                    ? 'text-primary'
+                    : 'text-gray-400'}"
+                  onclick={() => sendFeedback(message, false)}
+                >
+                  <svg
+                    class="h-4 w-4"
+                    viewBox="0 0 24 24"
+                    fill={message.feedback === false ? "currentColor" : "none"}
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    aria-hidden="true"
+                  >
+                    <path d="M17 14V2" />
+                    <path
+                      d="M9 18.12 10 14H4.17a2 2 0 0 1-1.92-2.56l2.33-8A2 2 0 0 1 6.5 2H20a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-2.76a2 2 0 0 0-1.79 1.11L12 22a3.13 3.13 0 0 1-3-3.88Z"
+                    />
+                  </svg>
+                </button>
               </div>
             {/if}
           </div>

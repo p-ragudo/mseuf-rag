@@ -14,6 +14,7 @@ from app.services.query_pipeline.schema import (
     PipelineQueryResponse,
 )
 from app.services.query_pipeline.query_pipeline import QueryPipeline
+from backend.app.schemas.tenant import FeedbackBodyRequest
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/query", tags=["Query Pipeline"])
@@ -64,17 +65,39 @@ async def execute_query(
 
     try:
         titles, questions = _collect_titles(result)
-        db.add(
-            ResponseLog(
-                org_id=org_id,
-                latency_ms=latency_ms,
-                accessed_chunks=titles,
-                accessed_generated_questions=questions,
-            )
-        )
+        log = ResponseLog(
+                        org_id=org_id,
+                        latency_ms=latency_ms,
+                        accessed_chunks=titles,
+                        accessed_generated_questions=questions,
+                    )
+        db.add(log)
+        await db.flush()
+        new_id = log.id
         await db.commit()
+        result.response_id = new_id
     except Exception:
         await db.rollback()
         logger.exception("Failed to record response for org %s", org_id)
 
     return result
+
+@router.post(
+    "/{response_id}/feedback",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def record_feedback(
+    response_id: int,
+    feedback: FeedbackBodyRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    response_log = await db.get(ResponseLog, response_id)
+
+    if not response_log:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Response log {response_id} not found.",
+        )
+
+    response_log.satisfied = feedback.satisfied
+    await db.commit()
