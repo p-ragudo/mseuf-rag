@@ -78,13 +78,13 @@ async def execute_query(
         new_id = log.id
         await db.commit()
         result.response_id = new_id
-    except Exception:
+    except Exception as e:
         await db.rollback()
         logger.exception("Failed to record response for org %s", org_id)
 
         raise HTTPException(
             status_code=500,
-            detail="Failed to save response log; feedback is unavailable.",
+            detail="Failed to save response log; feedback is unavailable.\n error: " + str(e),
         )
 
     return result
