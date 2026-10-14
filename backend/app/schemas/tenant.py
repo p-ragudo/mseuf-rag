@@ -1,6 +1,7 @@
 from datetime import datetime, time
 from typing import Optional
 from pydantic import BaseModel, HttpUrl
+from typing import Literal
 
 from app.models.website import WebsiteScrapeStatus
 
@@ -61,3 +62,20 @@ class WebsiteScrapeSchedulesResponse(BaseModel):
 
 class FeedbackBodyRequest(BaseModel):
     satisfied: bool | None    
+
+class ChartPoint(BaseModel):
+    date: str   # start of the bucket, e.g. "2026-10-13"
+    count: int
+
+class StatsRequest(BaseModel):
+    org_id: int
+    range: Literal["last_7_days", "last_30_days", "last_90_days", "last_year", "all_time"]
+
+class StatsResponse(BaseModel):
+    inquiry_count: int
+    satisfaction_rate: float
+    average_response_time: float  # in milliseconds
+    top_10_inquiries: dict[str, int]  # Dictionary of inquiry text and their counts
+    top_10_chunks: dict[str, int]  # Dictionary of chunk text and their counts
+    top_10_chunks_access_time: dict[str, datetime]  # Dictionary of chunk text and their access times
+    chart_data: list[ChartPoint]  # List of chart points

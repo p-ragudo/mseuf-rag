@@ -4,7 +4,7 @@ Content-Type: application/json
 
 {
   "email": "test@mseuf.edu.ph",
-  "password": "testpass123",
+  "password": "test",
   "first_name": "Test",
   "last_name": "User"
 }
@@ -14,8 +14,8 @@ POST http://127.0.0.1:8000/auth/login
 Content-Type: application/json
 
 {
-  "email": "test@mseuf.edu.ph",
-  "password": "testpass123"
+  "email": "test@test.com",
+  "password": "test"
 }
 
 ### Create org
@@ -46,3 +46,15 @@ Authorization: Bearer {{token}}
 
 DELETE http://127.0.0.1:8000/orgs/2/remove-member?user_id=2
 Authorization: Bearer {{token}}
+
+### Stats
+@token = eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxIiwiZXhwIjoxNzkxOTQ1MjM2fQ.0ppgidqycjclCQT5tLRjcosbUn-5rXYZnMuYR6QkylM
+
+POST http://127.0.0.1:8000/stats
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "org_id": 1,
+  "range": "last_7_days"
+}

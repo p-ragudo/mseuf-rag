@@ -11,6 +11,7 @@ from app.routes.ingest import router as ingest_router
 from app.routes.orgs import router as orgs_router
 from app.routes.query import router as query_router
 from app.routes.websites import router as websites_router
+from app.routes.stats import router as stats_router
 from app.services.embeddings.factory import get_embedder
 from app.services.vector_db.factory import get_vector_db
 from app.utils.telegram_bot import start_telegram_bot_listener
@@ -68,6 +69,7 @@ app.include_router(orgs_router)
 app.include_router(websites_router)
 app.include_router(ingest_router)
 app.include_router(query_router)
+app.include_router(stats_router)
 
 if __name__ == "__main__":
     uvicorn.run(
