@@ -311,14 +311,13 @@
     </div>
 
     <div class="my-4 grid grid-cols-1 gap-4 lg:grid-cols-[3fr_2fr]">
-      <TrendChart
-        eyebrow="Conversation sessions"
-        title={stats ? stats.inquiry_count.toLocaleString() : "—"}
-        subtitle="Inquiries in the selected timeframe"
-        periodLabel={selectedTimeframe}
-        data={chartData}
+
+       <KnowledgeAssetsTable
+        {documents}
         {loading}
+        onViewAll={() => push("/knowledge-base")}
       />
+      
 
       <TopicsBarList
         eyebrow={topicsAreInquiries ? "QUESTION TOPICS" : "KNOWLEDGE BASE"}
@@ -333,10 +332,13 @@
       />
     </div>
 
-    <KnowledgeAssetsTable
-      {documents}
-      {loading}
-      onViewAll={() => push("/knowledge-base")}
-    />
+   <TrendChart
+        eyebrow="Conversation sessions"
+        title={stats ? stats.inquiry_count.toLocaleString() : "—"}
+        subtitle="Inquiries in the selected timeframe"
+        periodLabel={selectedTimeframe}
+        data={chartData}
+        {loading}
+      />
   </div>
 </AppLayout>
