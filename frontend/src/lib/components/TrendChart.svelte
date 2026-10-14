@@ -15,6 +15,7 @@
     periodLabel?: string;
     seriesLabel?: string;
     data: DataPoint[];
+    loading?: boolean;
   }
 
   let {
@@ -24,6 +25,7 @@
     periodLabel = "Last 7 Days",
     seriesLabel = "Inquiries",
     data,
+    loading = false,
   }: Props = $props();
 
   const width = 1200;
@@ -140,7 +142,13 @@
   </div>
 
   <div class="relative mt-4">
-    {#if count === 0}
+    {#if loading}
+      <div
+        class="aspect-[1200/420] w-full animate-pulse rounded-lg bg-gray-100"
+        aria-busy="true"
+        aria-label="Loading chart"
+      ></div>
+    {:else if count === 0}
       <div
         class="flex h-48 items-center justify-center text-sm text-gray-500"
       >

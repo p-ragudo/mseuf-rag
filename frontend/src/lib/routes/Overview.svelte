@@ -289,7 +289,7 @@
         label="Total inquiries"
         value={stats ? stats.inquiry_count.toLocaleString() : "—"}
         hint={`In ${selectedTimeframe.toLowerCase()}`}
-        loading={loading && !stats}
+        {loading}
         icon={chatIcon}
       />
 
@@ -297,7 +297,7 @@
         label="Satisfaction rate"
         value={stats ? `${stats.satisfaction_rate.toFixed(1)}%` : "—"}
         hint="Share of rated answers marked helpful"
-        loading={loading && !stats}
+        {loading}
         icon={thumbIcon}
       />
 
@@ -305,16 +305,19 @@
         label="Average response time"
         value={stats ? formatDuration(stats.average_response_time) : "—"}
         hint="Average time to answer a question"
-        loading={loading && !stats}
+        {loading}
         icon={clockIcon}
       />
     </div>
 
     <div class="my-4 grid grid-cols-1 gap-4 lg:grid-cols-[3fr_2fr]">
-      
-      <KnowledgeAssetsTable
-        {documents}
-        onViewAll={() => push("/knowledge-base")}
+      <TrendChart
+        eyebrow="Conversation sessions"
+        title={stats ? stats.inquiry_count.toLocaleString() : "—"}
+        subtitle="Inquiries in the selected timeframe"
+        periodLabel={selectedTimeframe}
+        data={chartData}
+        {loading}
       />
 
       <TopicsBarList
@@ -326,16 +329,14 @@
           ? "Top questions across student conversations"
           : "Documents used most often to answer questions"}
         items={topicItems}
+        {loading}
       />
     </div>
 
-    <TrendChart
-        eyebrow="Conversation sessions"
-        title={stats ? stats.inquiry_count.toLocaleString() : "—"}
-        subtitle="Inquiries in the selected timeframe"
-        periodLabel={selectedTimeframe}
-        data={chartData}
-      />
-    
+    <KnowledgeAssetsTable
+      {documents}
+      {loading}
+      onViewAll={() => push("/knowledge-base")}
+    />
   </div>
 </AppLayout>

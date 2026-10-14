@@ -15,6 +15,7 @@
     viewAllLabel?: string;
     onViewAll?: () => void;
     documents: DocumentAsset[];
+    loading?: boolean;
   }
 
   let {
@@ -24,11 +25,14 @@
     viewAllLabel = "View library",
     onViewAll,
     documents,
+    loading = false,
   }: Props = $props();
 
   function formatNumber(n: number) {
     return n.toLocaleString();
   }
+
+  const skeletonRows = [0, 1, 2, 3, 4];
 </script>
 
 <div class="rounded-xl border border-outline bg-white shadow-sm">
@@ -72,7 +76,7 @@
     {/if}
   </div>
 
-  <table class="w-full border-collapse">
+  <table class="w-full border-collapse" aria-busy={loading}>
     <thead>
       <tr class="border-y border-outline bg-gray-50/60">
         <th
@@ -90,57 +94,80 @@
       </tr>
     </thead>
     <tbody>
-      {#each documents as doc (doc.title)}
-        <tr class="border-b border-outline last:border-b-0">
-          <td class="px-6 py-4">
-            <div class="flex flex-row items-center gap-3">
-              <svg
-                width="18"
-                height="18"
-                viewBox="0 0 18 18"
-                fill="none"
-                xmlns="http://www.w3.org/2000/svg"
-                class="shrink-0"
-              >
-                <path
-                  d="M10.5 1.5H4.5C4.10218 1.5 3.72064 1.65804 3.43934 1.93934C3.15804 2.22064 3 2.60218 3 3V15C3 15.3978 3.15804 15.7794 3.43934 16.0607C3.72064 16.342 4.10218 16.5 4.5 16.5H13.5C13.8978 16.5 14.2794 16.342 14.5607 16.0607C14.842 15.7794 15 15.3978 15 15V6L10.5 1.5Z"
-                  stroke="#7A1F2B"
-                  stroke-width="1.25"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                />
-                <path
-                  d="M10.5 1.5V6H15"
-                  stroke="#7A1F2B"
-                  stroke-width="1.25"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                />
-              </svg>
-              <span class="text-sm font-semibold">{doc.title}</span>
-            </div>
-          </td>
-          <!-- <td class="px-6 py-4">
-            <span
-              class="inline-block rounded-md border border-outline px-3 py-1 text-xs text-gray-500"
-              >{doc.source}</span
-            >
-          </td>
-          <td class="px-6 py-4 text-right text-sm">{doc.chunks}</td> -->
-          <td class="px-6 py-4 text-right text-sm"
-            >{formatNumber(doc.accessed)}</td
-          >
-          <td class="px-6 py-4 text-right text-sm text-gray-500"
-            >{doc.lastAccessed}</td
-          >
-        </tr>
+      {#if loading}
+        {#each skeletonRows as row}
+          <tr class="border-b border-outline last:border-b-0">
+            <td class="px-6 py-4">
+              <div class="flex animate-pulse flex-row items-center gap-3">
+                <span class="h-[18px] w-[18px] shrink-0 rounded bg-gray-100"
+                ></span>
+                <span
+                  class="h-4 rounded bg-gray-100"
+                  style="width: {70 - row * 8}%"
+                ></span>
+              </div>
+            </td>
+            <td class="px-6 py-4">
+              <div class="ml-auto h-4 w-10 animate-pulse rounded bg-gray-100"></div>
+            </td>
+            <td class="px-6 py-4">
+              <div class="ml-auto h-4 w-24 animate-pulse rounded bg-gray-100"></div>
+            </td>
+          </tr>
+        {/each}
       {:else}
-        <tr>
-          <td colspan="5" class="px-6 py-8 text-center text-sm text-gray-500">
-            No documents yet
-          </td>
-        </tr>
-      {/each}
+        {#each documents as doc (doc.title)}
+          <tr class="border-b border-outline last:border-b-0">
+            <td class="px-6 py-4">
+              <div class="flex flex-row items-center gap-3">
+                <svg
+                  width="18"
+                  height="18"
+                  viewBox="0 0 18 18"
+                  fill="none"
+                  xmlns="http://www.w3.org/2000/svg"
+                  class="shrink-0"
+                >
+                  <path
+                    d="M10.5 1.5H4.5C4.10218 1.5 3.72064 1.65804 3.43934 1.93934C3.15804 2.22064 3 2.60218 3 3V15C3 15.3978 3.15804 15.7794 3.43934 16.0607C3.72064 16.342 4.10218 16.5 4.5 16.5H13.5C13.8978 16.5 14.2794 16.342 14.5607 16.0607C14.842 15.7794 15 15.3978 15 15V6L10.5 1.5Z"
+                    stroke="#7A1F2B"
+                    stroke-width="1.25"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                  />
+                  <path
+                    d="M10.5 1.5V6H15"
+                    stroke="#7A1F2B"
+                    stroke-width="1.25"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                  />
+                </svg>
+                <span class="text-sm font-semibold">{doc.title}</span>
+              </div>
+            </td>
+            <!-- <td class="px-6 py-4">
+              <span
+                class="inline-block rounded-md border border-outline px-3 py-1 text-xs text-gray-500"
+                >{doc.source}</span
+              >
+            </td>
+            <td class="px-6 py-4 text-right text-sm">{doc.chunks}</td> -->
+            <td class="px-6 py-4 text-right text-sm"
+              >{formatNumber(doc.accessed)}</td
+            >
+            <td class="px-6 py-4 text-right text-sm text-gray-500"
+              >{doc.lastAccessed}</td
+            >
+          </tr>
+        {:else}
+          <tr>
+            <td colspan="3" class="px-6 py-8 text-center text-sm text-gray-500">
+              No documents yet
+            </td>
+          </tr>
+        {/each}
+      {/if}
     </tbody>
   </table>
 </div>
