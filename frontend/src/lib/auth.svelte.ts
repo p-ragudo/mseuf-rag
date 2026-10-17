@@ -98,13 +98,13 @@ export async function login(payload: LoginPayload): Promise<boolean> {
     if (data.user) auth.user = data.user;
     else await fetchMe();
 
+    replace("/overview");
     return true;
   } catch {
     auth.error = "Cannot reach the server. Is the backend running?";
     return false;
   } finally {
     auth.loading = false;
-    replace("/overview");
   }
 }
 
@@ -146,14 +146,16 @@ export async function authFetch(
 ): Promise<Response> {
   const headers = new Headers(init.headers);
   if (auth.token) headers.set("Authorization", `Bearer ${auth.token}`);
-  if (init.body && !headers.has("Content-Type"))
+  // Don't set a content type for FormData: the browser adds multipart/form-data
+  // together with the boundary, and a manual value would break the upload.
+  if (init.body && !(init.body instanceof FormData) && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
+  }
 
   const res = await fetch(`${API_URL}${path}`, { ...init, headers });
   if (res.status === 401) logout();
   return res;
 }
-
 /** Loads the current user. Assumes GET /auth/me exists; remove if it doesn't. */
 export async function fetchMe(): Promise<void> {
   if (!auth.token) return;

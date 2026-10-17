@@ -2,6 +2,7 @@
   import { tick } from "svelte";
   import { marked } from "marked";
   import DOMPurify from "dompurify";
+  import { DEFAULT_COLOR, contrastColor, fetchBranding } from "../branding.svelte";
 
   type Source = {
     title?: string;
@@ -48,6 +49,21 @@
   let listEl = $state<HTMLDivElement>();
   let inputEl = $state<HTMLTextAreaElement>();
 
+  // Per-organization look, loaded from the backend (defaults until it arrives)
+  let color = $state(DEFAULT_COLOR);
+  let mascotUrl = $state<string | null>(null);
+
+  async function loadBranding(org: string) {
+    try {
+      const branding = await fetchBranding(org);
+      if (org !== orgId) return; // organization changed while loading
+      color = branding.color;
+      mascotUrl = branding.mascot_url;
+    } catch {
+      // keep the defaults; the chat works without custom branding
+    }
+  }
+
   // Reset the conversation whenever the organization changes.
   $effect(() => {
     if (!orgId) return;
@@ -56,6 +72,10 @@
 
     messages = [];
     sessionId = getSessionId(orgId);
+
+    color = DEFAULT_COLOR;
+    mascotUrl = null;
+    loadBranding(orgId);
   });
 
   function getSessionId(org: string): string {
@@ -289,26 +309,64 @@
   }
 </script>
 
-<div class="flex h-screen flex-col bg-[#F5F8FB]">
+{#snippet avatar(size: "sm" | "md" | "lg")}
+  <div
+    class="flex shrink-0 items-center justify-center overflow-hidden rounded-full bg-[var(--brand-tint)] {size ===
+    'lg'
+      ? 'h-12 w-12'
+      : size === 'md'
+        ? 'h-10 w-10'
+        : 'h-8 w-8'}"
+  >
+    {#if mascotUrl}
+      <img
+        src={mascotUrl}
+        alt=""
+        class="object-contain {size === 'lg'
+          ? 'h-10 w-10'
+          : size === 'md'
+            ? 'h-8 w-8'
+            : 'h-7 w-7'}"
+      />
+    {:else}
+      <span
+        class="font-bold text-[color:var(--brand)] {size === 'lg'
+          ? 'text-sm'
+          : size === 'md'
+            ? 'text-xs'
+            : 'text-[10px]'}"
+      >
+        AI
+      </span>
+    {/if}
+  </div>
+{/snippet}
+
+<div
+  class="flex h-screen flex-col bg-[#F5F8FB]"
+  style="--brand: {color}; --brand-tint: {color}18; --brand-contrast: {contrastColor(color)};"
+>
   <!-- Header -->
   <header
     class="flex flex-row items-center justify-between gap-4 border-b-2 border-b-outline bg-white px-4 py-3"
   >
-    <div class="flex flex-col justify-center">
-      <h2 class="text-xs font-bold uppercase tracking-wider text-primary">
-        Admissions Intelligence Hub
-      </h2>
+    <div class="flex flex-row items-center gap-3">
+      {@render avatar("md")}
 
-      <h1 class="text-xl font-semibold">Chat Assistant</h1>
+      <div class="flex flex-col justify-center">
+        <h2
+          class="text-xs font-bold uppercase tracking-wider text-[color:var(--brand)]"
+        >
+          Admissions Intelligence Hub
+        </h2>
 
-      <span class="text-xs text-gray-500">
-        Organization ID: {orgId ?? "Unknown"}
-      </span>
+        <h1 class="text-xl font-semibold">Chat Assistant</h1>
+      </div>
     </div>
 
     <button
       type="button"
-      class="flex flex-row items-center gap-2 rounded-lg border border-outline bg-[#F5F8FB] px-3 py-2 text-sm font-semibold shadow-sm transition-colors duration-200 hover:cursor-pointer hover:bg-accent hover:text-primary"
+      class="flex flex-row items-center gap-2 rounded-lg border border-outline bg-[#F5F8FB] px-3 py-2 text-sm font-semibold shadow-sm transition-colors duration-200 hover:cursor-pointer hover:bg-[var(--brand-tint)] hover:text-[color:var(--brand)]"
       onclick={newChat}
     >
       New chat
@@ -320,11 +378,7 @@
     <div class="mx-auto flex max-w-3xl flex-col gap-4">
       {#if messages.length === 0}
         <div class="mt-16 flex flex-col items-center text-center">
-          <div
-            class="flex h-12 w-12 items-center justify-center rounded-full bg-accent text-sm font-bold text-primary"
-          >
-            AI
-          </div>
+          {@render avatar("lg")}
 
           <h2 class="mt-4 text-2xl font-bold">How can I help you today?</h2>
 
@@ -341,17 +395,13 @@
             : 'justify-start'}"
         >
           {#if message.role === "assistant"}
-            <div
-              class="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-accent text-xs font-bold text-primary"
-            >
-              AI
-            </div>
+            {@render avatar("sm")}
           {/if}
 
           <div
             class="max-w-[85%] rounded-xl px-4 py-3 text-sm leading-relaxed
               {message.role === 'user'
-              ? 'bg-primary text-white'
+              ? 'bg-[var(--brand)] text-[color:var(--brand-contrast)]'
               : message.error
                 ? 'border border-red-200 bg-red-50 text-red-700'
                 : 'border border-outline bg-white text-gray-800 shadow-sm'}"
@@ -369,7 +419,7 @@
             {#if message.sources?.length}
               <div class="mt-3 border-t border-outline pt-2">
                 <p
-                  class="mb-1.5 text-xs font-bold uppercase tracking-wider text-primary"
+                  class="mb-1.5 text-xs font-bold uppercase tracking-wider text-[color:var(--brand)]"
                 >
                   Sources
                 </p>
@@ -386,7 +436,7 @@
                           href={source.url}
                           target="_blank"
                           rel="noopener noreferrer"
-                          class="min-w-0 break-words font-semibold text-primary hover:underline"
+                          class="min-w-0 break-words font-semibold text-[color:var(--brand)] hover:underline"
                         >
                           {source.title ?? source.url}
                         </a>
@@ -413,9 +463,9 @@
                   title={message.responseId == null
                     ? "Feedback unavailable for this answer"
                     : "Helpful"}
-                  class="rounded-md p-1.5 transition-colors hover:cursor-pointer hover:bg-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent {message.feedback ===
+                  class="rounded-md p-1.5 transition-colors hover:cursor-pointer hover:bg-[var(--brand-tint)] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent {message.feedback ===
                   true
-                    ? 'text-primary'
+                    ? 'text-[color:var(--brand)]'
                     : 'text-gray-400'}"
                   onclick={() => sendFeedback(message, true)}
                 >
@@ -444,9 +494,9 @@
                   title={message.responseId == null
                     ? "Feedback unavailable for this answer"
                     : "Not helpful"}
-                  class="rounded-md p-1.5 transition-colors hover:cursor-pointer hover:bg-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent {message.feedback ===
+                  class="rounded-md p-1.5 transition-colors hover:cursor-pointer hover:bg-[var(--brand-tint)] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent {message.feedback ===
                   false
-                    ? 'text-primary'
+                    ? 'text-[color:var(--brand)]'
                     : 'text-gray-400'}"
                   onclick={() => sendFeedback(message, false)}
                 >
@@ -474,25 +524,21 @@
 
       {#if loading}
         <div class="flex flex-row items-end gap-2">
-          <div
-            class="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-accent text-xs font-bold text-primary"
-          >
-            AI
-          </div>
+          {@render avatar("sm")}
 
           <div
             class="flex gap-1 rounded-xl border border-outline bg-white px-4 py-3 shadow-sm"
           >
             <span
-              class="h-2 w-2 animate-bounce rounded-full bg-primary opacity-60"
+              class="h-2 w-2 animate-bounce rounded-full bg-[var(--brand)] opacity-60"
             ></span>
 
             <span
-              class="h-2 w-2 animate-bounce rounded-full bg-primary opacity-60 [animation-delay:150ms]"
+              class="h-2 w-2 animate-bounce rounded-full bg-[var(--brand)] opacity-60 [animation-delay:150ms]"
             ></span>
 
             <span
-              class="h-2 w-2 animate-bounce rounded-full bg-primary opacity-60 [animation-delay:300ms]"
+              class="h-2 w-2 animate-bounce rounded-full bg-[var(--brand)] opacity-60 [animation-delay:300ms]"
             ></span>
           </div>
         </div>
@@ -510,14 +556,14 @@
         onkeydown={onKeydown}
         rows="1"
         placeholder="Type your question..."
-        class="flex-1 resize-none rounded-md border border-outline px-4 py-2.5 text-sm outline-none focus:border-primary"
+        class="flex-1 resize-none rounded-md border border-outline px-4 py-2.5 text-sm outline-none focus:border-[color:var(--brand)]"
       ></textarea>
 
       <button
         type="button"
         onclick={send}
         disabled={loading || !input.trim() || !orgId}
-        class="rounded-md bg-primary px-4 py-2.5 text-sm font-semibold text-white transition-opacity duration-200 hover:cursor-pointer disabled:cursor-not-allowed disabled:opacity-60"
+        class="rounded-md bg-[var(--brand)] px-4 py-2.5 text-sm font-semibold text-[color:var(--brand-contrast)] transition-opacity duration-200 hover:cursor-pointer disabled:cursor-not-allowed disabled:opacity-60"
       >
         Send
       </button>
@@ -558,7 +604,7 @@
     margin: 1rem 0 0.5rem;
     font-size: 1rem;
     font-weight: 700;
-    color: #7a1f2b;
+    color: var(--brand, #7a1f2b);
   }
 
   :global(.markdown-content ul) {
@@ -608,7 +654,7 @@
 
   :global(.markdown-content blockquote) {
     margin: 0.75rem 0;
-    border-left: 3px solid #7a1f2b;
+    border-left: 3px solid var(--brand, #7a1f2b);
     padding-left: 0.75rem;
     color: #59616e;
   }
@@ -620,7 +666,7 @@
   }
 
   :global(.markdown-content a) {
-    color: #7a1f2b;
+    color: var(--brand, #7a1f2b);
     font-weight: 600;
     text-decoration: underline;
   }

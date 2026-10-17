@@ -1,9 +1,62 @@
 <script lang="ts">
+  import { onMount } from "svelte";
   import AppLayout from "../components/AppLayout.svelte";
   import WhiteCard from "../components/WhiteCard.svelte";
+  import {
+    DEFAULT_COLOR,
+    MAX_MASCOT_BYTES,
+    contrastColor,
+    fetchBranding,
+    saveBranding,
+    type Branding,
+  } from "../branding.svelte";
 
-  let mascotColor = $state("#7A1F2B");
+  // TODO: replace with the logged-in user's organization id
+  const orgId = 1;
+
+  let mascotColor = $state(DEFAULT_COLOR);
   let mascotPreview = $state<string | null>(null);
+
+  // What is saved on the server right now, used to detect unsaved changes
+  let savedColor = $state(DEFAULT_COLOR);
+  let savedMascotUrl = $state<string | null>(null);
+
+  let pendingFile = $state<File | null>(null); // chosen but not uploaded yet
+  let removeMascot = $state(false);
+
+  let loading = $state(true);
+  let saving = $state(false);
+  let errorMessage = $state("");
+  let successMessage = $state("");
+
+  let dirty = $derived(
+    mascotColor.toLowerCase() !== savedColor.toLowerCase() ||
+      pendingFile !== null ||
+      removeMascot,
+  );
+
+  function applySaved(branding: Branding) {
+    savedColor = branding.color;
+    savedMascotUrl = branding.mascot_url;
+    mascotColor = branding.color;
+    mascotPreview = branding.mascot_url;
+    pendingFile = null;
+    removeMascot = false;
+  }
+
+  async function load() {
+    loading = true;
+    errorMessage = "";
+    try {
+      applySaved(await fetchBranding(orgId));
+    } catch {
+      errorMessage = "Could not load your saved settings.";
+    } finally {
+      loading = false;
+    }
+  }
+
+  onMount(load);
 
   function handleMascotUpload(event: Event) {
     const input = event.currentTarget as HTMLInputElement;
@@ -11,7 +64,17 @@
 
     if (!file) return;
 
+    errorMessage = "";
+    successMessage = "";
+
     if (file.type !== "image/png") {
+      errorMessage = "The mascot must be a PNG image.";
+      input.value = "";
+      return;
+    }
+
+    if (file.size > MAX_MASCOT_BYTES) {
+      errorMessage = "The mascot image must be 512 KB or smaller.";
       input.value = "";
       return;
     }
@@ -20,9 +83,52 @@
 
     reader.onload = () => {
       mascotPreview = reader.result as string;
+      pendingFile = file;
+      removeMascot = false;
     };
 
     reader.readAsDataURL(file);
+    input.value = ""; // lets the same file be picked again later
+  }
+
+  function handleRemoveMascot() {
+    mascotPreview = null;
+    pendingFile = null;
+    removeMascot = savedMascotUrl !== null;
+    successMessage = "";
+  }
+
+  function discard() {
+    mascotColor = savedColor;
+    mascotPreview = savedMascotUrl;
+    pendingFile = null;
+    removeMascot = false;
+    errorMessage = "";
+    successMessage = "";
+  }
+
+  async function save() {
+    if (!dirty || saving) return;
+
+    saving = true;
+    errorMessage = "";
+    successMessage = "";
+
+    try {
+      applySaved(
+        await saveBranding(orgId, {
+          color: mascotColor,
+          mascot: pendingFile,
+          removeMascot,
+        }),
+      );
+      successMessage = "Chat customization saved.";
+    } catch (err) {
+      errorMessage =
+        err instanceof Error ? err.message : "Could not save. Please try again.";
+    } finally {
+      saving = false;
+    }
   }
 </script>
 
@@ -72,6 +178,8 @@
                 id="mascot-color"
                 type="color"
                 bind:value={mascotColor}
+                oninput={() => (successMessage = "")}
+                disabled={loading}
                 class="h-10 w-12 cursor-pointer rounded-md border-0 bg-transparent p-0"
               />
 
@@ -141,9 +249,54 @@
               id="mascot-upload"
               type="file"
               accept="image/png"
+              disabled={loading}
               class="hidden"
               onchange={handleMascotUpload}
             />
+          </div>
+
+          <!-- Actions -->
+          <div class="mt-6 flex flex-col gap-3 border-t border-outline pt-4">
+            {#if errorMessage}
+              <p role="alert" class="text-sm text-red-600">{errorMessage}</p>
+            {/if}
+
+            {#if successMessage}
+              <p role="status" class="text-sm font-semibold text-green-700">
+                {successMessage}
+              </p>
+            {/if}
+
+            <div class="flex flex-row flex-wrap items-center gap-2">
+              <button
+                type="button"
+                class="rounded-md bg-primary px-4 py-2.5 text-sm font-semibold text-white transition-opacity duration-200 hover:cursor-pointer disabled:cursor-not-allowed disabled:opacity-60"
+                onclick={save}
+                disabled={!dirty || saving || loading}
+              >
+                {saving ? "Saving..." : "Save changes"}
+              </button>
+
+              <button
+                type="button"
+                class="rounded-md border border-outline bg-[#F5F8FB] px-4 py-2.5 text-sm font-semibold transition-opacity duration-200 hover:cursor-pointer disabled:cursor-not-allowed disabled:opacity-60"
+                onclick={discard}
+                disabled={!dirty || saving}
+              >
+                Discard
+              </button>
+
+              {#if mascotPreview}
+                <button
+                  type="button"
+                  class="ml-auto text-sm font-semibold text-red-600 hover:cursor-pointer hover:underline disabled:cursor-not-allowed disabled:opacity-60"
+                  onclick={handleRemoveMascot}
+                  disabled={saving}
+                >
+                  Remove mascot
+                </button>
+              {/if}
+            </div>
           </div>
         </WhiteCard>
 
@@ -306,8 +459,8 @@
                 <!-- User message -->
                 <div class="flex flex-row items-end justify-end gap-2">
                   <div
-                    class="max-w-[85%] rounded-xl px-4 py-2.5 text-sm leading-relaxed text-white"
-                    style={`background-color: ${mascotColor};`}
+                    class="max-w-[85%] rounded-xl px-4 py-2.5 text-sm leading-relaxed "
+                    style={`background-color: ${mascotColor}; color: ${contrastColor(mascotColor)};`}
                   >
                     What programs does the university offer?
                   </div>
@@ -357,8 +510,8 @@
 
                 <button
                   type="button"
-                  class="rounded-md px-4 py-2.5 text-sm font-semibold text-white"
-                  style={`background-color: ${mascotColor};`}
+                  class="rounded-md px-4 py-2.5 text-sm font-semibold "
+                  style={`background-color: ${mascotColor}; color: ${contrastColor(mascotColor)};`}
                 >
                   Send
                 </button>
