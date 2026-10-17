@@ -3,8 +3,6 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 
 from app.core.config import settings
-from app.models.org import Org
-from app.models.website import Website
 from app.models.scraped_page import ScrapedPage, PageProcessStatus
 from app.models.chunk import Chunk
 from app.services.ingest_pipeline.chunk import process_and_chunk_pages
@@ -14,7 +12,6 @@ from app.services.ingest_pipeline.orchestrator import (
     purge_missing_pages,
 )
 
-# Text that cleanly clears min_chars (250) and boilerplate filters
 SUBSTANTIVE_MARKDOWN_V1 = """
 # University Admission Procedures
 
@@ -47,26 +44,25 @@ async def test_content_hashing_and_change_detection(db_session):
     )
     raw_markdown = SUBSTANTIVE_MARKDOWN_V1 + "\nLast updated: 10:30 am."
     
-    # First scrape application
     changed = _apply_scrape_result(page, raw_markdown)
     assert changed is True
     assert page.content_hash is not None
     assert page.status == PageProcessStatus.COMPLETED
 
-    # Scrape with dynamic clock change only -> must not trigger change
     transient_markdown = SUBSTANTIVE_MARKDOWN_V1 + "\nLast updated: 11:45 pm."
     changed_again = _apply_scrape_result(page, transient_markdown)
     assert changed_again is False
 
-    # Scrape with actual substantive content change
     changed_third = _apply_scrape_result(page, SUBSTANTIVE_MARKDOWN_V2)
     assert changed_third is True
 
 @pytest.mark.asyncio
 async def test_rechunking_atomic_swap_and_cleanup_flag(db_session):
+    # Unique web_id=101 to avoid cross-test contamination
+    isolated_web_id = 101
     page = ScrapedPage(
         org_id=1,
-        web_id=1,
+        web_id=isolated_web_id,
         url="https://university.edu/steps",
         status=PageProcessStatus.COMPLETED,
         markdown_content=SUBSTANTIVE_MARKDOWN_V1,
@@ -75,21 +71,18 @@ async def test_rechunking_atomic_swap_and_cleanup_flag(db_session):
     await db_session.commit()
     await db_session.refresh(page)
 
-    # Initial chunking
-    created_initial = await process_and_chunk_pages(web_id=1, org_id=1)
+    created_initial = await process_and_chunk_pages(web_id=isolated_web_id, org_id=1)
     assert created_initial > 0
     await db_session.refresh(page)
     assert page.qdrant_cleanup_pending is False
 
-    # Simulate updated markdown content requiring re-chunk
     page.markdown_content = SUBSTANTIVE_MARKDOWN_V2
     page.chunked_at = None
     await db_session.commit()
 
-    created_updated = await process_and_chunk_pages(web_id=1, org_id=1)
+    created_updated = await process_and_chunk_pages(web_id=isolated_web_id, org_id=1)
     assert created_updated > 0
     await db_session.refresh(page)
-    # Because old chunks previously existed, qdrant_cleanup_pending must be True
     assert page.qdrant_cleanup_pending is True
 
 @pytest.mark.asyncio
@@ -101,10 +94,12 @@ async def test_reconcile_stale_points_purges_dead_chunk_vectors(db_session, in_m
     collection_name = settings.resolved_collection_name
     await qdrant_db.create_collection_if_not_exists(collection_name, dense_vector_size=4)
 
+    # Isolated web_id=999
+    isolated_web_id = 999
     page = ScrapedPage(
         org_id=1,
-        web_id=1,
-        url="https://university.edu/page-to-clean",
+        web_id=isolated_web_id,
+        url="https://university.edu/page-to-clean-isolated",
         status=PageProcessStatus.COMPLETED,
         qdrant_cleanup_pending=True,
     )
@@ -126,7 +121,7 @@ async def test_reconcile_stale_points_purges_dead_chunk_vectors(db_session, in_m
 
     monkeypatch.setattr(qdrant_db, "delete_points", mock_delete_points)
 
-    swept = await reconcile_stale_points(org_id=1, web_id=1)
+    swept = await reconcile_stale_points(org_id=1, web_id=isolated_web_id)
     assert swept == 1
     assert len(deleted_filters) == 1
     assert deleted_filters[0]["filters"] == {"group_id": "1", "page_id": page.id}
@@ -138,15 +133,31 @@ async def test_reconcile_stale_points_purges_dead_chunk_vectors(db_session, in_m
 @pytest.mark.asyncio
 async def test_purge_missing_pages_safety_guard(db_session, monkeypatch):
     run_started = datetime.now(timezone.utc)
+    # Isolated web_id=888
+    isolated_web_id = 888
     pages = [
-        ScrapedPage(org_id=1, web_id=2, url=f"https://site.com/p{i}", status=PageProcessStatus.COMPLETED)
+        ScrapedPage(
+            org_id=1,
+            web_id=isolated_web_id,
+            url=f"https://site.com/p{i}",
+            status=PageProcessStatus.COMPLETED,
+        )
         for i in range(4)
     ]
     db_session.add_all(pages)
     await db_session.commit()
 
-    purged = await purge_missing_pages(org_id=1, web_id=2, run_started_at=run_started, discovered_count=1)
+    purged = await purge_missing_pages(
+        org_id=1,
+        web_id=isolated_web_id,
+        run_started_at=run_started,
+        discovered_count=1,
+    )
     assert purged == 0
 
-    count = (await db_session.execute(select(ScrapedPage).where(ScrapedPage.web_id == 2))).scalars().all()
+    count = (
+        await db_session.execute(
+            select(ScrapedPage).where(ScrapedPage.web_id == isolated_web_id)
+        )
+    ).scalars().all()
     assert len(count) == 4
