@@ -1,3 +1,4 @@
+# app/routes/query.py
 import logging
 import time
 from functools import lru_cache
@@ -14,6 +15,11 @@ from app.services.query_pipeline.schema import (
     PipelineQueryResponse,
 )
 from app.services.query_pipeline.query_pipeline import QueryPipeline
+from app.services.query_pipeline.session_context import (
+    load_history,
+    purge_expired,
+    save_turns,
+)
 from app.schemas.tenant import FeedbackBodyRequest
 
 logger = logging.getLogger(__name__)
@@ -53,10 +59,14 @@ async def execute_query(
             detail=f"Organization {org_id} not found.",
         )
 
+    # Earlier, unexpired turns of this chat session (empty for the first message)
+    history = await load_history(db, org_id, body.session_id)
+
     pipeline_req = PipelineQueryRequest(
         org_id=org_id,
         query=body.query,
         session_id=body.session_id,
+        history=history,
     )
 
     started = time.perf_counter()
@@ -64,16 +74,22 @@ async def execute_query(
     latency_ms = int((time.perf_counter() - started) * 1000)
 
     titles, questions = _collect_titles(result)
-    
+
     try:
         log = ResponseLog(
-                    org_id=org_id,
-                    latency_ms=latency_ms,
-                    accessed_chunks=titles,
-                    accessed_generated_questions=questions,
-                    satisfied=None,
-                )
+            org_id=org_id,
+            latency_ms=latency_ms,
+            accessed_chunks=titles,
+            accessed_generated_questions=questions,
+            satisfied=None,
+        )
         db.add(log)
+
+        # Remember this turn for the next question. "No result" answers are
+        # skipped so they don't skew what a follow-up is taken to refer to.
+        if result.source != "fallback":
+            save_turns(db, org_id, body.session_id, body.query, result.answer)
+
         await db.flush()
         new_id = log.id
         await db.commit()
@@ -87,7 +103,11 @@ async def execute_query(
             detail="Failed to save response log; feedback is unavailable.\n error: " + str(e),
         )
 
+    # Housekeeping: delete messages past their expiry (throttled, never raises)
+    await purge_expired(db)
+
     return result
+
 
 @router.post(
     "/{response_id}/feedback",

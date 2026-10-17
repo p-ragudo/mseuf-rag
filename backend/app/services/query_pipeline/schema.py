@@ -2,6 +2,7 @@ from typing import List, Optional
 from pydantic import BaseModel, Field
 
 from app.services.llm_qa.schema import RetrievedContextItem
+from app.schemas.tenant import ChatTurn
 
 
 class QueryBodyRequest(BaseModel):
@@ -17,6 +18,8 @@ class PipelineQueryRequest(BaseModel):
     session_id: Optional[str] = Field(None, description="Optional chat session identifier")
     top_k: Optional[int] = Field(None, description="Internal top-k override, defaults to server configuration")
 
+    """History of earlier turns in this chat session, oldest first."""
+    history: list[ChatTurn] = Field(default_factory=list)
 
 class SupersededInfo(BaseModel):
     """Telemetry: a retrieved document removed because a fresher near-duplicate exists."""

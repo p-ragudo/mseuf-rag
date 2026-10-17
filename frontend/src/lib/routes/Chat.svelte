@@ -96,7 +96,7 @@
     console.log("Current organization ID:", orgId);
 
     messages = [];
-    sessionId = getSessionId(orgId);
+    sessionId = crypto.randomUUID();
 
     orgStatus = "loading";
     color = DEFAULT_COLOR;
@@ -104,35 +104,12 @@
     loadBranding(orgId);
   });
 
-  function getSessionId(org: string): string {
-    const key = `chat-session:${org}`;
-
-    try {
-      const existing = localStorage.getItem(key);
-
-      if (existing) {
-        return existing;
-      }
-
-      const created = crypto.randomUUID();
-
-      localStorage.setItem(key, created);
-
-      return created;
-    } catch {
-      return crypto.randomUUID();
-    }
-  }
-
   function newChat() {
     if (!orgId) return;
 
-    try {
-      localStorage.removeItem(`chat-session:${orgId}`);
-    } catch {}
-
+    // A new session id starts a new conversation on the backend too
     messages = [];
-    sessionId = getSessionId(orgId);
+    sessionId = crypto.randomUUID();
 
     inputEl?.focus();
   }

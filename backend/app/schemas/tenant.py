@@ -79,3 +79,7 @@ class StatsResponse(BaseModel):
     top_10_chunks: dict[str, int]  # Dictionary of chunk text and their counts
     top_10_chunks_access_time: dict[str, datetime]  # Dictionary of chunk text and their access times
     chart_data: list[ChartPoint]  # List of chart points
+
+class ChatTurn(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str
