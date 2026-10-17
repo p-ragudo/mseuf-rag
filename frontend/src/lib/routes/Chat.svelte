@@ -2,7 +2,13 @@
   import { tick } from "svelte";
   import { marked } from "marked";
   import DOMPurify from "dompurify";
-  import { DEFAULT_COLOR, contrastColor, fetchBranding } from "../branding.svelte";
+  import {
+    DEFAULT_COLOR,
+    HttpError,
+    contrastColor,
+    fetchBranding,
+  } from "../branding.svelte";
+  import NotFound from "./NotFound.svelte";
 
   type Source = {
     title?: string;
@@ -49,9 +55,21 @@
   let listEl = $state<HTMLDivElement>();
   let inputEl = $state<HTMLTextAreaElement>();
 
+  // "loading" until we know whether this organization exists
+  let orgStatus = $state<"loading" | "ready" | "notfound">("loading");
+
   // Per-organization look, loaded from the backend (defaults until it arrives)
   let color = $state(DEFAULT_COLOR);
   let mascotUrl = $state<string | null>(null);
+
+  // A missing organization comes back as 404 "Organization ... not found" (or 422
+  // when the id isn't a number). A bare 404 "Not Found" means the route itself
+  // doesn't exist, which must not hide the chat.
+  function isOrgNotFound(error: unknown, allow422 = false): boolean {
+    if (!(error instanceof HttpError)) return false;
+    if (allow422 && error.status === 422) return true;
+    return error.status === 404 && /organi[sz]ation/i.test(error.message);
+  }
 
   async function loadBranding(org: string) {
     try {
@@ -59,20 +77,28 @@
       if (org !== orgId) return; // organization changed while loading
       color = branding.color;
       mascotUrl = branding.mascot_url;
-    } catch {
-      // keep the defaults; the chat works without custom branding
+      orgStatus = "ready";
+    } catch (error) {
+      if (org !== orgId) return;
+      // Unknown organization -> NotFound. Any other failure (backend down,
+      // branding endpoint not deployed yet) keeps the chat usable with defaults.
+      orgStatus = isOrgNotFound(error, true) ? "notfound" : "ready";
     }
   }
 
   // Reset the conversation whenever the organization changes.
   $effect(() => {
-    if (!orgId) return;
+    if (!orgId) {
+      orgStatus = "notfound";
+      return;
+    }
 
     console.log("Current organization ID:", orgId);
 
     messages = [];
     sessionId = getSessionId(orgId);
 
+    orgStatus = "loading";
     color = DEFAULT_COLOR;
     mascotUrl = null;
     loadBranding(orgId);
@@ -265,7 +291,7 @@
           // Response wasn't JSON.
         }
 
-        throw new Error(errorMessage);
+        throw new HttpError(response.status, errorMessage);
       }
 
       const data: QueryResponse = await response.json();
@@ -284,6 +310,12 @@
     } catch (error) {
       // Don't update the old chat if the user changed organizations.
       if (currentOrg !== orgId) return;
+
+      // The organization doesn't exist: show the NotFound page, not an error bubble
+      if (isOrgNotFound(error)) {
+        orgStatus = "notfound";
+        return;
+      }
 
       messages.push({
         id: crypto.randomUUID(),
@@ -342,6 +374,21 @@
   </div>
 {/snippet}
 
+{#if orgStatus === "notfound"}
+  <NotFound
+    title="Chat not found"
+    message="This chat link isn't valid. Please check the address, or contact the organization that shared it with you."
+    showHomeButton={false}
+  />
+{:else if orgStatus === "loading"}
+  <div
+    class="flex h-screen items-center justify-center bg-[#F5F8FB]"
+    aria-busy="true"
+    aria-label="Loading chat"
+  >
+    <div class="h-12 w-12 animate-pulse rounded-full bg-gray-200"></div>
+  </div>
+{:else}
 <div
   class="flex h-screen flex-col bg-[#F5F8FB]"
   style="--brand: {color}; --brand-tint: {color}18; --brand-contrast: {contrastColor(color)};"
@@ -574,6 +621,7 @@
     </p>
   </footer>
 </div>
+{/if}
 
 <style>
   :global(.markdown-content) {

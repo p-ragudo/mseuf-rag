@@ -6,6 +6,17 @@ const API_URL: string = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
 export const DEFAULT_COLOR = "#7A1F2B";
 export const MAX_MASCOT_BYTES = 512 * 1024; // keep in sync with the backend
 
+/** An API error that keeps the HTTP status, so callers can tell a 404 from a network failure. */
+export class HttpError extends Error {
+  status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = "HttpError";
+    this.status = status;
+  }
+}
+
 export interface Branding {
   color: string;
   mascot_url: string | null; // absolute URL, ready to use in <img src>
@@ -39,7 +50,7 @@ async function errorMessage(res: Response): Promise<string> {
 /** Public: used by the chat page, so no login is needed. */
 export async function fetchBranding(orgId: string | number): Promise<Branding> {
   const res = await fetch(`${API_URL}/branding/${orgId}`);
-  if (!res.ok) throw new Error(await errorMessage(res));
+  if (!res.ok) throw new HttpError(res.status, await errorMessage(res));
   return toBranding(await res.json());
 }
 
@@ -54,7 +65,7 @@ export async function saveBranding(
   else if (options.removeMascot) form.append("remove_mascot", "true");
 
   const res = await authFetch(`/branding/${orgId}`, { method: "PUT", body: form });
-  if (!res.ok) throw new Error(await errorMessage(res));
+  if (!res.ok) throw new HttpError(res.status, await errorMessage(res));
   return toBranding(await res.json());
 }
 

@@ -1,6 +1,20 @@
-<!-- src/pages/NotFound.svelte -->
+<!-- src/lib/routes/NotFound.svelte -->
 <script lang="ts">
   import { replace } from "svelte-spa-router";
+
+  interface Props {
+    eyebrow?: string;
+    title?: string;
+    message?: string;
+    showHomeButton?: boolean;
+  }
+
+  let {
+    eyebrow = "Error 404",
+    title = "Page not found",
+    message = "The page you're looking for doesn't exist or may have been moved.",
+    showHomeButton = true,
+  }: Props = $props();
 
   function goHome() {
     replace("/overview");
@@ -22,6 +36,7 @@
         viewBox="0 0 28 28"
         fill="none"
         xmlns="http://www.w3.org/2000/svg"
+        aria-hidden="true"
       >
         <circle cx="14" cy="14" r="10.5" stroke="#7A1F2B" stroke-width="1.5" />
         <path
@@ -40,40 +55,41 @@
     </div>
 
     <h2 class="mt-4 text-xs font-bold uppercase tracking-wider text-primary">
-      Error 404
+      {eyebrow}
     </h2>
-    <h1 class="mt-1 text-2xl font-bold">Page not found</h1>
-    <p class="mt-2 text-sm text-gray-500">
-      The page you're looking for doesn't exist or may have been moved.
-    </p>
+    <h1 class="mt-1 text-2xl font-bold">{title}</h1>
+    <p class="mt-2 text-sm text-gray-500">{message}</p>
 
-    <button
-      on:click={goHome}
-      class="mt-6 inline-flex flex-row items-center gap-2 rounded-md bg-primary px-5 py-3 text-sm font-semibold text-white hover:cursor-pointer hover:bg-primary/90 transition-colors duration-200"
-    >
-      <svg
-        width="16"
-        height="16"
-        viewBox="0 0 16 16"
-        fill="none"
-        xmlns="http://www.w3.org/2000/svg"
+    {#if showHomeButton}
+      <button
+        onclick={goHome}
+        class="mt-6 inline-flex flex-row items-center gap-2 rounded-md bg-primary px-5 py-3 text-sm font-semibold text-white hover:cursor-pointer hover:bg-primary/90 transition-colors duration-200"
       >
-        <path
-          d="M2 8.5L8 3L14 8.5"
-          stroke="white"
-          stroke-width="1.5"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-        />
-        <path
-          d="M4 7.5V13.5H12V7.5"
-          stroke="white"
-          stroke-width="1.5"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-        />
-      </svg>
-      Back to Overview
-    </button>
+        <svg
+          width="16"
+          height="16"
+          viewBox="0 0 16 16"
+          fill="none"
+          xmlns="http://www.w3.org/2000/svg"
+          aria-hidden="true"
+        >
+          <path
+            d="M2 8.5L8 3L14 8.5"
+            stroke="white"
+            stroke-width="1.5"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
+          <path
+            d="M4 7.5V13.5H12V7.5"
+            stroke="white"
+            stroke-width="1.5"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
+        </svg>
+        Back to Overview
+      </button>
+    {/if}
   </div>
 </main>
