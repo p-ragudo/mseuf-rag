@@ -26,3 +26,8 @@ openai
 redis
 redisvl
 fastembed
+
+# --- Test Suite Dependencies ---
+pytest
+pytest-asyncio
+aiosqlite
