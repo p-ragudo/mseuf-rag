@@ -32,6 +32,23 @@ def get_query_pipeline() -> QueryPipeline:
     return QueryPipeline()
 
 
+@router.get("/{org_id}/readiness")
+async def get_query_readiness(
+    org_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    org = await db.get(Org, org_id)
+    if not org:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Organization {org_id} not found.",
+        )
+
+    return {
+        "has_indexed_content": await QueryPipeline.has_indexed_content(org_id)
+    }
+
+
 def _collect_titles(result: PipelineQueryResponse) -> tuple[list[str], list[str]]:
     chunk_titles: dict[str, None] = {}  # dict keeps order and removes duplicates
     questions: dict[str, None] = {}

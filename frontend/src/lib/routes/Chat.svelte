@@ -59,6 +59,10 @@
 
   // "loading" until we know whether this organization exists
   let orgStatus = $state<"loading" | "ready" | "notfound">("loading");
+  let knowledgeBaseStatus = $state<
+    "loading" | "ready" | "incomplete" | "error"
+  >("loading");
+  let knowledgeBaseError = $state("");
 
   // Per-organization look, loaded from the backend (defaults until it arrives)
   let color = $state(DEFAULT_COLOR);
@@ -92,6 +96,53 @@
     }
   }
 
+  async function loadKnowledgeBaseStatus(org: string) {
+    knowledgeBaseStatus = "loading";
+    knowledgeBaseError = "";
+
+    try {
+      const response = await fetch(`${API_URL}/query/${org}/readiness`);
+      if (!response.ok) {
+        let errorMessage = `Could not check knowledge-base status (${response.status}).`;
+        try {
+          const errorData = await response.json();
+          if (typeof errorData.detail === "string") {
+            errorMessage = errorData.detail;
+          }
+        } catch {
+          // Response wasn't JSON.
+        }
+
+        throw new HttpError(response.status, errorMessage);
+      }
+
+      const readiness: unknown = await response.json();
+      if (
+        !readiness ||
+        typeof readiness !== "object" ||
+        !("has_indexed_content" in readiness) ||
+        typeof readiness.has_indexed_content !== "boolean"
+      ) {
+        throw new Error("Received an invalid knowledge-base status response.");
+      }
+      if (org !== orgId) return;
+      knowledgeBaseStatus = readiness.has_indexed_content
+        ? "ready"
+        : "incomplete";
+    } catch (error) {
+      if (org !== orgId) return;
+      if (isOrgNotFound(error, true)) {
+        orgStatus = "notfound";
+        return;
+      }
+      knowledgeBaseError =
+        error instanceof Error
+          ? error.message
+          : "Could not check this organization's knowledge-base status.";
+      knowledgeBaseStatus = "error";
+    }
+  }
+
   // Reset the conversation whenever the organization changes.
   $effect(() => {
     if (!orgId) {
@@ -105,11 +156,13 @@
     sessionId = crypto.randomUUID();
 
     orgStatus = "loading";
+    knowledgeBaseStatus = "loading";
     color = DEFAULT_COLOR;
     mascotUrl = null;
     assistantName = DEFAULT_ASSISTANT_NAME;
     headerTagline = DEFAULT_HEADER_TAGLINE;
     loadBranding(orgId);
+    loadKnowledgeBaseStatus(orgId);
   });
 
   function newChat() {
@@ -368,7 +421,7 @@
     message="This chat link isn't valid. Please check the address, or contact the organization that shared it with you."
     showHomeButton={false}
   />
-{:else if orgStatus === "loading"}
+{:else if orgStatus === "loading" || knowledgeBaseStatus === "loading"}
   <div
     class="flex h-screen items-center justify-center bg-[#F5F8FB]"
     aria-busy="true"
@@ -376,6 +429,51 @@
   >
     <div class="h-12 w-12 animate-pulse rounded-full bg-gray-200"></div>
   </div>
+{:else if knowledgeBaseStatus === "incomplete"}
+  <main
+    class="flex h-screen items-center justify-center bg-[#F5F8FB] px-6 text-center"
+    style="--brand: {color}; --brand-tint: {color}18; --brand-contrast: {contrastColor(color)};"
+    role="status"
+  >
+    <div class="max-w-xl rounded-xl border border-outline bg-white p-8 shadow-sm">
+      <h1 class="text-xl font-semibold">Knowledge-base setup incomplete</h1>
+      <p class="mt-3 text-sm leading-relaxed text-gray-600">
+        This organization hasn’t completed its knowledge-base setup yet. Please
+        check back later or contact an organization administrator.
+      </p>
+      <button
+        type="button"
+        class="mt-5 rounded-md bg-[var(--brand)] px-4 py-2.5 text-sm font-semibold text-[color:var(--brand-contrast)]"
+        onclick={() => {
+          if (orgId) loadKnowledgeBaseStatus(orgId);
+        }}
+      >
+        Check again
+      </button>
+    </div>
+  </main>
+{:else if knowledgeBaseStatus === "error"}
+  <main
+    class="flex h-screen items-center justify-center bg-[#F5F8FB] px-6 text-center"
+    style="--brand: {color}; --brand-tint: {color}18; --brand-contrast: {contrastColor(color)};"
+    role="alert"
+  >
+    <div class="max-w-xl rounded-xl border border-outline bg-white p-8 shadow-sm">
+      <h1 class="text-xl font-semibold">Chat is temporarily unavailable</h1>
+      <p class="mt-3 text-sm leading-relaxed text-gray-600">
+        {knowledgeBaseError}
+      </p>
+      <button
+        type="button"
+        class="mt-5 rounded-md bg-[var(--brand)] px-4 py-2.5 text-sm font-semibold text-[color:var(--brand-contrast)]"
+        onclick={() => {
+          if (orgId) loadKnowledgeBaseStatus(orgId);
+        }}
+      >
+        Try again
+      </button>
+    </div>
+  </main>
 {:else}
 <div
   class="flex h-screen flex-col bg-[#F5F8FB]"

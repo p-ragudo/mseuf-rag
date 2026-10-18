@@ -4,9 +4,14 @@ import re
 import time
 from typing import Dict, List, Optional, Tuple
 
+from sqlalchemy import select
+
 from app.core.config import settings
 from app.core.database import async_session
+from app.models.chunk import Chunk
+from app.models.generated_question import GeneratedQuestion
 from app.models.org import Org
+from app.models.scraped_page import ScrapedPage
 from app.services.embeddings.factory import get_embedder
 from app.services.embeddings.sparse_embedder import get_sparse_embedder
 from app.services.llm_qa.factory import get_qa_synthesizer
@@ -72,6 +77,41 @@ class QueryPipeline:
     def collection_name(self) -> str:
         """Always resolves dynamically from settings."""
         return settings.resolved_collection_name
+
+    @staticmethod
+    def _active_sync_column():
+        provider = (settings.embedding_provider or "").strip().lower()
+        dimension = getattr(settings, "embedding_dimension", None) or getattr(
+            settings, "vector_dim", 768
+        )
+
+        if provider == "gemini":
+            column_name = (
+                "is_synced_gemini_768" if dimension == 768 else "is_synced_gemini"
+            )
+        elif "bge" in provider or "bge" in (settings.embedding_model or "").lower():
+            column_name = "is_synced_bge_m3"
+        else:
+            column_name = "is_synced_qdrant"
+        return getattr(
+            GeneratedQuestion, column_name, GeneratedQuestion.is_synced_qdrant
+        )
+
+    @staticmethod
+    async def has_indexed_content(org_id: int) -> bool:
+        sync_column = QueryPipeline._active_sync_column()
+        statement = (
+            select(GeneratedQuestion.id)
+            .join(Chunk, GeneratedQuestion.chunk_id == Chunk.id)
+            .join(ScrapedPage, Chunk.page_id == ScrapedPage.id)
+            .where(
+                ScrapedPage.org_id == org_id,
+                sync_column.is_(True),
+            )
+            .limit(1)
+        )
+        async with async_session() as session:
+            return await session.scalar(statement) is not None
 
     async def _resolve_org_details(self, org_id: int) -> Tuple[str, List[str], int]:
         now = time.monotonic()
@@ -205,6 +245,17 @@ class QueryPipeline:
         # Server-enforced top_k resolution
         chosen_top_k = req.top_k or settings.default_top_k
         top_k = max(settings.min_top_k, min(chosen_top_k, settings.max_top_k))
+
+        if not await self.has_indexed_content(req.org_id):
+            return PipelineQueryResponse(
+                query=req.query,
+                answer=(
+                    "This organization hasn’t completed its knowledge-base setup yet. "
+                    "Please check back later or contact an organization administrator."
+                ),
+                is_cached=False,
+                source="fallback",
+            )
 
         # --- Session context ---------------------------------------------------
         # With earlier turns, the classifier runs first and rewrites the question into

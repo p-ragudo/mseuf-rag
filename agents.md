@@ -169,6 +169,8 @@ The endpoint loads up to the latest six messages for the same organization and s
 
 Before query execution, recognizable email addresses, phone numbers, labeled government IDs, payment cards, addresses, and names following common labels are replaced with typed redaction markers. Stored legacy chat history is also sanitized before use. Name and address detection is local and pattern-based, so it is best-effort and may miss or over-redact text.
 
+If an organization has no generated questions synced to the active embedding target, the query endpoint returns “This organization hasn’t completed its knowledge-base setup yet. Please check back later or contact an organization administrator.” before embedding or retrieval. The chat checks query readiness on load and shows this setup notice instead of the welcome screen and message composer until indexed content is available.
+
 ```text
 [Query]
    â†“
