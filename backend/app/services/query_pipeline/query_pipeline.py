@@ -189,7 +189,7 @@ class QueryPipeline:
         standalone = (intent.standalone_query or "").strip()
         if intent.is_follow_up and standalone and len(standalone) <= 500:
             logger.info("Follow-up rewritten: %r -> %r", req.query, standalone)
-            return standalone, standalone, True
+            return standalone, build_llm_query(standalone, req.history), False
 
         if intent.is_follow_up or getattr(intent, "rewrite_failed", False):
             logger.info("No usable rewrite for %r, using fallback context", req.query)

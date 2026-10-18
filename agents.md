@@ -163,6 +163,8 @@ Triggered by `POST /ingest/run/{website_id}` (FastAPI `BackgroundTasks`) or by t
 
 `POST /query/{org_id}/`: calls `QueryPipeline.execute`[cite: 6, 7].
 
+The endpoint loads up to the latest six messages for the same organization and session, ignoring turns older than 24 hours. Follow-up questions are rewritten into standalone retrieval queries, while the answer prompt also receives the prior conversation. Follow-ups bypass semantic-cache lookup and writes so a response depending on session history is not reused across conversations.
+
 ```text
 [Query]
    â†“
