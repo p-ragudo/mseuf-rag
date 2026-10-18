@@ -9,9 +9,11 @@
   import TrendChart from "../components/TrendChart.svelte";
   import TopicsBarList from "../components/TopicsBarlist.svelte";
   import KnowledgeAssetsTable from "../components/KnowledgeAssestTable.svelte";
+  import { onMount } from "svelte";
   import { push } from "svelte-spa-router";
   import { authFetch } from "../auth.svelte";
 
+  type Organization = { id: number; name: string };
   type StatsResponse = {
     inquiry_count: number;
     satisfaction_rate: number; // percent, 0-100
@@ -22,8 +24,26 @@
     chart_data: { date: string; count: number }[]; // bucket start date + count
   };
 
-  // TODO: replace with the logged-in user's organization id
-  const orgId = 1;
+  let organizations = $state<Organization[]>([]);
+  let selectedOrgId = $state("");
+  let organizationsLoading = $state(true);
+  let organizationError = $state("");
+  onMount(async () => {
+    try {
+      const response = await authFetch("/orgs/");
+      if (!response.ok) {
+        throw new Error(`Could not load organizations (${response.status}).`);
+      }
+      organizations = await response.json();
+      selectedOrgId =
+        organizations.length > 0 ? String(organizations[0].id) : "";
+    } catch (error) {
+      organizationError =
+        error instanceof Error ? error.message : "Could not load organizations.";
+    } finally {
+      organizationsLoading = false;
+    }
+  });
 
   // Dropdown label -> value the backend accepts
   const rangeOptions = [
@@ -50,6 +70,11 @@
   let requestId = 0;
 
   async function loadStats(range: string) {
+    if (!selectedOrgId) {
+      stats = null;
+      return;
+    }
+
     const current = ++requestId;
     loading = true;
     errorMessage = "";
@@ -57,7 +82,7 @@
     try {
       const res = await authFetch("/stats", {
         method: "POST",
-        body: JSON.stringify({ org_id: orgId, range }),
+        body: JSON.stringify({ org_id: Number(selectedOrgId), range }),
       });
 
       if (!res.ok) {
@@ -85,9 +110,8 @@
     }
   }
 
-  // Loads on mount and again whenever the timeframe changes
   $effect(() => {
-    loadStats(rangeKey);
+    if (selectedOrgId) void loadStats(rangeKey);
   });
 
   function refreshData() {
@@ -217,7 +241,19 @@
     </p>
 
     <WhiteCard style="my-4 flex flex-row justify-between gap-4">
-      <div class="flex flex-row gap-4 items-center">
+      <div class="flex flex-row flex-wrap gap-4 items-center">
+        <label class="flex items-center gap-2 text-sm font-semibold">
+          Organization
+          <select
+            bind:value={selectedOrgId}
+            disabled={organizationsLoading || organizations.length === 0}
+            class="max-w-64 rounded-md border border-outline bg-white px-3 py-2 text-sm font-normal outline-none focus:border-primary disabled:opacity-60"
+          >
+            {#each organizations as organization (organization.id)}
+              <option value={String(organization.id)}>{organization.name}</option>
+            {/each}
+          </select>
+        </label>
         <FilterIcon />
         <SelectDropdown
           label="Timeframe"
@@ -246,6 +282,15 @@
         </button>
       </div>
     </WhiteCard>
+
+    {#if organizationError}
+      <div
+        role="alert"
+        class="mb-4 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700"
+      >
+        {organizationError}
+      </div>
+    {/if}
 
     {#if errorMessage}
       <div

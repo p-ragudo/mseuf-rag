@@ -67,7 +67,7 @@ users 1--* org_members *--1 orgs 1--* websites 1--1 website_scrape_schedules
 | Table | Key fields |
 |---|---|
 | `orgs` | id, creator_id, name[cite: 1, 6] |
-| `org_members` | (user_id, org_id) PK, `roles` string ("admin"/"member"), **roles are stored but not enforced across endpoints**[cite: 1, 6] |
+| `org_members` | (user_id, org_id) PK, `roles` string ("admin"/"member"); organization member-management requires creator/admin access |
 | `org_chat_settings` | `org_id` PK/FK, configurable `assistant_name` (defaults to "Chat Assistant") |
 | `org_chat_headers` | `org_id` PK/FK, configurable `header_tagline` (defaults to "Admissions Intelligence Hub") |
 | `websites` | id, org_id, url, `status` (PENDING/IN_PROGRESS/COMPLETED/FAILED), error_message[cite: 1, 6] |
@@ -135,7 +135,7 @@ For dense vectors we embed the **generated question**[cite: 1, 3]. For sparse ve
 
 **Not implemented / open**[cite: 1]
 - No physical collection or shard isolation per tenant; isolation relies on payload filtering and tenant-aware HNSW graphs[cite: 1, 10].
-- Role enforcement (`admin` vs `member`) is not enforced on mutate routes[cite: 1, 6]. Any org member can trigger ingestion or register websites[cite: 1, 6].
+- Role enforcement (`admin` vs `member`) is implemented for organization member management. Other mutate routes still allow any org member to trigger ingestion or register websites[cite: 1, 6].
 - Deleting an org or website cascades in Postgres but does not clean up Qdrant points[cite: 1, 6].
 - Several heuristics retain university-specific naming assumptions (e.g. `classify_academic_level`, SHS strands)[cite: 1, 3].
 
@@ -273,7 +273,7 @@ The endpoint loads up to the latest six messages for the same organization and s
 | Scope verification / LLM-based query gatekeeper | [PLANNED][cite: 1] |
 | Automated recurring scrape scheduler (`website_scrape_schedules`) | [PLANNED][cite: 1, 6] |
 | Qdrant point cleanup on page/website re-scrape or deletion | [IMPLEMENTED][cite: 1] |
-| Role-based authorization (`admin` vs `member` access checks) | [PLANNED][cite: 1, 6] |
+| Role-based authorization for organization member management | **[IMPLEMENTED]** |
 | Dense chunk embedding baseline for ablation | [PLANNED][cite: 1] |
 
 ## 13. Conventions for Agents Editing This Repo

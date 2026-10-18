@@ -9,6 +9,8 @@ import Mascot from "./lib/routes/Mascot.svelte";
 import Login from "./lib/routes/Login.svelte";
 import NotFound from "./lib/routes/NotFound.svelte";
 import Chat from "./lib/routes/Chat.svelte";
+import OrganizationSetup from "./lib/routes/OrganizationSetup.svelte";
+import Members from "./lib/routes/Members.svelte";
 
 function requireAuth(): boolean {
   if (auth.token) return true;
@@ -30,6 +32,8 @@ const routes: RouteDefinition = {
   "/knowledge-base": protectedRoute(KnowledgeBase),
   // "/escalation": protectedRoute(Escalation),
   "/mascot": protectedRoute(Mascot),
+  "/organization-setup": protectedRoute(OrganizationSetup),
+  "/members": protectedRoute(Members),
   "/login": wrap({ component: Login, conditions: [requireGuest] }),
   "/chat/:id": Chat,
   "*": NotFound,

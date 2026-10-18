@@ -4,6 +4,7 @@
   import KnowledgeBaseIcon from "../icons/KnowledgeBaseIcon.svelte";
   import MascotIcon from "../icons/MascotIcon.svelte";
   import OverviewIcon from "../icons/OverviewIcon.svelte";
+  import PersonsIcon from "../icons/PersonsIcon.svelte";
 
   interface Props {
     currentRoute: string;
@@ -33,6 +34,7 @@
 
     <ul class="space-y-1">
       <NavItem href="/overview" text="Overview" icon={OverviewIcon} />
+      <NavItem href="/members" text="Members" icon={PersonsIcon} />
       <NavItem
         href="/knowledge-base"
         text="Knowledge Base"

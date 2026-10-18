@@ -1,6 +1,6 @@
 from datetime import datetime, time
 from typing import Optional
-from pydantic import BaseModel, HttpUrl
+from pydantic import BaseModel, EmailStr, HttpUrl
 from typing import Literal
 
 from app.models.website import WebsiteScrapeStatus
@@ -9,6 +9,10 @@ from app.models.website import WebsiteScrapeStatus
 # --- Org Schemas ---
 class OrgCreate(BaseModel):
     name: str
+
+
+class OrgMemberCreate(BaseModel):
+    email: EmailStr
 
 
 class OrgResponse(BaseModel):
@@ -27,6 +31,19 @@ class PublicOrgResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class OrgMemberSummary(BaseModel):
+    user_id: int
+    email: str
+    first_name: str
+    last_name: str
+    role: str
+
+
+class OrgMembersResponse(BaseModel):
+    members: list[OrgMemberSummary]
+    can_manage: bool
 
 
 # --- Website Schemas ---
