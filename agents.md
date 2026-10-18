@@ -167,6 +167,8 @@ Triggered by `POST /ingest/run/{website_id}` (FastAPI `BackgroundTasks`) or by t
 
 The endpoint loads up to the latest six messages for the same organization and session, ignoring turns older than 24 hours. Follow-up questions are rewritten into standalone retrieval queries, while the answer prompt also receives the prior conversation. Follow-ups bypass semantic-cache lookup and writes so a response depending on session history is not reused across conversations.
 
+Before query execution, recognizable email addresses, phone numbers, labeled government IDs, payment cards, addresses, and names following common labels are replaced with typed redaction markers. Stored legacy chat history is also sanitized before use. Name and address detection is local and pattern-based, so it is best-effort and may miss or over-redact text.
+
 ```text
 [Query]
    â†“

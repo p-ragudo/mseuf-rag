@@ -20,6 +20,7 @@ from app.services.query_pipeline.session_context import (
     purge_expired,
     save_turns,
 )
+from app.services.query_pipeline.pii_filter import redact_personal_information
 from app.schemas.tenant import FeedbackBodyRequest
 
 logger = logging.getLogger(__name__)
@@ -61,10 +62,17 @@ async def execute_query(
 
     # Earlier, unexpired turns of this chat session (empty for the first message)
     history = await load_history(db, org_id, body.session_id)
+    history = [
+        turn.model_copy(
+            update={"content": redact_personal_information(turn.content)}
+        )
+        for turn in history
+    ]
+    sanitized_query = redact_personal_information(body.query)
 
     pipeline_req = PipelineQueryRequest(
         org_id=org_id,
-        query=body.query,
+        query=sanitized_query,
         session_id=body.session_id,
         history=history,
     )
@@ -88,7 +96,7 @@ async def execute_query(
         # Remember this turn for the next question. "No result" answers are
         # skipped so they don't skew what a follow-up is taken to refer to.
         if result.source != "fallback":
-            save_turns(db, org_id, body.session_id, body.query, result.answer)
+            save_turns(db, org_id, body.session_id, sanitized_query, result.answer)
 
         await db.flush()
         new_id = log.id

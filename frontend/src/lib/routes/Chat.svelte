@@ -33,7 +33,7 @@
   };
 
   type QueryResponse = {
-    query: string;
+    query?: string | null;
     answer: string;
     is_cached?: boolean;
     source?: string;
@@ -227,12 +227,14 @@
     const currentOrg = orgId;
     const currentSession = sessionId;
 
-    // Add user's message immediately.
-    messages.push({
+    // Show the user's message immediately; the backend returns its redacted
+    // version after processing.
+    const userMessage: Message = {
       id: crypto.randomUUID(),
       role: "user",
       content,
-    });
+    };
+    messages.push(userMessage);
 
     // Clear input.
     input = "";
@@ -284,6 +286,7 @@
       // Don't update the old chat if the user changed organizations.
       if (currentOrg !== orgId) return;
 
+      userMessage.content = data.query || content;
       messages.push({
         id: crypto.randomUUID(),
         role: "assistant",
@@ -580,6 +583,11 @@
 
   <!-- Input -->
   <footer class="border-t-2 border-t-outline bg-white px-4 py-3">
+    <p class="mx-auto mb-2 max-w-3xl text-xs text-gray-500">
+      Common emails, phone numbers, government IDs, payment cards, addresses,
+      and labeled names are redacted before processing. Detection is
+      best-effort—avoid sharing sensitive information.
+    </p>
     <div class="mx-auto flex max-w-3xl flex-row items-end gap-2">
       <textarea
         bind:this={inputEl}
