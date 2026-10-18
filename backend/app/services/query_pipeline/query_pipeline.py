@@ -1,116 +1,384 @@
+import asyncio
 import logging
-from typing import List, Optional
+import re
+import time
+from typing import Dict, List, Optional, Tuple
 
+from app.core.config import settings
+from app.core.database import async_session
+from app.models.org import Org
 from app.services.embeddings.factory import get_embedder
+from app.services.embeddings.sparse_embedder import get_sparse_embedder
+from app.services.llm_qa.factory import get_qa_synthesizer
+from app.services.llm_qa.schema import (
+    MatchedQuestionDetail,
+    QARequest,
+    RetrievedContextItem,
+)
+from app.services.query_pipeline.context_expander import ContextExpander
+from app.services.query_pipeline.intent_classifier import QueryClassifier, QueryIntent
+from app.services.query_pipeline.session_context import (
+    build_llm_query,
+    build_retrieval_query,
+)
+from app.services.query_pipeline.schema import (
+    PipelineQueryRequest,
+    PipelineQueryResponse,
+)
+from app.services.query_pipeline.temporal_resolver import resolve_temporal_conflicts
+from app.services.reranker.factory import get_reranker
+from app.services.reranker.schema import RerankCandidate
 from app.services.semantic_cache.factory import get_semantic_cache
 from app.services.semantic_cache.schemas import CacheMetadata
-from app.services.llm_qa.factory import get_qa_synthesizer
-from app.services.llm_qa.schema import QARequest, RetrievedContextItem
-from app.services.query_pipeline.schema import PipelineQueryRequest, PipelineQueryResponse
-
-# Replace this import with your actual vector_db service/factory
 from app.services.vector_db.factory import get_vector_db
 
 logger = logging.getLogger(__name__)
 
-FALLBACK_SCOPE_MESSAGE = (
-    "I'm sorry, but your inquiry appears to be outside the scope of my supported topics."
-)
-FALLBACK_NOT_FOUND_MESSAGE = (
-    "I couldn't find any verified information matching your inquiry."
-)
+_ORG_CACHE_TTL_SECONDS = 30.0
+# org_id -> (fetched_at_monotonic, org_name, content_version)
+_org_cache: Dict[int, Tuple[float, str, int]] = {}
+
+def _normalize_campus(value: Optional[str]) -> Optional[str]:
+    """Payload campus values are lowercase URL slugs; make classifier output match."""
+    if not value:
+        return None
+    slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
+    return slug if slug and slug != "main" else None
 
 
-class QueryPipelineService:
+def _cache_scope(org_id: int, campus: Optional[str], version: int) -> str:
+    """
+    Tenant tag used for the semantic cache. Includes the tenant's content_version so
+    a re-ingest makes all previously cached answers unreachable.
+    """
+    base = f"{org_id}_v{version}"
+    if campus:
+        return f"{base}_{campus.replace('-', '_')}"
+    return base
+
+
+class QueryPipeline:
     def __init__(self):
-        self.embedder = get_embedder()
-        self.semantic_cache = get_semantic_cache()
-        self.qa_synthesizer = get_qa_synthesizer()
         self.vector_db = get_vector_db()
+        self.embedder = get_embedder()
+        self.sparse_embedder = get_sparse_embedder()
+        self.qa_synthesizer = get_qa_synthesizer()
+        self.semantic_cache = get_semantic_cache()
+        self.classifier = QueryClassifier()
+        self.reranker = get_reranker()
+        self.expander = ContextExpander(window=1, expand_top_n=3, max_chars=16000)
 
-    def _is_within_scope(self, query: str, query_vector: List[float]) -> bool:
-        """Determines if the query is in-domain before querying the vector DB.
-        
-        Can use a lightweight zero-shot classifier, metadata check, or default to True
-        if retrieval score threshold acts as scope enforcement.
-        """
-        return True
+    @property
+    def collection_name(self) -> str:
+        """Always resolves dynamically from settings."""
+        return settings.resolved_collection_name
 
-    async def execute(self, request: PipelineQueryRequest) -> PipelineQueryResponse:
-        user_query = request.query.strip()
+    async def _resolve_org_details(self, org_id: int) -> Tuple[str, List[str], int]:
+        now = time.monotonic()
+        hit = _org_cache.get(org_id)
+        if hit and now - hit[0] < _ORG_CACHE_TTL_SECONDS:
+            return hit[1], [], hit[2]
 
-        # Step 1: Embed query (embed_one is synchronous on BaseEmbedder)
-        embedding_result = self.embedder.embed_one(user_query)
-        query_vector = embedding_result.values
+        async with async_session() as session:
+            org = await session.get(Org, org_id)
+            if org:
+                version = int(org.content_version or 0)
+                _org_cache[org_id] = (now, org.name, version)
+                return org.name, [], version
+        return "the organization", [], 0
 
-        # Step 2: Semantic Cache Check
-        cache_hit = await self.semantic_cache.get(query_vector)
-        if cache_hit:
-            logger.info("Semantic cache hit for query: '%s'", user_query)
-            return PipelineQueryResponse(
-                answer=cache_hit.response,
-                is_cached=True,
-                source="cache",
-                sources=cache_hit.metadata.extra.get("sources", [])
-            )
+    def _reciprocal_rank_fusion(
+        self,
+        dense_hits: list,
+        sparse_hits: list,
+        k: int = 60,
+    ) -> List[Tuple[str, float, dict, List[MatchedQuestionDetail]]]:
+        chunk_scores: Dict[str, float] = {}
+        chunk_payloads: Dict[str, dict] = {}
+        chunk_matched: Dict[str, List[MatchedQuestionDetail]] = {}
 
-        # Step 3: Scope Guardrail
-        if not self._is_within_scope(user_query, query_vector):
-            logger.info("Query rejected by scope filter: '%s'", user_query)
-            return PipelineQueryResponse(
-                answer=FALLBACK_SCOPE_MESSAGE,
-                is_cached=False,
-                source="fallback",
-                sources=[]
-            )
+        for rank, hit in enumerate(dense_hits):
+            parent_id = hit.payload.get("parent_chunk_id") or hit.id
+            q_text = hit.payload.get("question_text") or ""
+            chunk_payloads.setdefault(parent_id, hit.payload)
+            chunk_matched.setdefault(parent_id, [])
+            if q_text:
+                chunk_matched[parent_id].append(
+                    MatchedQuestionDetail(
+                        question=q_text, score=float(hit.score), method="dense", rank=rank
+                    )
+                )
+            chunk_scores[parent_id] = chunk_scores.get(parent_id, 0.0) + 1.0 / (k + rank + 1)
 
-        # Step 4: Vector DB Match
-        # Adjust method name to match your app/services/vector_db implementation
-        matched_chunks = await self.vector_db.search(query_vector=query_vector, top_k=4)
+        seen_sparse: set = set()
+        for point_rank, hit in enumerate(sparse_hits):
+            parent_id = hit.payload.get("parent_chunk_id") or hit.id
+            q_text = hit.payload.get("question_text") or ""
+            chunk_payloads.setdefault(parent_id, hit.payload)
+            chunk_matched.setdefault(parent_id, [])
 
-        if not matched_chunks:
-            logger.info("No relevant vector DB records for query: '%s'", user_query)
-            return PipelineQueryResponse(
-                answer=FALLBACK_NOT_FOUND_MESSAGE,
-                is_cached=False,
-                source="fallback",
-                sources=[]
-            )
+            existing = {m.question for m in chunk_matched[parent_id]}
+            if q_text and q_text not in existing:
+                chunk_matched[parent_id].append(
+                    MatchedQuestionDetail(
+                        question=q_text, score=float(hit.score), method="sparse", rank=point_rank
+                    )
+                )
+            if parent_id not in seen_sparse:
+                chunk_rank = len(seen_sparse)
+                seen_sparse.add(parent_id)
+                chunk_scores[parent_id] = chunk_scores.get(parent_id, 0.0) + 1.0 / (k + chunk_rank + 1)
 
-        # Step 5: Send Context to LLM QA Synthesizer
-        context_items = [
-            RetrievedContextItem(
-                title=getattr(chunk, "title", ""),
-                content=chunk.content,
-                source_url=getattr(chunk, "source_url", None)
-            )
-            for chunk in matched_chunks
+        ordered = sorted(chunk_scores.items(), key=lambda item: item[1], reverse=True)
+        return [
+            (pid, score, chunk_payloads[pid], chunk_matched.get(pid, []))
+            for pid, score in ordered
         ]
 
-        qa_req = QARequest(query=user_query, contexts=context_items)
-        qa_res = await self.qa_synthesizer.generate_answer(qa_req)
+    async def _hybrid_search(self, dense_vec, sparse_data, flt, limit):
+        dense_task = self.vector_db.search(
+            collection_name=self.collection_name,
+            query_vector=dense_vec,
+            limit=limit,
+            filters=flt,
+            using_vector_name="question_dense",
+        )
 
-        # Step 6: Cache QA pair
-        chunk_ids = [str(getattr(c, "id", "")) for c in matched_chunks if hasattr(c, "id")]
-        cache_metadata = CacheMetadata(
-            chunk_ids=chunk_ids,
-            extra={"sources": qa_res.sources}
+        async def _sparse():
+            if not sparse_data.indices:
+                return []
+            return await self.vector_db.search_sparse(
+                collection_name=self.collection_name,
+                sparse_indices=sparse_data.indices,
+                sparse_values=sparse_data.values,
+                limit=limit,
+                filters=flt,
+                using_vector_name="chunk_sparse",
+            )
+
+        return await asyncio.gather(dense_task, _sparse())
+
+    @staticmethod
+    def _cached_response(req: PipelineQueryRequest, cache_entry) -> PipelineQueryResponse:
+        cached_contexts = [
+            RetrievedContextItem(**item) if isinstance(item, dict) else item
+            for item in cache_entry.metadata.extra.get("contexts", [])
+        ]
+        return PipelineQueryResponse(
+            query=req.query,
+            answer=cache_entry.response,
+            is_cached=True,
+            source="cache",
+            sources=cache_entry.metadata.extra.get("sources", []),
+            contexts=cached_contexts,
         )
-        
-        await self.semantic_cache.set(
-            query=user_query,
-            vector=query_vector,
-            response=qa_res.answer,
-            metadata=cache_metadata
+
+    @staticmethod
+    def _resolve_follow_up(
+        req: PipelineQueryRequest, intent: QueryIntent
+    ) -> Tuple[str, str, bool]:
+        """Decides what the rest of the pipeline works on.
+
+        Returns (search_query, llm_query, use_cache).
+        - follow-up with a usable rewrite: search and answer on the standalone
+          question; it makes sense alone, so the semantic cache is safe to use
+        - not a follow-up (new topic): the question as written
+        - rewrite failed or came back empty: fall back to the simple text rules,
+          and skip the cache because the answer depends on the conversation
+        """
+        standalone = (intent.standalone_query or "").strip()
+        if intent.is_follow_up and standalone and len(standalone) <= 500:
+            logger.info("Follow-up rewritten: %r -> %r", req.query, standalone)
+            return standalone, build_llm_query(standalone, req.history), False
+
+        if intent.is_follow_up or getattr(intent, "rewrite_failed", False):
+            logger.info("No usable rewrite for %r, using fallback context", req.query)
+            return (
+                build_retrieval_query(req.query, req.history),
+                build_llm_query(req.query, req.history),
+                False,
+            )
+
+        return req.query, req.query, True
+
+    async def execute(self, req: PipelineQueryRequest) -> PipelineQueryResponse:
+        # Server-enforced top_k resolution
+        chosen_top_k = req.top_k or settings.default_top_k
+        top_k = max(settings.min_top_k, min(chosen_top_k, settings.max_top_k))
+
+        # --- Session context ---------------------------------------------------
+        # With earlier turns, the classifier runs first and rewrites the question into
+        # a standalone one ("what building is that?" -> "What building is the ICTD
+        # iLounge in?"), so everything below works on a question that makes sense alone.
+        intent: Optional[QueryIntent] = None
+        sparse_data = None
+        search_query = req.query  # seen by the embeddings, search, reranker and cache
+        llm_query = req.query  # seen by the answer model
+        use_cache = True
+
+        if req.history:
+            org_name, known_locations, content_version = await self._resolve_org_details(
+                req.org_id
+            )
+            intent = await self.classifier.classify_intent(
+                req.query,
+                org_name=org_name,
+                known_locations=known_locations,
+                history=req.history,
+            )
+            search_query, llm_query, use_cache = self._resolve_follow_up(req, intent)
+
+            dense_embed, sparse_data = await asyncio.gather(
+                self.embedder.embed_one(search_query, task_type="RETRIEVAL_QUERY"),
+                self.sparse_embedder.embed_query(search_query),
+            )
+        else:
+            # 1. Dense query vector + org details (name, content_version) in parallel
+            dense_embed, (org_name, known_locations, content_version) = await asyncio.gather(
+                self.embedder.embed_one(req.query, task_type="RETRIEVAL_QUERY"),
+                self._resolve_org_details(req.org_id),
+            )
+        dense_vec = dense_embed.values
+
+        # 2. Semantic cache fast-path (tenant scope, tied to the tenant's content version)
+        base_cache_scope = _cache_scope(req.org_id, None, content_version)
+        cache_entry = None
+        if use_cache:
+            cache_entry = await self.semantic_cache.get(
+                vector=dense_vec, org_id=base_cache_scope
+            )
+        if cache_entry:
+            return self._cached_response(req, cache_entry)
+
+        # 3. Cache MISS: run the classifier (unless it already ran above) & sparse BM25 encoding
+        if intent is None:
+            intent, sparse_data = await asyncio.gather(
+                self.classifier.classify_intent(
+                    req.query, org_name=org_name, known_locations=known_locations
+                ),
+                self.sparse_embedder.embed_query(req.query),
+            )
+
+        campus = _normalize_campus(intent.detected_sub_entity)
+        final_cache_scope = _cache_scope(req.org_id, campus, content_version)
+
+        # If campus is detected, check campus-specific cache scope
+        if campus and final_cache_scope != base_cache_scope and use_cache:
+            cache_entry = await self.semantic_cache.get(vector=dense_vec, org_id=final_cache_scope)
+            if cache_entry:
+                return self._cached_response(req, cache_entry)
+
+        # 4. Hybrid Retrieval in Active Collection
+        tenant_filter: Dict[str, str] = {"group_id": str(req.org_id)}
+        if campus:
+            tenant_filter["campus"] = campus
+
+        candidate_limit = max(top_k * 6, 30)
+        dense_hits, sparse_hits = await self._hybrid_search(
+            dense_vec, sparse_data, tenant_filter, candidate_limit
         )
+
+        # If campus filter returned nothing, fallback to tenant-wide
+        if not dense_hits and not sparse_hits and campus:
+            logger.info("No hits with campus=%s, retrying tenant-wide", campus)
+            dense_hits, sparse_hits = await self._hybrid_search(
+                dense_vec, sparse_data, {"group_id": str(req.org_id)}, candidate_limit
+            )
+
+        # 5. RRF Fusion
+        fused = self._reciprocal_rank_fusion(dense_hits, sparse_hits, k=60)
+        if not fused:
+            return PipelineQueryResponse(
+                query=req.query,
+                answer="No relevant institutional documents could be found for your query.",
+                is_cached=False,
+                source="fallback",
+            )
+
+        # 6. Cross-Encoder Reranking. Over-fetch (2x) so that dropping stale
+        #    duplicates below still leaves a full top_k of distinct, current evidence.
+        rerank_pool_size = max(top_k * 4, 25)
+        candidates = [
+            RerankCandidate(
+                chunk_id=pid,
+                content=payload.get("chunk_text") or "",
+                initial_score=score,
+                payload=payload,
+                matched_questions=mqs,
+            )
+            for pid, score, payload, mqs in fused[:rerank_pool_size]
+            if (payload.get("chunk_text") or "").strip()
+        ]
+        reranked = await self.reranker.rerank(
+            query=search_query,
+            candidates=candidates,
+            top_k=top_k * 2,
+            score_threshold=settings.reranker_score_threshold,
+        )
+        if not reranked:
+            return PipelineQueryResponse(
+                query=req.query,
+                answer="No sufficiently relevant institutional information was found to answer your inquiry.",
+                is_cached=False,
+                source="fallback",
+            )
+
+        # 6b. Temporal conflict resolution: drop versions provably superseded by a fresher one
+        reranked, superseded = resolve_temporal_conflicts(search_query, reranked)
+        if superseded:
+            logger.info(
+                "Dropped %d superseded docs for org %s: %s",
+                len(superseded),
+                req.org_id,
+                [(s.source_url, s.reason) for s in superseded],
+            )
+        reranked = reranked[:top_k]
+
+        # 7. Context Expansion (Postgres small-to-big)
+        contexts = await self.expander.expand(req.org_id, reranked)
+        if not contexts:
+            return PipelineQueryResponse(
+                query=req.query,
+                answer="No sufficiently relevant institutional information was found to answer your inquiry.",
+                is_cached=False,
+                source="fallback",
+                superseded=superseded,
+            )
+        source_urls: List[str] = []
+        for c in contexts:
+            if c.source_url and c.source_url not in source_urls:
+                source_urls.append(c.source_url)
+
+        # 8. LLM QA Answer Synthesis
+        qa_response = await self.qa_synthesizer.generate_answer(
+            QARequest(query=llm_query, contexts=contexts), org_name=org_name
+        )
+        final_answer = qa_response.answer
+        if intent.is_ambiguous and intent.clarification_message:
+            final_answer += f"\n\n---\n*Note*: {intent.clarification_message}"
+
+        # 9. Store in Semantic Cache (scope carries the tenant's content_version)
+        if use_cache:
+            await self.semantic_cache.set(
+                query=search_query,
+                vector=dense_vec,
+                response=final_answer,
+                org_id=final_cache_scope,
+                metadata=CacheMetadata(
+                    extra={
+                        "sources": qa_response.sources,
+                        "org_id": req.org_id,
+                        "contexts": [c.model_dump() for c in contexts],
+                    }
+                ),
+            )
 
         return PipelineQueryResponse(
-            answer=qa_res.answer,
+            query=req.query,
+            answer=final_answer,
             is_cached=False,
             source="llm",
-            sources=qa_res.sources
+            sources=qa_response.sources,
+            contexts=contexts,
+            superseded=superseded,
         )
-
-
-def get_query_pipeline() -> QueryPipelineService:
-    return QueryPipelineService()

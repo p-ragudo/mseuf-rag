@@ -1,117 +1,94 @@
-import asyncio
-import re
-from typing import List, Tuple
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+import hashlib
+from datetime import datetime, timezone
+from typing import List, Optional
 
-from app.services.sql_db.base import DatabaseRepository
-from app.services.sql_db.schema import DocumentChunk, ScrapedPageStatus
+from sqlalchemy import delete, func, select
 
-
-def clean_markdown_content(text: str) -> str:
-    """Strips unnecessary HTML tags and excess markdown formatting noise."""
-    text = re.sub(r"<[^>]+>", " ", text)
-    text = re.sub(r"\[([^\]]+)\]\([^\)]+\)", r"\1", text)
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    return text.strip()
+from app.core.database import async_session
+from app.models.chunk import Chunk
+from app.models.scraped_page import PageProcessStatus, ScrapedPage
+from app.services.ingest_pipeline.chunker import chunk_markdown, estimate_token_count
+from app.services.ingest_pipeline.clean_markdown import clean_markdown
+from app.utils.temporal import extract_doc_period
 
 
-def extract_metadata_and_body(raw_markdown: str, fallback_url: str) -> Tuple[str, str]:
-    """Extracts frontmatter if present, deriving title and content."""
-    content = raw_markdown
-    title = fallback_url.split("/")[-1].replace("-", " ").replace("_", " ").title() or "Untitled"
+def _page_title_from_url(url: str) -> str:
+    slug = url.rstrip("/").split("/")[-1]
+    if not slug or slug.startswith(("http", "www")):
+        return "Homepage"
+    return slug.replace("-", " ").replace("_", " ").strip().title() or "Homepage"
 
-    if content.startswith("---"):
-        parts = content.split("---", 2)
-        if len(parts) >= 3:
-            for line in parts[1].split("\n"):
-                if line.startswith("title:"):
-                    title = line.replace("title:", "").strip()
-            content = parts[2]
 
-    return title, clean_markdown_content(content)
+def _hash_chunk(content: str) -> str:
+    return hashlib.sha256(content.strip().encode("utf-8")).hexdigest()
 
 
 async def process_and_chunk_pages(
-    tenant_id: str,
-    repo: DatabaseRepository,
-    chunk_size: int = 800,
-    chunk_overlap: int = 150,
-) -> List[DocumentChunk]:
+    web_id: int,
+    org_id: Optional[int] = None,
+    batch_size: int = 20,
+) -> int:
     """
-    Fetches SCRAPED pages from the database, splits them into DocumentChunks,
-    stores them into Postgres immediately per page, and marks each source page PROCESSED.
+    Cleans, chunks, and replaces old chunks safely.
+    Sets qdrant_cleanup_pending=True so orchestrator cleans up dead Qdrant points post-sync.
     """
-    unprocessed_pages = await repo.list_pages_by_status(
-        tenant_id=tenant_id,
-        status=ScrapedPageStatus.SCRAPED,
-    )
+    async with async_session() as session:
+        conditions = [
+            ScrapedPage.web_id == web_id,
+            ScrapedPage.status == PageProcessStatus.COMPLETED,
+            ScrapedPage.chunked_at.is_(None),
+            ScrapedPage.markdown_content.is_not(None),
+        ]
+        if org_id is not None:
+            conditions.append(ScrapedPage.org_id == org_id)
 
-    if not unprocessed_pages:
-        print(f"[{tenant_id}] No unprocessed scraped pages found.")
-        return []
+        res = await session.execute(
+            select(ScrapedPage).where(*conditions).limit(batch_size)
+        )
+        pages = list(res.scalars().all())
+        if not pages:
+            return 0
 
-    print(f"[{tenant_id}] Processing {len(unprocessed_pages)} pages for chunking...")
+        total_created = 0
+        for page in pages:
+            cleaned = clean_markdown(page.markdown_content or "")
+            drafts = chunk_markdown(cleaned, page_title=_page_title_from_url(page.url))
 
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=chunk_size,
-        chunk_overlap=chunk_overlap,
-        separators=["\n\n", "\n", ". ", " ", ""],
-    )
+            # Check if old chunks exist
+            had_old_chunks = (
+                await session.scalar(
+                    select(func.count(Chunk.id)).where(Chunk.page_id == page.id)
+                )
+                or 0
+            ) > 0
 
-    all_chunks: List[DocumentChunk] = []
+            # Atomic swap: Delete old chunks and add new drafts in the same transaction
+            await session.execute(delete(Chunk).where(Chunk.page_id == page.id))
 
-    for page in unprocessed_pages:
-        try:
-            title, clean_content = extract_metadata_and_body(page.raw_markdown, page.source_url)
-            if not clean_content:
-                await repo.update_page_status(page.id, ScrapedPageStatus.FAILED)
-                continue
+            new_chunks: List[Chunk] = [
+                Chunk(
+                    page_id=page.id,
+                    content=d.content,
+                    token_count=estimate_token_count(d.content),
+                    has_qgen=False,
+                    chunk_index=d.chunk_index,
+                    section_id=d.section_id,
+                    heading_path=d.heading_path or None,
+                    part_index=d.part_index,
+                    part_total=d.part_total,
+                    chunk_hash=_hash_chunk(d.content),
+                )
+                for d in drafts
+            ]
 
-            split_texts = text_splitter.split_text(clean_content)
-            page_chunks: List[DocumentChunk] = []
+            if new_chunks:
+                session.add_all(new_chunks)
+                total_created += len(new_chunks)
 
-            for idx, text_chunk in enumerate(split_texts):
-                cleaned_text = text_chunk.strip()
-                if len(cleaned_text) > 40:  # Skip trivial fragments
-                    page_chunks.append(
-                        DocumentChunk(
-                            scraped_page_id=page.id,
-                            tenant_id=tenant_id,
-                            source_url=page.source_url,
-                            title=title,
-                            chunk_index=idx,
-                            content=cleaned_text,
-                        )
-                    )
+            page.doc_period = extract_doc_period(cleaned, url=page.url)
+            if had_old_chunks:
+                page.qdrant_cleanup_pending = True
+            page.chunked_at = datetime.now(timezone.utc)
 
-            if page_chunks:
-                # Immediate atomic write to Postgres for this page's chunks
-                await repo.delete_chunks_for_page(page.id)
-                saved = await repo.save_chunks(page_chunks)
-                all_chunks.extend(saved)
-                await repo.update_page_status(page.id, ScrapedPageStatus.PROCESSED)
-                print(f"[{tenant_id}] Checkpointed {len(saved)} chunks for: {page.source_url}")
-            else:
-                await repo.update_page_status(page.id, ScrapedPageStatus.FAILED)
-
-        except Exception as e:
-            print(f"[{tenant_id}] Error chunking page {page.source_url}: {e}")
-            await repo.update_page_status(page.id, ScrapedPageStatus.FAILED)
-
-    print(f"[{tenant_id}] Successfully persisted {len(all_chunks)} chunks (status=PENDING_QGEN).")
-    return all_chunks
-
-
-if __name__ == "__main__":
-    from app.core.config import settings
-    from app.services.sql_db.postgres_provider import PostgresDatabaseRepository
-
-    async def standalone_chunk():
-        repo = PostgresDatabaseRepository(dsn=settings.database_url)
-        await repo.connect()
-        try:
-            await process_and_chunk_pages(tenant_id="mseuf", repo=repo)
-        finally:
-            await repo.close()
-
-    asyncio.run(standalone_chunk())
+        await session.commit()
+    return total_created

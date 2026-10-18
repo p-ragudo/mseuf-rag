@@ -7,12 +7,12 @@ class BaseSemanticCache(ABC):
     """Abstract Base Class for semantic caching services using pre-computed embeddings."""
 
     @abstractmethod
-    async def get(self, vector: List[float]) -> Optional[CacheEntry]:
-        """Queries the semantic cache using a pre-computed vector.
-        
-        Performs vector range comparison (cosine distance <= threshold).
-        Returns CacheEntry if a match exists, else None.
-        """
+    async def get(
+        self,
+        vector: List[float],
+        org_id: int | str,
+    ) -> Optional[CacheEntry]:
+        """Queries the semantic cache for a specific tenant using a pre-computed vector."""
         pass
 
     @abstractmethod
@@ -21,9 +21,10 @@ class BaseSemanticCache(ABC):
         query: str,
         vector: List[float],
         response: str,
+        org_id: int | str,
         metadata: Optional[CacheMetadata] = None,
     ) -> None:
-        """Stores query, pre-computed vector, response, and metadata in the cache."""
+        """Stores query, pre-computed vector, response, tenant isolation tag, and metadata."""
         pass
 
     @abstractmethod

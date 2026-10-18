@@ -1,23 +1,42 @@
-FROM mcr.microsoft.com/playwright/python:v1.49.0-noble
+# syntax=docker/dockerfile:1
+FROM python:3.12-slim-bookworm
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    UV_SYSTEM_PYTHON=1
+
+# 1. Install base OS build and database packages
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    ca-certificates \
+    build-essential \
+    libpq-dev \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# 2. Grab the uv binary
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
 WORKDIR /app
 
-# Install uv for fast dependency management
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
+# 3. Copy requirements first to leverage Docker layer caching
+COPY requirements.txt ./
 
-# Copy dependency definitions first for layer caching
-COPY pyproject.toml uv.lock* ./
+# 4. Install all Python dependencies via uv directly to system site-packages
+RUN uv pip install -r requirements.txt
 
-# Install project dependencies
-RUN uv sync --frozen --no-cache
+# 5. Install Crawl4AI Playwright browser binaries and system libs
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+RUN python -m playwright install --with-deps chromium
 
-# Ensure Chromium browser binaries are installed
-RUN uv run playwright install chromium
-
-# Copy application source code
+# 6. Copy the rest of the backend codebase
 COPY . .
 
-# Expose internal FastAPI port
+# 7. Record which commit this image was built from (checked by the deploy workflow)
+ARG GIT_SHA=unknown
+LABEL git.sha=$GIT_SHA
+
 EXPOSE 8000
 
-CMD ["uv", "run", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

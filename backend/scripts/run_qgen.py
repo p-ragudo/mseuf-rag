@@ -11,8 +11,6 @@ from app.scraper.ingest import load_and_chunk_knowledge_base
 from backend.app.services.llm_qgen.base_qgen import BaseQuestionGenerator
 from backend.app.services.llm_qgen.factory import get_question_generator
 from backend.app.services.llm_qgen.schema import RawChunk
-from app.utils.checkpoint import JsonlCheckpoint
-
 
 class EnrichedChunk(RawChunk):
     generated_questions: List[Any] = []

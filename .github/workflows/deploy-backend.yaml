@@ -1,0 +1,70 @@
+name: Deploy backend
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "backend/**"
+      - "docker-compose.yml"
+      - ".github/workflows/deploy-backend.yaml"
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-backend
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Sync repo (without frontend)
+        run: |
+          rsync -az --delete \
+            --exclude '.git' \
+            --exclude '/.github' \
+            --exclude '/frontend' \
+            --exclude '/backend/.env' \
+            --exclude '.venv' \
+            --exclude '__pycache__' \
+            --exclude 'node_modules' \
+            -e "ssh -i ~/.ssh/deploy_key" \
+            ./ ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}:~/app/
+
+      - name: Build, restart and verify
+        run: |
+          ssh -i ~/.ssh/deploy_key ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} \
+            "GIT_SHA=${{ github.sha }} bash -s" <<'EOF'
+          set -Eeuo pipefail
+          cd ~/app
+          trap 'echo "--- deploy failed, recent logs ---"; docker compose logs --tail 80 || true' ERR
+
+          # Fail if the old non-Docker service is back
+          if systemctl is-active --quiet fastapi; then
+            echo "Legacy fastapi systemd service is running. Disable it." >&2
+            exit 1
+          fi
+
+          export GIT_SHA
+          docker compose build
+          docker compose up -d --force-recreate --remove-orphans --wait --wait-timeout 180
+
+          # The running container must be this exact commit
+          running=$(docker inspect mseuf_rag_api --format '{{index .Config.Labels "git.sha"}}')
+          if [ "$running" != "$GIT_SHA" ]; then
+            echo "Running image is $running, expected $GIT_SHA" >&2
+            exit 1
+          fi
+
+          curl -fsS http://127.0.0.1:8000/openapi.json > /dev/null
+          docker image prune -f
+          EOF

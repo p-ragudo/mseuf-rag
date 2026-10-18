@@ -66,11 +66,62 @@ uv pip compile requirements.in --universal -o requirements.txt
 uv pip sync requirements.txt
 ```
 
+## Install playwright first (if you don't have it yet) before running the app:
+Make sure you are in the backend directory
+```
+uv run playwright install --with-deps chromium
+```
+
 ## To run the backend, run:
 ```
-uv run uvicorn app.main:app --reload
+uv run uvicorn app.main:app --reload --reload-dir app
+```
+or
+```
+uv run fastapi run app/main.py
+```
 
-# or if you have fastapi[standard] installed, you can also use FastAPI's built-in CLI:
+## Stopping background processes in the backend
+When you stop the fastapi application, it may not always stop the other background processes.
 
-uv run fastapi dev app/main.py
+(this is on linux)
+```bash
+pkill -9 -f "python" || true
+pkill -9 -f "uvicorn" || true
+pkill -9 -f "telegram_bot" || true
+```
+
+## Environment variables to watch out for
+```bash
+# ==============================================================================
+# Production & Base Environments
+# ==============================================================================
+DATABASE_URL=value
+SEMANTIC_CACHE_INDEX_NAME=value
+COLLECTION_NAME=value
+TELEGRAM_BOT_TOKEN=value
+TELEGRAM_BOT_FASTAPI_KEY=value
+
+# ==============================================================================
+# Test / Non-Prod Environments
+# ==============================================================================
+DATABASE_URL_NOT_PROD=value
+SEMANTIC_CACHE_INDEX_NAME_NOT_PROD=value
+COLLECTION_NAME_NOT_PROD=value
+TELEGRAM_BOT_TOKEN_NOT_PROD=value
+TELEGRAM_BOT_FASTAPI_KEY_NOT_PROD=value
+
+# ==============================================================================
+# "On-Off" Environment Routing Flags
+# ==============================================================================
+# Toggle to switch individual resources between Production and Non-Production
+DATABASE_URL_USE_PROD=true
+SEMANTIC_CACHE_INDEX_NAME_USE_PROD=true
+COLLECTION_NAME_USE_PROD=true
+
+# (Current prod is on the test Qdrant DB)
+USE_TEST_QDRANT_DB=false
+
+# Telegram Bot Environment Switch
+TELEGRAM_BOT_USE_PROD=false
 ```

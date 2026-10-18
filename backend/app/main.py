@@ -4,27 +4,48 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
-from app.api.v1.query import router as query_router
 from app.core.config import settings
 from app.core.database import engine, Base
 from app.routes.auth import router as auth_router
+from app.routes.ingest import router as ingest_router
+from app.routes.orgs import router as orgs_router
+from app.routes.query import router as query_router
+from app.routes.websites import router as websites_router
+from app.routes.stats import router as stats_router
+from app.routes.branding import router as branding_router
+from app.services.embeddings.factory import get_embedder
+from app.services.vector_db.factory import get_vector_db
 from app.utils.telegram_bot import start_telegram_bot_listener
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # 1. Database schema migrations / creation
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-        
-    # Start telegram bot background worker
+
+    # 2. Vector DB bootstrap: guarantees collection and group_id payload index exist
+    vector_db = get_vector_db()
+    embedder = get_embedder()
+    await vector_db.create_collection_if_not_exists(
+        collection_name=settings.resolved_collection_name,
+        dense_vector_size=embedder.dimension,
+        distance="Cosine",
+    )
+
+    # 3. Background services
     poller_task = asyncio.create_task(start_telegram_bot_listener())
-    
+
     yield
-    # Cancel gracefully on shutdown
+
+    # Teardown
     poller_task.cancel()
     try:
         await poller_task
     except asyncio.CancelledError:
         pass
+
+    await vector_db.close()
 
 
 app = FastAPI(lifespan=lifespan)
@@ -32,6 +53,8 @@ app = FastAPI(lifespan=lifespan)
 origins = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
+    "https://mseuf-rag.vercel.app",
+    "https://mseuf-rag-test.netlify.app"
 ]
 
 app.add_middleware(
@@ -43,12 +66,17 @@ app.add_middleware(
 )
 
 app.include_router(auth_router)
+app.include_router(orgs_router)
+app.include_router(websites_router)
+app.include_router(ingest_router)
 app.include_router(query_router)
+app.include_router(stats_router)
+app.include_router(branding_router)
 
 if __name__ == "__main__":
     uvicorn.run(
-        "app.main:app", 
-        host=settings.SERVER_BIND_HOST, 
-        port=settings.PORT, 
-        reload=True
+        "app.main:app",
+        host=settings.SERVER_BIND_HOST,
+        port=settings.PORT,
+        reload=True,
     )

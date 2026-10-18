@@ -1,14 +1,43 @@
 from typing import List, Optional
 from pydantic import BaseModel, Field
 
+from app.services.llm_qa.schema import RetrievedContextItem
+from app.schemas.tenant import ChatTurn
 
-class PipelineQueryRequest(BaseModel):
+
+class QueryBodyRequest(BaseModel):
+    """Client-facing request body schema shown in OpenAPI / Swagger UI."""
     query: str = Field(..., min_length=2, max_length=1000, description="User question")
     session_id: Optional[str] = Field(None, description="Optional chat session identifier")
 
 
+class PipelineQueryRequest(BaseModel):
+    """Internal schema passed across the query pipeline stages."""
+    query: str = Field(..., min_length=2, max_length=1000, description="User question")
+    org_id: int = Field(..., description="Tenant organization ID passed via URL path")
+    session_id: Optional[str] = Field(None, description="Optional chat session identifier")
+    top_k: Optional[int] = Field(None, description="Internal top-k override, defaults to server configuration")
+
+    """History of earlier turns in this chat session, oldest first."""
+    history: list[ChatTurn] = Field(default_factory=list)
+
+class SupersededInfo(BaseModel):
+    """Telemetry: a retrieved document removed because a fresher near-duplicate exists."""
+    source_url: str
+    heading_path: str = ""
+    reason: str
+    superseded_by: str = ""
+
+
 class PipelineQueryResponse(BaseModel):
+    query: Optional[str] = Field(default=None, description="The incoming user query")
     answer: str
     is_cached: bool = False
     source: str = Field(..., description="'cache', 'llm', or 'fallback'")
     sources: List[str] = Field(default_factory=list, description="Source URLs or reference links")
+    contexts: List[RetrievedContextItem] = Field(default_factory=list, description="Passages passed to QA LLM")
+    superseded: List[SupersededInfo] = Field(
+        default_factory=list, description="Stale documents dropped in favour of fresher ones"
+    )
+    
+    response_id: int | None = None

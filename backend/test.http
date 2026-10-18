@@ -4,7 +4,7 @@ Content-Type: application/json
 
 {
   "email": "test@mseuf.edu.ph",
-  "password": "testpass123",
+  "password": "test",
   "first_name": "Test",
   "last_name": "User"
 }
@@ -14,6 +14,47 @@ POST http://127.0.0.1:8000/auth/login
 Content-Type: application/json
 
 {
-  "email": "test@mseuf.edu.ph",
-  "password": "testpass123"
+  "email": "test@test.com",
+  "password": "test"
+}
+
+### Create org
+@token = eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxIiwiZXhwIjoxNzkwNjk1OTY1fQ.S1mgPWu6QUGQwntbTbyJIkAJrz1IWaZHU4q-_vQjrJI
+
+POST http://127.0.0.1:8000/orgs/
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "name": "Test Organization"
+}
+
+### Get orgs
+@token = eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxIiwiZXhwIjoxNzkwNjk2MzgzfQ.XZrZs4JCjlM3TL_c1abxyv8Qiar0FI-5fMNnTHkTr-0
+
+GET http://127.0.0.1:8000/orgs/
+Authorization: Bearer {{token}}
+
+### Add member in org
+@token = eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxIiwiZXhwIjoxNzkwNjk2MzgzfQ.XZrZs4JCjlM3TL_c1abxyv8Qiar0FI-5fMNnTHkTr-0
+
+POST http://127.0.0.1:8000/orgs/2/add-member?user_id=2
+Authorization: Bearer {{token}}
+
+### Remove member from org
+@token = eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxIiwiZXhwIjoxNzkwNjk2MzgzfQ.XZrZs4JCjlM3TL_c1abxyv8Qiar0FI-5fMNnTHkTr-0
+
+DELETE http://127.0.0.1:8000/orgs/2/remove-member?user_id=2
+Authorization: Bearer {{token}}
+
+### Stats
+@token = eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxIiwiZXhwIjoxNzkxOTQ1MjM2fQ.0ppgidqycjclCQT5tLRjcosbUn-5rXYZnMuYR6QkylM
+
+POST http://127.0.0.1:8000/stats
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "org_id": 1,
+  "range": "last_7_days"
 }
