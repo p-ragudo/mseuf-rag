@@ -68,6 +68,8 @@ users 1--* org_members *--1 orgs 1--* websites 1--1 website_scrape_schedules
 |---|---|
 | `orgs` | id, creator_id, name[cite: 1, 6] |
 | `org_members` | (user_id, org_id) PK, `roles` string ("admin"/"member"), **roles are stored but not enforced across endpoints**[cite: 1, 6] |
+| `org_chat_settings` | `org_id` PK/FK, configurable `assistant_name` (defaults to "Chat Assistant") |
+| `org_chat_headers` | `org_id` PK/FK, configurable `header_tagline` (defaults to "Admissions Intelligence Hub") |
 | `websites` | id, org_id, url, `status` (PENDING/IN_PROGRESS/COMPLETED/FAILED), error_message[cite: 1, 6] |
 | `website_scrape_schedules` | id, web_id (unique FK), interval_days, time_of_scrape, last/next_scraped_at. **No background scheduler consumes this yet** [PLANNED][cite: 1, 6] |
 | `scraped_pages` | id, org_id, web_id, url, markdown_content, `status` (PENDING/IN_PROGRESS/COMPLETED/FAILED), retries, chunked_at. Unique (`org_id`, `web_id`, `url`)[cite: 1, 6] |

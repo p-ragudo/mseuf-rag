@@ -4,6 +4,8 @@
   import DOMPurify from "dompurify";
   import {
     DEFAULT_COLOR,
+    DEFAULT_ASSISTANT_NAME,
+    DEFAULT_HEADER_TAGLINE,
     HttpError,
     contrastColor,
     fetchBranding,
@@ -61,6 +63,8 @@
   // Per-organization look, loaded from the backend (defaults until it arrives)
   let color = $state(DEFAULT_COLOR);
   let mascotUrl = $state<string | null>(null);
+  let assistantName = $state(DEFAULT_ASSISTANT_NAME);
+  let headerTagline = $state(DEFAULT_HEADER_TAGLINE);
 
   // A missing organization comes back as 404 "Organization ... not found" (or 422
   // when the id isn't a number). A bare 404 "Not Found" means the route itself
@@ -77,6 +81,8 @@
       if (org !== orgId) return; // organization changed while loading
       color = branding.color;
       mascotUrl = branding.mascot_url;
+      assistantName = branding.assistant_name;
+      headerTagline = branding.header_tagline;
       orgStatus = "ready";
     } catch (error) {
       if (org !== orgId) return;
@@ -101,6 +107,8 @@
     orgStatus = "loading";
     color = DEFAULT_COLOR;
     mascotUrl = null;
+    assistantName = DEFAULT_ASSISTANT_NAME;
+    headerTagline = DEFAULT_HEADER_TAGLINE;
     loadBranding(orgId);
   });
 
@@ -381,10 +389,10 @@
         <h2
           class="text-xs font-bold uppercase tracking-wider text-[color:var(--brand)]"
         >
-          Admissions Intelligence Hub
+          {headerTagline}
         </h2>
 
-        <h1 class="text-xl font-semibold">Chat Assistant</h1>
+        <h1 class="text-xl font-semibold">{assistantName}</h1>
       </div>
     </div>
 

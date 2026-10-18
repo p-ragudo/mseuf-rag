@@ -3,17 +3,27 @@
   import AppLayout from "../components/AppLayout.svelte";
   import WhiteCard from "../components/WhiteCard.svelte";
   import {
+    DEFAULT_ASSISTANT_NAME,
     DEFAULT_COLOR,
+    DEFAULT_HEADER_TAGLINE,
     MAX_MASCOT_BYTES,
     contrastColor,
     fetchBranding,
     saveBranding,
     type Branding,
   } from "../branding.svelte";
+  import { authFetch } from "../auth.svelte";
 
-  // TODO: replace with the logged-in user's organization id
-  const orgId = 1;
+  type Organization = { id: number; name: string };
 
+  let organizations = $state<Organization[]>([]);
+  let selectedOrgId = $state("");
+  let organizationsLoading = $state(true);
+  let organizationRequest = 0;
+  let assistantName = $state(DEFAULT_ASSISTANT_NAME);
+  let savedAssistantName = $state(DEFAULT_ASSISTANT_NAME);
+  let headerTagline = $state(DEFAULT_HEADER_TAGLINE);
+  let savedHeaderTagline = $state(DEFAULT_HEADER_TAGLINE);
   let mascotColor = $state(DEFAULT_COLOR);
   let mascotPreview = $state<string | null>(null);
 
@@ -30,12 +40,18 @@
   let successMessage = $state("");
 
   let dirty = $derived(
-    mascotColor.toLowerCase() !== savedColor.toLowerCase() ||
+    assistantName !== savedAssistantName ||
+      headerTagline !== savedHeaderTagline ||
+      mascotColor.toLowerCase() !== savedColor.toLowerCase() ||
       pendingFile !== null ||
       removeMascot,
   );
 
   function applySaved(branding: Branding) {
+    savedAssistantName = branding.assistant_name;
+    assistantName = branding.assistant_name;
+    savedHeaderTagline = branding.header_tagline;
+    headerTagline = branding.header_tagline;
     savedColor = branding.color;
     savedMascotUrl = branding.mascot_url;
     mascotColor = branding.color;
@@ -44,19 +60,48 @@
     removeMascot = false;
   }
 
-  async function load() {
+  async function load(orgId: string) {
+    const request = ++organizationRequest;
     loading = true;
     errorMessage = "";
     try {
-      applySaved(await fetchBranding(orgId));
-    } catch {
-      errorMessage = "Could not load your saved settings.";
+      const branding = await fetchBranding(orgId);
+      if (request === organizationRequest) applySaved(branding);
+    } catch (error) {
+      if (request === organizationRequest) {
+        errorMessage =
+          error instanceof Error ? error.message : "Could not load your saved settings.";
+      }
     } finally {
-      loading = false;
+      if (request === organizationRequest) loading = false;
     }
   }
 
-  onMount(load);
+  onMount(async () => {
+    try {
+      const response = await authFetch("/orgs/");
+      if (!response.ok) {
+        throw new Error(`Could not load organizations (${response.status}).`);
+      }
+      organizations = await response.json();
+      selectedOrgId = organizations.length > 0 ? String(organizations[0].id) : "";
+      if (organizations.length === 0) {
+        errorMessage = "Your account does not belong to an organization.";
+        loading = false;
+      }
+    } catch (error) {
+      errorMessage =
+        error instanceof Error ? error.message : "Could not load organizations.";
+      loading = false;
+    } finally {
+      organizationsLoading = false;
+    }
+  });
+
+  $effect(() => {
+    const orgId = selectedOrgId;
+    if (orgId) void load(orgId);
+  });
 
   function handleMascotUpload(event: Event) {
     const input = event.currentTarget as HTMLInputElement;
@@ -99,6 +144,8 @@
   }
 
   function discard() {
+    assistantName = savedAssistantName;
+    headerTagline = savedHeaderTagline;
     mascotColor = savedColor;
     mascotPreview = savedMascotUrl;
     pendingFile = null;
@@ -108,7 +155,7 @@
   }
 
   async function save() {
-    if (!dirty || saving) return;
+    if (!dirty || saving || !selectedOrgId) return;
 
     saving = true;
     errorMessage = "";
@@ -116,8 +163,10 @@
 
     try {
       applySaved(
-        await saveBranding(orgId, {
+        await saveBranding(selectedOrgId, {
           color: mascotColor,
+          assistantName,
+          headerTagline,
           mascot: pendingFile,
           removeMascot,
         }),
@@ -146,10 +195,23 @@
       <h1 class="text-3xl font-bold">Mascot</h1>
 
       <p class="text-gray-600">
-        Customize the mascot and color used by your organization's chat
-        assistant.
+        Customize the name, header tagline, mascot, and color used by your
+        organization's chat assistant.
       </p>
     </div>
+
+    <label class="mb-5 block max-w-md">
+      <span class="mb-2 block text-sm font-semibold">Organization</span>
+      <select
+        bind:value={selectedOrgId}
+        disabled={organizationsLoading || organizations.length === 0 || saving}
+        class="w-full rounded-md border border-outline bg-white px-3 py-2.5 text-sm outline-none focus:border-primary disabled:opacity-60"
+      >
+        {#each organizations as organization (organization.id)}
+          <option value={String(organization.id)}>{organization.name}</option>
+        {/each}
+      </select>
+    </label>
 
     <div class="grid grid-cols-1 gap-5 xl:grid-cols-[360px_minmax(0,1fr)]">
       <!-- Settings -->
@@ -158,7 +220,53 @@
           <div class="mb-4">
             <h2 class="text-lg font-bold">Mascot settings</h2>
             <p class="mt-1 text-sm text-gray-500">
-              Choose a mascot and the primary color for your chat.
+              Set the chat name, header tagline, mascot, and primary color.
+            </p>
+          </div>
+
+          <div class="mb-5">
+            <label
+              for="header-tagline"
+              class="mb-2 block text-sm font-semibold text-gray-800"
+            >
+              Header tagline
+            </label>
+            <input
+              id="header-tagline"
+              type="text"
+              bind:value={headerTagline}
+              maxlength="80"
+              required
+              disabled={loading || saving}
+              oninput={() => (successMessage = "")}
+              class="w-full rounded-md border border-outline bg-white px-3 py-2.5 text-sm outline-none focus:border-primary disabled:opacity-60"
+              placeholder={DEFAULT_HEADER_TAGLINE}
+            />
+            <p class="mt-1 text-xs text-gray-500">
+              Up to 80 characters. This appears above the chat name.
+            </p>
+          </div>
+
+          <div class="mb-5">
+            <label
+              for="assistant-name"
+              class="mb-2 block text-sm font-semibold text-gray-800"
+            >
+              Chat header name
+            </label>
+            <input
+              id="assistant-name"
+              type="text"
+              bind:value={assistantName}
+              maxlength="50"
+              required
+              disabled={loading || saving}
+              oninput={() => (successMessage = "")}
+              class="w-full rounded-md border border-outline bg-white px-3 py-2.5 text-sm outline-none focus:border-primary disabled:opacity-60"
+              placeholder={DEFAULT_ASSISTANT_NAME}
+            />
+            <p class="mt-1 text-xs text-gray-500">
+              Up to 50 characters. This name appears in the chat header.
             </p>
           </div>
 
@@ -384,10 +492,12 @@
                     class="text-xs font-bold uppercase tracking-wider"
                     style={`color: ${mascotColor};`}
                   >
-                    Admissions Intelligence Hub
+                    {headerTagline.trim() || DEFAULT_HEADER_TAGLINE}
                   </span>
 
-                  <span class="text-base font-semibold"> Chat Assistant </span>
+                  <span class="max-w-56 truncate text-base font-semibold">
+                    {assistantName.trim() || DEFAULT_ASSISTANT_NAME}
+                  </span>
                 </div>
               </div>
             </header>

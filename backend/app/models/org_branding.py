@@ -29,3 +29,25 @@ class OrgBranding(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
     )
+
+
+class OrgChatSettings(Base):
+    __tablename__ = "org_chat_settings"
+
+    org_id: Mapped[int] = mapped_column(
+        ForeignKey("orgs.id", ondelete="CASCADE"), primary_key=True
+    )
+    assistant_name: Mapped[str] = mapped_column(
+        String(50), default="Chat Assistant", nullable=False
+    )
+
+
+class OrgChatHeader(Base):
+    __tablename__ = "org_chat_headers"
+
+    org_id: Mapped[int] = mapped_column(
+        ForeignKey("orgs.id", ondelete="CASCADE"), primary_key=True
+    )
+    header_tagline: Mapped[str] = mapped_column(
+        String(80), default="Admissions Intelligence Hub", nullable=False
+    )

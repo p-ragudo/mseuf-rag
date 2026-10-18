@@ -4,6 +4,8 @@ import { authFetch } from "./auth.svelte";
 const API_URL: string = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
 
 export const DEFAULT_COLOR = "#7A1F2B";
+export const DEFAULT_ASSISTANT_NAME = "Chat Assistant";
+export const DEFAULT_HEADER_TAGLINE = "Admissions Intelligence Hub";
 export const MAX_MASCOT_BYTES = 512 * 1024; // keep in sync with the backend
 
 /** An API error that keeps the HTTP status, so callers can tell a 404 from a network failure. */
@@ -20,17 +22,23 @@ export class HttpError extends Error {
 export interface Branding {
   color: string;
   mascot_url: string | null; // absolute URL, ready to use in <img src>
+  assistant_name: string;
+  header_tagline: string;
 }
 
 interface BrandingResponse {
   color: string;
   mascot_url: string | null; // relative path from the API
+  assistant_name?: string;
+  header_tagline?: string;
 }
 
 function toBranding(data: BrandingResponse): Branding {
   return {
     color: data.color,
     mascot_url: data.mascot_url ? `${API_URL}${data.mascot_url}` : null,
+    assistant_name: data.assistant_name || DEFAULT_ASSISTANT_NAME,
+    header_tagline: data.header_tagline || DEFAULT_HEADER_TAGLINE,
   };
 }
 
@@ -57,10 +65,18 @@ export async function fetchBranding(orgId: string | number): Promise<Branding> {
 /** Authenticated: used by the Mascot page. */
 export async function saveBranding(
   orgId: string | number,
-  options: { color: string; mascot?: File | null; removeMascot?: boolean },
+  options: {
+    color: string;
+    assistantName: string;
+    headerTagline: string;
+    mascot?: File | null;
+    removeMascot?: boolean;
+  },
 ): Promise<Branding> {
   const form = new FormData();
   form.append("color", options.color);
+  form.append("assistant_name", options.assistantName);
+  form.append("header_tagline", options.headerTagline);
   if (options.mascot) form.append("mascot", options.mascot);
   else if (options.removeMascot) form.append("remove_mascot", "true");
 
