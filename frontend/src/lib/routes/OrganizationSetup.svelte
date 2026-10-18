@@ -54,15 +54,15 @@
 </script>
 
 <main
-  class="flex min-h-screen items-center justify-center bg-[#F5F8FB] px-4 py-10"
+  class="flex h-dvh min-h-0 flex-col items-center overflow-y-auto bg-[#F5F8FB] px-3 py-6 sm:px-4 sm:py-10"
 >
   <section
-    class="w-full max-w-xl rounded-xl border border-outline bg-white p-8 shadow-sm"
+    class="my-auto w-full max-w-xl shrink-0 rounded-xl border border-outline bg-white p-5 shadow-sm sm:p-8"
   >
     <p class="text-xs font-bold uppercase tracking-wider text-primary">
       Organization access
     </p>
-    <h1 class="mt-2 text-2xl font-bold">Join an organization to continue</h1>
+    <h1 class="mt-2 text-xl font-bold sm:text-2xl">Join an organization to continue</h1>
     <p class="mt-3 text-sm leading-6 text-gray-600">
       Your account is not currently a member of an organization, so you cannot
       access its workspace or knowledge. Ask an organization administrator to

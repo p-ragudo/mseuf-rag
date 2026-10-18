@@ -38,9 +38,9 @@
 
 <svelte:window onclick={close} />
 
-<div class="relative inline-block">
+<div class="relative inline-block w-full sm:w-auto">
   <button
-    class="w-60 flex flex-row items-center gap-2 rounded-md border border-outline bg-[#F5F8FB] px-3 py-2 text-sm shadow-sm hover:cursor-pointer transition-colors duration-200"
+    class="flex w-full flex-row items-center gap-2 rounded-md border border-outline bg-[#F5F8FB] px-3 py-2 text-sm shadow-sm transition-colors duration-200 hover:cursor-pointer sm:w-60"
     onclick={(e) => {
       e.stopPropagation();
       toggle();
@@ -58,7 +58,7 @@
   {#if open}
     <div
       transition:fly={{ y: -8, duration: 150 }}
-      class="absolute left-0 mt-2 w-48 rounded-md border border-outline bg-white shadow-lg z-10"
+      class="absolute left-0 z-10 mt-2 w-full min-w-48 rounded-md border border-outline bg-white shadow-lg sm:w-48"
     >
       <ul class="py-1 px-1 max-h-60 overflow-y-auto">
         {#each options as option (option)}

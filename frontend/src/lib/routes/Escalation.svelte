@@ -79,19 +79,19 @@
 </script>
 
 <AppLayout>
-  <div class="flex-1 px-6 py-4 gap-1">
+  <div class="flex-1 px-3 py-4 sm:px-6">
     <h3
-      class="text-primary flex flex-row gap-2 font-semibold text-sm uppercase tracking-wider mb-2"
+      class="mb-2 flex flex-row gap-2 text-sm font-semibold uppercase tracking-wider text-primary"
     >
       <span class="bg-primary w-1 rounded-2xl"></span>INSTITUTION COMMAND CENTER
     </h3>
-    <h1 class="text-3xl font-bold">Unanswered inquiries</h1>
+    <h1 class="text-2xl font-bold sm:text-3xl">Unanswered inquiries</h1>
     <p class=" text-gray-600">
       Review questions that need a human answer or a better knowledge source.
     </p>
 
-    <WhiteCard style="my-4 flex flex-row justify-between gap-4">
-      <div class="flex flex-row gap-4 items-center">
+    <WhiteCard style="my-4 flex flex-col justify-between gap-4 xl:flex-row">
+      <div class="flex flex-col items-stretch gap-3 sm:flex-row sm:flex-wrap sm:items-center sm:gap-4">
         <FilterIcon />
         <SelectDropdown
           label="Timeframe"
@@ -106,10 +106,10 @@
           icon={PersonsIcon}
         />
       </div>
-      <div class="flex flex-row items-center gap-3">
+      <div class="flex flex-wrap items-center justify-between gap-2 sm:justify-start sm:gap-3">
         <span
           transition:fade={{ duration: 150 }}
-          class="text-sm font-medium text-gray-500"
+          class="text-xs font-medium text-gray-500 sm:text-sm"
         >
           {#if isRefreshed}
             Data refreshed!

@@ -182,7 +182,7 @@
 </script>
 
 <AppLayout>
-  <div class="flex-1 px-6 py-4">
+  <div class="flex-1 px-3 py-4 sm:px-6">
     <!-- Page heading -->
     <div class="mb-5">
       <h3
@@ -192,7 +192,7 @@
         CHAT CUSTOMIZATION
       </h3>
 
-      <h1 class="text-3xl font-bold">Mascot</h1>
+      <h1 class="text-2xl font-bold sm:text-3xl">Mascot</h1>
 
       <p class="text-gray-600">
         Customize the name, header tagline, mascot, and color used by your
@@ -466,7 +466,7 @@
             <header
               class="flex flex-row items-center justify-between gap-4 border-b-2 border-outline bg-white px-4 py-3"
             >
-              <div class="flex flex-row items-center gap-3">
+              <div class="flex min-w-0 flex-row items-center gap-2 sm:gap-3">
                 <div
                   class="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-full"
                   style={`background-color: ${mascotColor}18;`}
@@ -489,13 +489,13 @@
 
                 <div class="flex flex-col">
                   <span
-                    class="text-xs font-bold uppercase tracking-wider"
+                    class="max-w-[55vw] truncate text-[10px] font-bold uppercase tracking-wider sm:max-w-none sm:text-xs"
                     style={`color: ${mascotColor};`}
                   >
                     {headerTagline.trim() || DEFAULT_HEADER_TAGLINE}
                   </span>
 
-                  <span class="max-w-56 truncate text-base font-semibold">
+                  <span class="max-w-[55vw] truncate text-sm font-semibold sm:max-w-56 sm:text-base">
                     {assistantName.trim() || DEFAULT_ASSISTANT_NAME}
                   </span>
                 </div>
@@ -611,7 +611,7 @@
 
             <!-- Input -->
             <footer class="border-t-2 border-outline bg-white px-4 py-3">
-              <div class="mx-auto flex max-w-2xl flex-row items-end gap-2">
+              <div class="mx-auto flex max-w-2xl flex-col items-stretch gap-2 sm:flex-row sm:items-end">
                 <div
                   class="flex-1 rounded-md border border-outline bg-white px-4 py-2.5 text-sm text-gray-400"
                 >
@@ -620,7 +620,7 @@
 
                 <button
                   type="button"
-                  class="rounded-md px-4 py-2.5 text-sm font-semibold "
+                  class="rounded-md px-4 py-2.5 text-sm font-semibold sm:w-auto"
                   style={`background-color: ${mascotColor}; color: ${contrastColor(mascotColor)};`}
                 >
                   Send

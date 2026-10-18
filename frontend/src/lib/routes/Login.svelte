@@ -76,16 +76,16 @@
 </script>
 
 <main
-  class="flex min-h-screen flex-1 flex-col items-center justify-center bg-[#F5F8FB] px-4"
+  class="flex h-dvh min-h-0 flex-1 flex-col items-center overflow-y-auto bg-[#F5F8FB] px-3 py-6 sm:px-4"
 >
   <div
-    class="w-full max-w-md rounded-xl border border-outline bg-white p-8 shadow-sm"
+    class="my-auto w-full max-w-md shrink-0 rounded-xl border border-outline bg-white p-5 shadow-sm sm:p-8"
   >
     <div class="text-center">
       <h2 class="text-xs font-bold uppercase tracking-wider text-primary">
         Admissions Intelligence Hub
       </h2>
-      <h1 class="mt-1 text-2xl font-bold">
+      <h1 class="mt-1 text-xl font-bold sm:text-2xl">
         {mode === "login" ? "Welcome back" : "Create your account"}
       </h1>
       <p class="mt-1 text-sm text-gray-500">
@@ -123,7 +123,7 @@
       {#if mode === "register"}
         <div
           transition:fly={{ y: -8, duration: 150 }}
-          class="flex flex-row gap-4"
+          class="flex flex-col gap-4 sm:flex-row"
         >
           <div class="flex-1">
             <label for="firstName" class="mb-1.5 block text-sm font-bold"

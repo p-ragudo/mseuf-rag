@@ -71,14 +71,14 @@
 <svelte:window onclick={handleWindowClick} onkeydown={handleKeydown} />
 
 <header
-  class="flex flex-row items-center justify-between gap-4 border-b-2 border-b-outline bg-white px-4 py-2"
+  class="flex min-w-0 flex-row items-center justify-between gap-2 border-b-2 border-b-outline bg-white px-3 py-2 sm:gap-4 sm:px-4"
 >
   <div class="flex flex-col justify-center">
-    <h2 class="text-primary">UNI ORG</h2>
+    <h2 class="hidden text-primary sm:block">UNI ORG</h2>
 
-    <h1 class="text-xl font-semibold">
+    <h1 class="max-w-[60vw] text-sm font-semibold leading-tight sm:max-w-none sm:text-xl">
       Admissions Intelligence Hub
-      <span class="font-normal text-[#59616E]">/ Rooney Admin</span>
+      <span class="hidden font-normal text-[#59616E] sm:inline">/ Rooney Admin</span>
     </h1>
   </div>
 
@@ -87,16 +87,16 @@
       type="button"
       aria-haspopup="menu"
       aria-expanded={open}
-      class="flex flex-row items-center gap-3 rounded-md px-3 py-1 transition-colors duration-200 hover:cursor-pointer hover:bg-accent hover:text-primary"
+      class="flex min-w-0 flex-row items-center gap-2 rounded-md px-1 py-1 transition-colors duration-200 hover:cursor-pointer hover:bg-accent hover:text-primary sm:gap-3 sm:px-3"
       onclick={() => (open = !open)}
     >
       <div
-        class="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-accent text-sm font-bold text-primary"
+        class="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-accent text-xs font-bold text-primary sm:h-9 sm:w-9 sm:text-sm"
       >
         {initials}
       </div>
 
-      <div class="flex min-w-0 max-w-40 flex-col items-start">
+      <div class="hidden min-w-0 max-w-40 flex-col items-start sm:flex">
         <span class="w-full truncate text-sm font-bold">{displayName}</span>
 
         <span class="w-full truncate text-sm font-normal text-[#59616E]">

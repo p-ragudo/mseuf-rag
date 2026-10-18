@@ -229,25 +229,25 @@
 </script>
 
 <AppLayout>
-  <div class="flex-1 px-6 py-4 gap-1">
+  <div class="flex-1 px-3 py-4 sm:px-6">
     <h3
-      class="text-primary flex flex-row gap-2 font-semibold text-sm uppercase tracking-wider mb-2"
+      class="mb-2 flex flex-row gap-2 text-sm font-semibold uppercase tracking-wider text-primary"
     >
       <span class="bg-primary w-1 rounded-2xl"></span>INSTITUTION COMMAND CENTER
     </h3>
-    <h1 class="text-3xl font-bold">Overview</h1>
+    <h1 class="text-2xl font-bold sm:text-3xl">Overview</h1>
     <p class="text-gray-600">
       See what students ask, and where your team is needed.
     </p>
 
-    <WhiteCard style="my-4 flex flex-row justify-between gap-4">
-      <div class="flex flex-row flex-wrap gap-4 items-center">
-        <label class="flex items-center gap-2 text-sm font-semibold">
+    <WhiteCard style="my-4 flex flex-col justify-between gap-4 lg:flex-row">
+      <div class="flex flex-wrap items-center gap-3 sm:gap-4">
+        <label class="flex min-w-0 flex-col items-start gap-1 text-sm font-semibold sm:flex-row sm:items-center sm:gap-2">
           Organization
           <select
             bind:value={selectedOrgId}
             disabled={organizationsLoading || organizations.length === 0}
-            class="max-w-64 rounded-md border border-outline bg-white px-3 py-2 text-sm font-normal outline-none focus:border-primary disabled:opacity-60"
+            class="w-full max-w-64 rounded-md border border-outline bg-white px-3 py-2 text-sm font-normal outline-none focus:border-primary disabled:opacity-60 sm:w-auto"
           >
             {#each organizations as organization (organization.id)}
               <option value={String(organization.id)}>{organization.name}</option>
@@ -262,8 +262,8 @@
           icon={CalendarIcon}
         />
       </div>
-      <div class="flex flex-row items-center gap-3">
-        <span class="text-sm font-medium text-gray-500">
+      <div class="flex flex-wrap items-center justify-between gap-2 sm:justify-start sm:gap-3">
+        <span class="text-xs font-medium text-gray-500 sm:text-sm">
           {#if loading}
             Refreshing...
           {:else if lastRefreshed}

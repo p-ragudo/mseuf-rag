@@ -11,9 +11,11 @@
   }
 </script>
 
-<aside class="flex h-full w-64 shrink-0 flex-col border-r-2 border-r-outline">
+<aside
+  class="flex h-auto w-full shrink-0 flex-col border-t-2 border-outline bg-white pb-[env(safe-area-inset-bottom)] md:h-full md:w-64 md:border-r-2 md:border-t-0"
+>
   <div
-    class="flex flex-row items-center gap-4 border-b-2 border-b-outline px-4 py-2"
+    class="hidden flex-row items-center gap-4 border-b-2 border-b-outline px-4 py-2 md:flex"
   >
     <div
       class="flex h-10 w-10 items-center justify-center rounded-md bg-primary font-bold text-white"
@@ -29,10 +31,13 @@
     </div>
   </div>
 
-  <nav class="w-full p-4 text-sm font-semibold text-gray-500">
-    <h3>WORKSPACE</h3>
+  <nav
+    aria-label="Workspace navigation"
+    class="w-full p-1 text-sm font-semibold text-gray-500 md:p-4"
+  >
+    <h3 class="hidden md:block">WORKSPACE</h3>
 
-    <ul class="space-y-1">
+    <ul class="flex items-stretch justify-around gap-1 overflow-x-auto md:mt-2 md:block md:space-y-1">
       <NavItem href="/overview" text="Overview" icon={OverviewIcon} />
       <NavItem href="/members" text="Members" icon={PersonsIcon} />
       <NavItem
@@ -45,5 +50,5 @@
     </ul>
   </nav>
 
-  <footer class="mt-auto"></footer>
+  <footer class="mt-auto hidden md:block"></footer>
 </aside>

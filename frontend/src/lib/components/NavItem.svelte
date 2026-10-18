@@ -30,12 +30,12 @@
   let active = $derived(currentRoute === normalizePath(href));
 </script>
 
-<li>
+<li class="min-w-0 flex-1 md:flex-none">
   <a
     {href}
     use:link
     aria-current={active ? "page" : undefined}
-    class={`flex w-full flex-row items-center gap-3 rounded-md p-2 transition-colors duration-200 ${
+    class={`flex w-full flex-col items-center justify-center gap-1 rounded-md px-1 py-2 text-[10px] leading-tight transition-colors duration-200 md:flex-row md:justify-start md:gap-3 md:p-2 md:text-sm ${
       active ? "bg-accent text-primary" : "text-gray-700 hover:bg-gray-200"
     }`}
   >

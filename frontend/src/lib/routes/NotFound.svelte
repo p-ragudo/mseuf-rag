@@ -22,10 +22,10 @@
 </script>
 
 <main
-  class="flex min-h-screen flex-1 flex-col items-center justify-center bg-[#F5F8FB] px-4"
+  class="flex h-dvh min-h-0 flex-1 flex-col items-center overflow-y-auto bg-[#F5F8FB] px-3 py-6 sm:px-4"
 >
   <div
-    class="w-full max-w-md rounded-xl border border-outline bg-white p-8 text-center shadow-sm"
+    class="my-auto w-full max-w-md shrink-0 rounded-xl border border-outline bg-white p-5 text-center shadow-sm sm:p-8"
   >
     <div
       class="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-accent"
@@ -57,7 +57,7 @@
     <h2 class="mt-4 text-xs font-bold uppercase tracking-wider text-primary">
       {eyebrow}
     </h2>
-    <h1 class="mt-1 text-2xl font-bold">{title}</h1>
+    <h1 class="mt-1 text-xl font-bold sm:text-2xl">{title}</h1>
     <p class="mt-2 text-sm text-gray-500">{message}</p>
 
     {#if showHomeButton}

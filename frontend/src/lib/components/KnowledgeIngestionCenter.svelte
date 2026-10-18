@@ -313,19 +313,19 @@
 
 </script>
 
-<div class="rounded-xl border border-outline bg-white p-6 shadow-sm">
+<div class="min-w-0 rounded-xl border border-outline bg-white p-3 shadow-sm sm:p-6">
   <h4 class="text-xs font-bold uppercase tracking-wider text-primary">
     {eyebrow}
   </h4>
 
-  <h2 class="mt-1 text-2xl font-bold">{title}</h2>
+  <h2 class="mt-1 text-xl font-bold sm:text-2xl">{title}</h2>
 
   <p class="mt-1 text-sm text-gray-500">{subtitle}</p>
 
   <!-- Tabs -->
-  <div class="mt-6 flex flex-row gap-6 border-b border-outline">
+  <div class="mt-6 flex flex-wrap gap-x-5 gap-y-2 border-b border-outline sm:gap-6">
     <button
-      class={`flex flex-row items-center gap-2 pb-3 text-sm font-semibold transition-colors duration-200 ${
+      class={`flex min-w-0 flex-1 flex-row items-center gap-2 pb-3 text-left text-xs font-semibold transition-colors duration-200 sm:flex-none sm:text-sm ${
         activeTab === "document"
           ? "border-b-2 border-primary text-primary"
           : "border-b-2 border-transparent text-gray-500 hover:text-gray-700"
@@ -359,7 +359,7 @@
     </button>
 
     <button
-      class={`flex flex-row items-center gap-2 pb-3 text-sm font-semibold transition-colors duration-200 ${
+      class={`flex min-w-0 flex-1 flex-row items-center gap-2 pb-3 text-left text-xs font-semibold transition-colors duration-200 sm:flex-none sm:text-sm ${
         activeTab === "web"
           ? "border-b-2 border-primary text-primary"
           : "border-b-2 border-transparent text-gray-500 hover:text-gray-700"
@@ -397,7 +397,7 @@
   {#if activeTab === "document"}
     <!-- Drop zone -->
     <div
-      class={`mt-6 flex flex-col items-center justify-center rounded-lg border-2 border-dashed px-6 py-14 transition-colors duration-200 ${
+      class={`mt-6 flex flex-col items-center justify-center rounded-lg border-2 border-dashed px-3 py-10 text-center sm:px-6 sm:py-14 ${
         isDraggingOver
           ? "border-primary bg-accent/40"
           : "border-gray-200 bg-gray-50/60"

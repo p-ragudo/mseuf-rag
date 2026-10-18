@@ -38,13 +38,13 @@
 </script>
 
 <AppLayout>
-  <div class="flex-1 px-6 py-4 gap-1">
+  <div class="flex-1 px-3 py-4 sm:px-6">
     <h3
-      class="text-primary flex flex-row gap-2 font-semibold text-sm uppercase tracking-wider mb-2"
+      class="mb-2 flex flex-row gap-2 text-sm font-semibold uppercase tracking-wider text-primary"
     >
       <span class="bg-primary w-1 rounded-2xl"></span>INSTITUTION COMMAND CENTER
     </h3>
-    <h1 class="text-3xl font-bold">Knowledge & ingestion</h1>
+    <h1 class="text-2xl font-bold sm:text-3xl">Knowledge & ingestion</h1>
     <p class="mb-4 text-gray-600">
       Review the content powering Rooney’s answers and prepare new sources.
     </p>

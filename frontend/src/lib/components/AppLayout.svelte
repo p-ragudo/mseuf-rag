@@ -6,10 +6,10 @@
   let { children }: { children: Snippet } = $props();
 </script>
 
-<div class="flex h-screen w-full">
+<div class="flex h-dvh w-full flex-col-reverse md:flex-row">
   <Sidebar />
 
-  <main class="min-w-0 flex-1 overflow-y-auto bg-[#f5f8fb]">
+  <main class="min-h-0 min-w-0 flex-1 overflow-y-auto bg-[#f5f8fb]">
     <Heading />
     {@render children()}
   </main>

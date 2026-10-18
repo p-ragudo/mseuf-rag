@@ -423,7 +423,7 @@
   />
 {:else if orgStatus === "loading" || knowledgeBaseStatus === "loading"}
   <div
-    class="flex h-screen items-center justify-center bg-[#F5F8FB]"
+    class="flex h-dvh items-center justify-center bg-[#F5F8FB]"
     aria-busy="true"
     aria-label="Loading chat"
   >
@@ -431,7 +431,7 @@
   </div>
 {:else if knowledgeBaseStatus === "incomplete"}
   <main
-    class="flex h-screen items-center justify-center bg-[#F5F8FB] px-6 text-center"
+    class="flex h-dvh items-center justify-center bg-[#F5F8FB] px-4 text-center sm:px-6"
     style="--brand: {color}; --brand-tint: {color}18; --brand-contrast: {contrastColor(color)};"
     role="status"
   >
@@ -454,7 +454,7 @@
   </main>
 {:else if knowledgeBaseStatus === "error"}
   <main
-    class="flex h-screen items-center justify-center bg-[#F5F8FB] px-6 text-center"
+    class="flex h-dvh items-center justify-center bg-[#F5F8FB] px-4 text-center sm:px-6"
     style="--brand: {color}; --brand-tint: {color}18; --brand-contrast: {contrastColor(color)};"
     role="alert"
   >
@@ -476,24 +476,24 @@
   </main>
 {:else}
 <div
-  class="flex h-screen flex-col bg-[#F5F8FB]"
+  class="flex h-dvh flex-col bg-[#F5F8FB]"
   style="--brand: {color}; --brand-tint: {color}18; --brand-contrast: {contrastColor(color)};"
 >
   <!-- Header -->
   <header
-    class="flex flex-row items-center justify-between gap-4 border-b-2 border-b-outline bg-white px-4 py-3"
+    class="flex flex-row items-center justify-between gap-2 border-b-2 border-b-outline bg-white px-3 py-3 sm:gap-4 sm:px-4"
   >
-    <div class="flex flex-row items-center gap-3">
+    <div class="flex min-w-0 flex-row items-center gap-2 sm:gap-3">
       {@render avatar("md")}
 
       <div class="flex flex-col justify-center">
         <h2
-          class="text-xs font-bold uppercase tracking-wider text-[color:var(--brand)]"
+          class="max-w-[55vw] truncate text-[10px] font-bold uppercase tracking-wider text-[color:var(--brand)] sm:max-w-none sm:text-xs"
         >
           {headerTagline}
         </h2>
 
-        <h1 class="text-xl font-semibold">{assistantName}</h1>
+        <h1 class="max-w-[55vw] truncate text-base font-semibold sm:max-w-none sm:text-xl">{assistantName}</h1>
       </div>
     </div>
 
@@ -507,7 +507,7 @@
   </header>
 
   <!-- Messages -->
-  <div bind:this={listEl} class="flex-1 overflow-y-auto px-4 py-6">
+  <div bind:this={listEl} class="min-h-0 flex-1 overflow-y-auto px-3 py-4 sm:px-4 sm:py-6">
     <div class="mx-auto flex max-w-3xl flex-col gap-4">
       {#if messages.length === 0}
         <div class="mt-16 flex flex-col items-center text-center">
@@ -681,7 +681,7 @@
 
   <!-- Input -->
   <footer class="border-t-2 border-t-outline bg-white px-4 py-3">
-    <p class="mx-auto mb-2 max-w-3xl text-xs text-gray-500">
+    <p class="mx-auto mb-2 max-w-3xl text-[10px] leading-relaxed text-gray-500 sm:text-xs">
       Common emails, phone numbers, government IDs, payment cards, addresses,
       and labeled names are redacted before processing. Detection is
       best-effort—avoid sharing sensitive information.
@@ -694,7 +694,7 @@
         onkeydown={onKeydown}
         rows="1"
         placeholder="Type your question..."
-        class="flex-1 resize-none rounded-md border border-outline px-4 py-2.5 text-sm outline-none focus:border-[color:var(--brand)]"
+        class="min-w-0 flex-1 resize-none rounded-md border border-outline px-3 py-2.5 text-sm outline-none focus:border-[color:var(--brand)] sm:px-4"
       ></textarea>
 
       <button

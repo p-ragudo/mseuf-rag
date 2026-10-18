@@ -56,17 +56,17 @@
 
 <svelte:window onclick={closeAction} />
 
-<div class="rounded-xl border border-outline bg-white shadow-sm">
-  <div class="flex items-start justify-between gap-4 p-6 pb-4">
-    <div>
+<div class="min-w-0 rounded-xl border border-outline bg-white shadow-sm">
+  <div class="flex flex-col gap-3 p-4 pb-4 sm:flex-row sm:items-start sm:justify-between sm:p-6 sm:pb-4">
+    <div class="min-w-0">
       <h4 class="text-xs font-bold uppercase tracking-wider text-primary">
         {eyebrow}
       </h4>
-      <h2 class="mt-1 text-2xl font-bold">{title}</h2>
+      <h2 class="mt-1 text-xl font-bold sm:text-2xl">{title}</h2>
       <p class="mt-1 text-sm text-gray-500">{subtitle}</p>
     </div>
 
-    <div class="relative w-72 shrink-0">
+    <div class="relative w-full min-w-0 sm:w-72 sm:shrink-0">
       <svg
         width="16"
         height="16"
@@ -92,7 +92,8 @@
     </div>
   </div>
 
-  <table class="w-full border-collapse">
+  <div class="overflow-x-auto">
+  <table class="w-full min-w-[900px] border-collapse">
     <thead>
       <tr class="border-y border-outline bg-gray-50/60">
         <th
@@ -201,4 +202,5 @@
       {/each}
     </tbody>
   </table>
+  </div>
 </div>

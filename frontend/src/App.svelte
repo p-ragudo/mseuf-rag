@@ -141,14 +141,14 @@
 
 {#if waitingForMembership}
   <main
-    class="flex min-h-screen items-center justify-center bg-[#F5F8FB]"
+    class="flex min-h-dvh items-center justify-center bg-[#F5F8FB]"
     aria-busy="true"
     aria-label="Checking organization membership"
   >
     <div class="h-12 w-12 animate-pulse rounded-full bg-gray-200"></div>
   </main>
 {:else if membershipCheckFailed}
-  <main class="flex min-h-screen items-center justify-center bg-[#F5F8FB] p-4">
+  <main class="flex min-h-dvh items-center justify-center bg-[#F5F8FB] p-4">
     <section class="w-full max-w-lg rounded-xl border border-outline bg-white p-8 shadow-sm">
       <h1 class="text-xl font-bold">Could not check organization access</h1>
       <p class="mt-2 text-sm text-gray-600">{membershipError}</p>
@@ -163,7 +163,7 @@
   </main>
 {:else if needsMembershipSetup}
   <main
-    class="flex min-h-screen items-center justify-center bg-[#F5F8FB]"
+    class="flex min-h-dvh items-center justify-center bg-[#F5F8FB]"
     aria-busy="true"
     aria-label="Opening organization setup"
   >

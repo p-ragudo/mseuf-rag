@@ -115,11 +115,11 @@
 </script>
 
 <AppLayout>
-  <div class="flex-1 px-6 py-4">
+  <div class="flex-1 px-3 py-4 sm:px-6">
     <p class="text-sm font-semibold uppercase tracking-wider text-primary">
       Organization management
     </p>
-    <h1 class="mt-1 text-3xl font-bold">Members</h1>
+    <h1 class="mt-1 text-2xl font-bold sm:text-3xl">Members</h1>
     <p class="mt-2 text-gray-600">
       Manage who can access each organization. Members must have a registered
       account before an administrator can add them.
