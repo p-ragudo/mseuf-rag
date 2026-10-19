@@ -71,7 +71,7 @@
 <svelte:window onclick={handleWindowClick} onkeydown={handleKeydown} />
 
 <header
-  class="flex min-w-0 flex-row items-center justify-between gap-2 border-b-2 border-b-outline bg-white px-3 py-2 sm:gap-4 sm:px-4"
+  class="flex h-16 min-w-0 shrink-0 flex-row items-center justify-between gap-2 border-b-2 border-b-outline bg-white px-3 sm:gap-4 sm:px-4"
 >
   <div class="flex flex-col justify-center">
     <h2 class="hidden text-xs font-bold uppercase tracking-wider text-primary sm:block">MSEUF RAG</h2>

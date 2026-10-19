@@ -15,7 +15,7 @@
   class="flex h-auto w-full shrink-0 flex-col border-t-2 border-outline bg-white pb-[env(safe-area-inset-bottom)] md:h-full md:w-64 md:border-r-2 md:border-t-0"
 >
   <div
-    class="hidden flex-row items-center gap-4 border-b-2 border-b-outline px-4 py-2 md:flex"
+    class="hidden h-16 shrink-0 flex-row items-center gap-4 border-b-2 border-b-outline px-4 md:flex"
   >
     <div
       class="flex h-10 w-10 items-center justify-center rounded-md bg-primary text-xs font-bold tracking-wide text-white"
@@ -23,7 +23,7 @@
       RAG
     </div>
 
-    <div class="mt-2">
+    <div>
       <h2 class="text-base font-bold">MSEUF RAG</h2>
       <p class="text-sm font-semibold text-gray-500">Admissions Assistant</p>
     </div>

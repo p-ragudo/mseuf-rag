@@ -44,6 +44,8 @@ class OrgMemberSummary(BaseModel):
 class OrgMembersResponse(BaseModel):
     members: list[OrgMemberSummary]
     can_manage: bool
+    owner_id: int
+    current_user_id: int
 
 
 # --- Website Schemas ---

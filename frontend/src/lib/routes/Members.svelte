@@ -19,7 +19,10 @@
   let organizationError = $state("");
   let organizationMembers = $state<OrganizationMember[]>([]);
   let canManageMembers = $state(false);
+  let organizationOwnerId = $state<number | null>(null);
+  let currentUserId = $state<number | null>(null);
   let membersLoading = $state(false);
+  let memberActionUserId = $state<number | null>(null);
   let memberEmail = $state("");
   let memberError = $state("");
   let memberNotice = $state("");
@@ -66,10 +69,14 @@
       const result: {
         members: OrganizationMember[];
         can_manage: boolean;
+        owner_id: number;
+        current_user_id: number;
       } = await response.json();
       if (current !== membersRequestId || orgId !== selectedOrgId) return;
       organizationMembers = result.members;
       canManageMembers = result.can_manage;
+      organizationOwnerId = result.owner_id;
+      currentUserId = result.current_user_id;
     } catch (error) {
       if (current !== membersRequestId || orgId !== selectedOrgId) return;
       memberError =
@@ -110,6 +117,73 @@
     } catch (error) {
       memberError =
         error instanceof Error ? error.message : "Could not add this member.";
+    }
+  }
+
+  async function transferAdminship(member: OrganizationMember) {
+    if (
+      !selectedOrgId ||
+      memberActionUserId !== null ||
+      !window.confirm(
+        `Transfer adminship to ${member.first_name} ${member.last_name}? You will become a member.`,
+      )
+    ) {
+      return;
+    }
+
+    memberActionUserId = member.user_id;
+    memberError = "";
+    memberNotice = "";
+    try {
+      const response = await authFetch(
+        `/orgs/${selectedOrgId}/members/${member.user_id}/transfer-admin`,
+        { method: "POST" },
+      );
+      if (!response.ok) throw new Error(await responseError(response));
+
+      memberNotice =
+        currentUserId === organizationOwnerId
+          ? `Admin access granted to ${member.first_name} ${member.last_name}. The organization owner retains admin access.`
+          : `Adminship transferred to ${member.first_name} ${member.last_name}. Your role is now member.`;
+      await loadMembers(selectedOrgId);
+    } catch (error) {
+      memberError =
+        error instanceof Error
+          ? error.message
+          : "Could not transfer adminship.";
+    } finally {
+      memberActionUserId = null;
+    }
+  }
+
+  async function removeMember(member: OrganizationMember) {
+    if (
+      !selectedOrgId ||
+      memberActionUserId !== null ||
+      !window.confirm(
+        `Remove ${member.first_name} ${member.last_name} from this organization?`,
+      )
+    ) {
+      return;
+    }
+
+    memberActionUserId = member.user_id;
+    memberError = "";
+    memberNotice = "";
+    try {
+      const response = await authFetch(
+        `/orgs/${selectedOrgId}/members/${member.user_id}`,
+        { method: "DELETE" },
+      );
+      if (!response.ok) throw new Error(await responseError(response));
+
+      memberNotice = `${member.first_name} ${member.last_name} was removed from the organization.`;
+      await loadMembers(selectedOrgId);
+    } catch (error) {
+      memberError =
+        error instanceof Error ? error.message : "Could not remove this member.";
+    } finally {
+      memberActionUserId = null;
     }
   }
 </script>
@@ -159,7 +233,8 @@
             <h2 class="text-lg font-bold">Team members</h2>
             <p class="mt-1 text-sm text-gray-500">
               Add existing accounts by email to grant access to this
-              organization.
+              organization. Administrators can transfer adminship or remove
+              members.
             </p>
           </div>
           <span class="text-sm text-gray-500">
@@ -177,8 +252,13 @@
         {/if}
 
         {#if canManageMembers}
+          <p class="mt-4 text-sm text-gray-500">
+            Transferring adminship makes the selected member an administrator
+            and changes your role to member. The organization owner always
+            retains admin access.
+          </p>
           <form
-            class="mt-4 flex flex-col gap-2 sm:flex-row"
+            class="mt-3 flex flex-col gap-2 sm:flex-row"
             onsubmit={addMember}
           >
             <input
@@ -207,17 +287,52 @@
           <ul class="mt-4 divide-y divide-outline border-t border-outline">
             {#each organizationMembers as member (member.user_id)}
               <li
-                class="flex flex-col gap-1 py-3 text-sm sm:flex-row sm:items-center sm:justify-between"
+                class="flex flex-col gap-3 py-3 text-sm sm:flex-row sm:items-center sm:justify-between"
               >
-                <span class="font-semibold">
-                  {member.first_name} {member.last_name}
-                </span>
-                <span class="text-gray-500">{member.email}</span>
-                <span
-                  class="text-xs font-semibold uppercase tracking-wide text-gray-500"
-                >
-                  {member.role}
-                </span>
+                <div class="min-w-0 flex-1">
+                  <p class="font-semibold">
+                    {member.first_name} {member.last_name}
+                    {#if member.user_id === currentUserId}
+                      <span class="font-normal text-gray-500">(you)</span>
+                    {/if}
+                  </p>
+                  <p class="text-gray-500">{member.email}</p>
+                </div>
+                <div class="flex flex-wrap items-center gap-2">
+                  <span
+                    class="rounded-full bg-gray-100 px-2.5 py-1 text-xs font-semibold uppercase tracking-wide text-gray-600"
+                  >
+                    {member.user_id === organizationOwnerId
+                      ? "Owner · Admin"
+                      : member.role}
+                  </span>
+                  {#if canManageMembers && member.user_id !== organizationOwnerId}
+                    {#if member.role !== "admin"}
+                      <button
+                        type="button"
+                        class="rounded-md border border-outline px-3 py-2 text-xs font-semibold text-primary hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50"
+                        disabled={memberActionUserId !== null}
+                        onclick={() => void transferAdminship(member)}
+                      >
+                        {memberActionUserId === member.user_id
+                          ? "Updating…"
+                          : "Transfer adminship"}
+                      </button>
+                    {/if}
+                    {#if member.user_id !== currentUserId}
+                      <button
+                        type="button"
+                        class="rounded-md px-3 py-2 text-xs font-semibold text-red-700 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50"
+                        disabled={memberActionUserId !== null}
+                        onclick={() => void removeMember(member)}
+                      >
+                        {memberActionUserId === member.user_id
+                          ? "Updating…"
+                          : "Remove"}
+                      </button>
+                    {/if}
+                  {/if}
+                </div>
               </li>
             {/each}
           </ul>

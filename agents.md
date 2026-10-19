@@ -67,7 +67,7 @@ users 1--* org_members *--1 orgs 1--* websites 1--1 website_scrape_schedules
 | Table | Key fields |
 |---|---|
 | `orgs` | id, creator_id, name[cite: 1, 6] |
-| `org_members` | (user_id, org_id) PK, `roles` string ("admin"/"member"); organization member-management requires creator/admin access |
+| `org_members` | (user_id, org_id) PK, `roles` string ("admin"/"member"); organization member-management requires creator/admin access. Admins can remove members and hand off their role; organization creator retains independent owner/admin access. |
 | `org_chat_settings` | `org_id` PK/FK, configurable `assistant_name` (defaults to "Chat Assistant") |
 | `org_chat_headers` | `org_id` PK/FK, configurable `header_tagline` (defaults to "Admissions Intelligence Hub") |
 | `websites` | id, org_id, url, `status` (PENDING/IN_PROGRESS/COMPLETED/FAILED), error_message[cite: 1, 6] |
@@ -135,7 +135,7 @@ For dense vectors we embed the **generated question**[cite: 1, 3]. For sparse ve
 
 **Not implemented / open**[cite: 1]
 - No physical collection or shard isolation per tenant; isolation relies on payload filtering and tenant-aware HNSW graphs[cite: 1, 10].
-- Role enforcement (`admin` vs `member`) is implemented for organization member management. Other mutate routes still allow any org member to trigger ingestion or register websites[cite: 1, 6].
+- Role enforcement (`admin` vs `member`) is implemented for organization member management: admins can add/remove members and transfer their admin role to another member. The organization creator retains independent owner/admin access and cannot be removed; transferring from the owner grants another admin without demoting the owner. Other mutate routes still allow any org member to trigger ingestion or register websites[cite: 1, 6].
 - Deleting an org or website cascades in Postgres but does not clean up Qdrant points[cite: 1, 6].
 - Several heuristics retain university-specific naming assumptions (e.g. `classify_academic_level`, SHS strands)[cite: 1, 3].
 
@@ -279,7 +279,7 @@ If an organization has no generated questions synced to the active embedding tar
 | Scope verification / LLM-based query gatekeeper | [PLANNED][cite: 1] |
 | Automated recurring scrape scheduler (`website_scrape_schedules`) | [PLANNED][cite: 1, 6] |
 | Qdrant point cleanup on page/website re-scrape or deletion | [IMPLEMENTED][cite: 1] |
-| Role-based authorization for organization member management | **[IMPLEMENTED]** |
+| Role-based organization member management, removal, and admin handoff | **[IMPLEMENTED]** |
 | Dense chunk embedding baseline for ablation | [PLANNED][cite: 1] |
 
 ## 13. Conventions for Agents Editing This Repo

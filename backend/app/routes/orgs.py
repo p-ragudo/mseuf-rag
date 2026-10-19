@@ -140,7 +140,12 @@ async def list_organization_members(
         )
         for user, role in rows.all()
     ]
-    return OrgMembersResponse(members=members, can_manage=can_manage)
+    return OrgMembersResponse(
+        members=members,
+        can_manage=can_manage,
+        owner_id=org.creator_id,
+        current_user_id=current_user.id,
+    )
 
 
 @router.post(
@@ -199,3 +204,101 @@ async def add_organization_member(
         last_name=user.last_name,
         role=membership.roles,
     )
+
+
+@router.post("/{org_id}/members/{user_id}/transfer-admin")
+async def transfer_organization_admin(
+    org_id: int,
+    user_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    org = await db.scalar(
+        select(Org).where(Org.id == org_id).with_for_update()
+    )
+    if not org:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Organization not found."
+        )
+
+    _, can_manage = await get_org_admin_status(db, org, current_user)
+    if not can_manage:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only organization administrators can transfer adminship.",
+        )
+    if user_id == current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Choose another member to receive adminship.",
+        )
+    if user_id == org.creator_id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="The organization owner already has permanent admin access.",
+        )
+
+    target_membership = await db.get(OrgMember, (user_id, org_id))
+    if target_membership is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="The selected user is not a member of this organization.",
+        )
+
+    target_membership.roles = "admin"
+    current_membership = await db.get(OrgMember, (current_user.id, org_id))
+    if current_user.id != org.creator_id and current_membership is not None:
+        current_membership.roles = "member"
+
+    await db.commit()
+    return {
+        "message": "Adminship transferred.",
+        "admin_user_id": user_id,
+        "previous_admin_user_id": (
+            current_user.id if current_user.id != org.creator_id else None
+        ),
+    }
+
+
+@router.delete("/{org_id}/members/{user_id}")
+async def remove_organization_member(
+    org_id: int,
+    user_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    org = await db.scalar(
+        select(Org).where(Org.id == org_id).with_for_update()
+    )
+    if not org:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Organization not found."
+        )
+
+    _, can_manage = await get_org_admin_status(db, org, current_user)
+    if not can_manage:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only organization administrators can remove members.",
+        )
+    if user_id == org.creator_id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="The organization owner cannot be removed from the organization.",
+        )
+    if user_id == current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="You cannot remove yourself. Ask another administrator to remove you.",
+        )
+
+    membership = await db.get(OrgMember, (user_id, org_id))
+    if membership is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="The selected user is not a member of this organization.",
+        )
+
+    await db.delete(membership)
+    await db.commit()
+    return {"message": "Member removed from the organization.", "user_id": user_id}
