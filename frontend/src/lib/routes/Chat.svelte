@@ -58,6 +58,10 @@
   let sessionId = $state("");
   let listEl = $state<HTMLDivElement>();
   let inputEl = $state<HTMLTextAreaElement>();
+  let newChatButton = $state<HTMLButtonElement>();
+  let confirmationDialog = $state<HTMLDialogElement>();
+  let cancelNewChatButton = $state<HTMLButtonElement>();
+  let showNewChatConfirmation = $state(false);
 
   // "loading" until we know whether this organization exists
   let orgStatus = $state<"loading" | "ready" | "notfound">("loading");
@@ -76,6 +80,16 @@
     CHAT_FONT_FAMILIES.find((font) => font.value === fontFamily)?.css ??
       CHAT_FONT_FAMILIES[0].css,
   );
+
+  $effect(() => {
+    if (!confirmationDialog) return;
+    if (showNewChatConfirmation && !confirmationDialog.open) {
+      confirmationDialog.showModal();
+      cancelNewChatButton?.focus();
+    } else if (!showNewChatConfirmation && confirmationDialog.open) {
+      confirmationDialog.close();
+    }
+  });
 
   // A missing organization comes back as 404 "Organization ... not found" (or 422
   // when the id isn't a number). A bare 404 "Not Found" means the route itself
@@ -176,12 +190,31 @@
 
   function newChat() {
     if (!orgId) return;
+    if (messages.length > 0) {
+      showNewChatConfirmation = true;
+      return;
+    }
 
+    startNewChat();
+  }
+
+  function startNewChat() {
     // A new session id starts a new conversation on the backend too
     messages = [];
     sessionId = crypto.randomUUID();
+    showNewChatConfirmation = false;
 
     inputEl?.focus();
+  }
+
+  function cancelNewChat() {
+    showNewChatConfirmation = false;
+    newChatButton?.focus();
+  }
+
+  function handleConfirmationCancel(event: Event) {
+    event.preventDefault();
+    cancelNewChat();
   }
 
   async function scrollToBottom() {
@@ -507,6 +540,7 @@
     </div>
 
     <button
+      bind:this={newChatButton}
       type="button"
       class="flex flex-row items-center gap-2 rounded-lg border border-outline bg-[#F5F8FB] px-3 py-2 text-sm font-semibold shadow-sm transition-colors duration-200 hover:cursor-pointer hover:bg-[var(--brand-tint)] hover:text-[color:var(--brand)]"
       onclick={newChat}
@@ -514,6 +548,43 @@
       New chat
     </button>
   </header>
+
+  {#if showNewChatConfirmation}
+    <dialog
+      bind:this={confirmationDialog}
+      class="fixed left-1/2 top-1/2 m-0 max-h-[calc(100dvh-2rem)] w-[calc(100%-2rem)] max-w-md -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-xl border-0 bg-white p-6 shadow-xl"
+      aria-labelledby="new-chat-dialog-title"
+      aria-describedby="new-chat-dialog-description"
+      onclick={(event) => {
+        if (event.target === event.currentTarget) cancelNewChat();
+      }}
+      oncancel={handleConfirmationCancel}
+    >
+      <h2 id="new-chat-dialog-title" class="text-lg font-bold">
+        Start a new chat?
+      </h2>
+      <p id="new-chat-dialog-description" class="mt-2 text-sm text-gray-600">
+        Your current conversation will be cleared.
+      </p>
+      <div class="mt-6 flex justify-end gap-3">
+        <button
+          bind:this={cancelNewChatButton}
+          type="button"
+          class="rounded-md border border-outline px-4 py-2 text-sm font-semibold hover:bg-gray-50"
+          onclick={cancelNewChat}
+        >
+          Cancel
+        </button>
+        <button
+          type="button"
+          class="rounded-md bg-[var(--brand)] px-4 py-2 text-sm font-semibold text-[color:var(--brand-contrast)] hover:opacity-90"
+          onclick={startNewChat}
+        >
+          Start new chat
+        </button>
+      </div>
+    </dialog>
+  {/if}
 
   <!-- Messages -->
   <div bind:this={listEl} class="min-h-0 flex-1 overflow-y-auto px-3 py-4 sm:px-4 sm:py-6">
