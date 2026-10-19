@@ -51,8 +51,7 @@
     </h2>
 
     <h1 class="max-w-[60vw] text-sm font-semibold leading-tight sm:max-w-none sm:text-xl">
-      Admissions Intelligence Hub
-      <span class="hidden font-normal text-[#59616E] sm:inline">/ Admin workspace</span>
+      <span class="hidden font-normal text-[#59616E] sm:inline">Admin workspace</span>
     </h1>
   </div>
 

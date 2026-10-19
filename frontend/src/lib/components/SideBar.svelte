@@ -11,7 +11,7 @@
     currentRoute: string;
   }
 
-  let organizationName = $derived(orgState.org?.name ?? "Workspace");
+  let organizationName = $derived(orgState.org?.name ?? "UniQ");
 </script>
 
 <aside
@@ -23,20 +23,20 @@
     <div
       class="flex h-10 w-10 items-center justify-center rounded-md bg-primary text-xs font-bold tracking-wide text-white"
     >
-      RAG
+      UniQ
     </div>
 
     <div>
       <h2 class="text-base font-bold">{organizationName}</h2>
-      <p class="text-sm font-semibold text-gray-500">Organization workspace</p>
+      <p class="text-sm font-semibold text-gray-500">Organization portal</p>
     </div>
   </div>
 
   <nav
-    aria-label="Workspace navigation"
+    aria-label="UniQ navigation"
     class="w-full p-1 text-sm font-semibold text-gray-500 md:p-4"
   >
-    <h3 class="hidden text-xs font-bold uppercase tracking-wider text-gray-400 md:block">Workspace</h3>
+    <h3 class="hidden text-xs font-bold uppercase tracking-wider text-gray-400 md:block">UniQ</h3>
 
     <ul class="flex items-stretch justify-around gap-1 overflow-x-auto md:mt-2 md:block md:space-y-1">
       <NavItem href="/overview" text="Dashboard" icon={OverviewIcon} />

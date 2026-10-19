@@ -63,7 +63,14 @@
   }: Props = $props();
 
   let activeTab = $state<Tab>("document");
-  let selectedCategory = $state(untrack(() => categories[0] ?? ""));
+  const customCategoryOption = "__add_custom_category__";
+  let categorySelection = $state(untrack(() => categories[0] ?? ""));
+  let customCategory = $state("");
+  let selectedCategory = $derived(
+    categorySelection === customCategoryOption
+      ? customCategory.trim()
+      : categorySelection,
+  );
   let selectedFile = $state<File | null>(null);
   let activeDocumentId = $state<number | null>(null);
   let editingDocumentId = $state<number | null>(null);
@@ -90,7 +97,9 @@
   const maxDocumentBytes = 25 * 1024 * 1024;
 
   let canStageDocument = $derived(
-    selectedFile !== null && selectedCategory !== "",
+    selectedFile !== null &&
+      selectedCategory !== "" &&
+      selectedCategory.length <= 100,
   );
 
   $effect(() => {
@@ -443,7 +452,11 @@
     editingDocumentId = document.document_id;
     selectedFile = null;
     if (categories.includes(document.category)) {
-      selectedCategory = document.category;
+      categorySelection = document.category;
+      customCategory = "";
+    } else {
+      categorySelection = customCategoryOption;
+      customCategory = document.category;
     }
     pageError = "";
     pageNotice = `Choose a replacement file for “${document.filename}”.`;
@@ -706,7 +719,30 @@
     <div class="mt-6">
       <p class="mb-2 text-sm font-bold">Category tag</p>
 
-      <SelectDropdown options={categories} bind:selected={selectedCategory} />
+      <select
+        bind:value={categorySelection}
+        class="w-full max-w-md rounded-md border border-outline bg-white px-3 py-2.5 text-sm outline-none focus:border-primary"
+      >
+        {#each categories as category (category)}
+          <option value={category}>{category}</option>
+        {/each}
+        <option value={customCategoryOption}>Add a new category…</option>
+      </select>
+      {#if categorySelection === customCategoryOption}
+        <label class="mt-3 block max-w-md">
+          <span class="sr-only">New category name</span>
+          <input
+            bind:value={customCategory}
+            type="text"
+            maxlength="100"
+            placeholder="Enter a category name"
+            class="w-full rounded-md border border-outline bg-white px-3 py-2.5 text-sm outline-none focus:border-primary"
+          />
+          <span class="mt-1 block text-xs text-gray-500">
+            Enter 1–100 characters.
+          </span>
+        </label>
+      {/if}
     </div>
 
     <label class="mt-5 block max-w-md">
