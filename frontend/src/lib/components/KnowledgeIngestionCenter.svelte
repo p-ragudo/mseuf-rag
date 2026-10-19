@@ -535,10 +535,10 @@
 
   function selectDocumentFile(file: File) {
     const extension = file.name.split(".").pop()?.toLowerCase();
-    if (!["pdf", "doc", "docx"].includes(extension ?? "")) {
+    if (!["pdf", "doc", "docx", "xls", "xlsx"].includes(extension ?? "")) {
       selectedFile = null;
       if (fileInput) fileInput.value = "";
-      pageError = "Only PDF, DOC, and DOCX files are supported.";
+      pageError = "Only PDF, DOC, DOCX, XLS, and XLSX files are supported.";
       return;
     }
     if (file.size > maxDocumentBytes) {
@@ -595,7 +595,7 @@
         />
       </svg>
 
-      Document Ingestion (PDF/Docs)
+      Document Ingestion (PDF, Docs & Spreadsheets)
     </button>
 
     <button
@@ -697,7 +697,7 @@
         <p class="mt-4 text-lg font-bold">Drag and drop your document here</p>
 
         <p class="mt-1 text-sm text-gray-500">
-          PDF, DOC, or DOCX · Up to 25 MB per file
+          PDF, DOC, DOCX, XLS, or XLSX · Up to 25 MB per file
         </p>
 
         <button
@@ -710,7 +710,7 @@
       <input
         bind:this={fileInput}
         type="file"
-        accept=".pdf,.doc,.docx"
+        accept=".pdf,.doc,.docx,.xls,.xlsx"
         class="hidden"
         onchange={handleFileInputChange}
       />

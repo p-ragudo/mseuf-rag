@@ -8,6 +8,7 @@ from pathlib import Path
 
 MAX_DOCUMENT_TEXT_CHARS = 1_000_000
 MAX_DOCX_UNCOMPRESSED_BYTES = 100 * 1024 * 1024
+MAX_SPREADSHEET_UNCOMPRESSED_BYTES = 100 * 1024 * 1024
 
 
 class DocumentExtractionError(ValueError):
@@ -123,6 +124,94 @@ def _extract_doc(data: bytes) -> str:
     return _limit_text(result.stdout)
 
 
+def _extract_xlsx(data: bytes) -> str:
+    try:
+        from openpyxl import load_workbook
+
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            entries = archive.infolist()
+            if (
+                len(entries) > 5_000
+                or sum(info.file_size for info in entries)
+                > MAX_SPREADSHEET_UNCOMPRESSED_BYTES
+            ):
+                raise DocumentExtractionError(
+                    "The XLSX file expands beyond the supported size."
+                )
+        workbook = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+    except DocumentExtractionError:
+        raise
+    except ImportError as exc:
+        raise DocumentParserUnavailableError(
+            "XLSX support is not installed. Install the backend requirements and restart the service."
+        ) from exc
+    except Exception as exc:
+        raise DocumentExtractionError("Could not read this XLSX file.") from exc
+
+    try:
+        rows = []
+        character_count = 0
+        for worksheet in workbook.worksheets:
+            for row in worksheet.iter_rows(values_only=True):
+                cells = [str(value).strip() for value in row if value is not None]
+                if not cells:
+                    continue
+                row_text = " | ".join(cells)
+                character_count += len(row_text)
+                if character_count > MAX_DOCUMENT_TEXT_CHARS:
+                    raise DocumentExtractionError(
+                        f"Extracted document text exceeds {MAX_DOCUMENT_TEXT_CHARS:,} characters."
+                    )
+                rows.append(row_text)
+        return _limit_text("\n\n".join(rows))
+    except DocumentExtractionError:
+        raise
+    except Exception as exc:
+        raise DocumentExtractionError("Could not read this XLSX file.") from exc
+    finally:
+        workbook.close()
+
+
+def _extract_xls(data: bytes) -> str:
+    try:
+        import xlrd
+
+        workbook = xlrd.open_workbook(file_contents=data, on_demand=True)
+    except ImportError as exc:
+        raise DocumentParserUnavailableError(
+            "XLS support is not installed. Install the backend requirements and restart the service."
+        ) from exc
+    except Exception as exc:
+        raise DocumentExtractionError("Could not read this XLS file.") from exc
+
+    try:
+        rows = []
+        character_count = 0
+        for worksheet in workbook.sheets():
+            for row_index in range(worksheet.nrows):
+                cells = [
+                    str(value).strip()
+                    for value in worksheet.row_values(row_index)
+                    if value not in ("", None)
+                ]
+                if not cells:
+                    continue
+                row_text = " | ".join(cells)
+                character_count += len(row_text)
+                if character_count > MAX_DOCUMENT_TEXT_CHARS:
+                    raise DocumentExtractionError(
+                        f"Extracted document text exceeds {MAX_DOCUMENT_TEXT_CHARS:,} characters."
+                    )
+                rows.append(row_text)
+        return _limit_text("\n\n".join(rows))
+    except DocumentExtractionError:
+        raise
+    except Exception as exc:
+        raise DocumentExtractionError("Could not read this XLS file.") from exc
+    finally:
+        workbook.release_resources()
+
+
 def extract_document_text(filename: str, data: bytes) -> str:
     extension = Path(filename).suffix.lower()
     if extension == ".pdf":
@@ -131,4 +220,8 @@ def extract_document_text(filename: str, data: bytes) -> str:
         return _extract_docx(data)
     if extension == ".doc":
         return _extract_doc(data)
-    raise DocumentExtractionError("Only PDF, DOC, and DOCX files are supported.")
+    if extension == ".xlsx":
+        return _extract_xlsx(data)
+    if extension == ".xls":
+        return _extract_xls(data)
+    raise DocumentExtractionError("Only PDF, DOC, DOCX, XLS, and XLSX files are supported.")

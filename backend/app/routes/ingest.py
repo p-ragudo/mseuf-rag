@@ -103,10 +103,10 @@ async def _extract_uploaded_file(file: UploadFile) -> tuple[str, str]:
         Path((file.filename or "").replace("\\", "/")).name.split()
     )
     extension = Path(filename).suffix.lower()
-    if extension not in {".pdf", ".doc", ".docx"}:
+    if extension not in {".pdf", ".doc", ".docx", ".xls", ".xlsx"}:
         raise HTTPException(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
-            detail="Only PDF, DOC, and DOCX files are supported.",
+            detail="Only PDF, DOC, DOCX, XLS, and XLSX files are supported.",
         )
     if not filename or len(filename) > 255:
         raise HTTPException(

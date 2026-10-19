@@ -21,6 +21,8 @@ langchain-text-splitters
 playwright
 pypdf
 python-docx
+openpyxl
+xlrd
 
 # --- LLM, Embedding API & Cache ---
 google-genai
