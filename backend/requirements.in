@@ -19,6 +19,8 @@ google-auth
 crawl4ai
 langchain-text-splitters
 playwright
+pypdf
+python-docx
 
 # --- LLM, Embedding API & Cache ---
 google-genai

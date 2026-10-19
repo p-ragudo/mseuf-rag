@@ -12,6 +12,7 @@
   };
 
   type WebsiteStatus = "PENDING" | "IN_PROGRESS" | "COMPLETED" | "FAILED";
+  type DocumentStatus = "PENDING" | "IN_PROGRESS" | "COMPLETED" | "FAILED";
 
   type Website = {
     id: number;
@@ -38,7 +39,6 @@
     subtitle?: string;
     categories: string[];
     footerNote?: string;
-    onStageDocument?: (file: File, category: string) => void;
   }
 
   let {
@@ -46,13 +46,14 @@
     title = "Knowledge ingestion center",
     subtitle = "Prepare trusted admissions sources for Rooney's retrieval pipeline.",
     categories,
-    footerNote = "Web ingestion crawls discovered pages and indexes their content. Recurring schedules and document uploads are not available yet.",
-    onStageDocument,
+    footerNote = "Uploaded documents and discovered web pages are indexed for organization-scoped retrieval.",
   }: Props = $props();
 
   let activeTab = $state<Tab>("document");
   let selectedCategory = $state(untrack(() => categories[0] ?? ""));
   let selectedFile = $state<File | null>(null);
+  let activeDocumentId = $state<number | null>(null);
+  let documentPollInFlight = false;
   let isDraggingOver = $state(false);
   let fileInput = $state<HTMLInputElement>();
 
@@ -69,6 +70,7 @@
   let pageError = $state("");
   let pageNotice = $state("");
   let websiteRequest = 0;
+  const maxDocumentBytes = 25 * 1024 * 1024;
 
   let canStageDocument = $derived(
     selectedFile !== null && selectedCategory !== "",
@@ -94,6 +96,17 @@
       if (selectedOrgId) void loadWebsites(selectedOrgId);
     }, 5000);
 
+    return () => window.clearInterval(interval);
+  });
+
+  $effect(() => {
+    const documentId = activeDocumentId;
+    if (documentId === null) return;
+
+    const interval = window.setInterval(() => {
+      void refreshDocumentStatus(documentId);
+    }, 2000);
+    void refreshDocumentStatus(documentId);
     return () => window.clearInterval(interval);
   });
 
@@ -226,6 +239,83 @@
     }
   }
 
+  async function uploadDocument() {
+    if (
+      !selectedFile ||
+      !canStageDocument ||
+      !selectedOrgId ||
+      submitting ||
+      activeDocumentId !== null
+    ) {
+      return;
+    }
+
+    submitting = true;
+    pageError = "";
+    pageNotice = "";
+    const form = new FormData();
+    form.append("file", selectedFile);
+    form.append("org_id", selectedOrgId);
+    form.append("category", selectedCategory);
+
+    try {
+      const response = await authFetch("/ingest/documents", {
+        method: "POST",
+        body: form,
+      });
+      if (!response.ok) throw new Error(await responseError(response));
+
+      const result: { document_id: number; filename: string } =
+        await response.json();
+      selectedFile = null;
+      if (fileInput) fileInput.value = "";
+      activeDocumentId = result.document_id;
+      pageNotice = `“${result.filename}” uploaded. Waiting for vector indexing…`;
+    } catch (error) {
+      pageError =
+        error instanceof Error ? error.message : "Could not upload document.";
+    } finally {
+      submitting = false;
+    }
+  }
+
+  async function refreshDocumentStatus(documentId: number) {
+    if (documentPollInFlight || activeDocumentId !== documentId) return;
+    documentPollInFlight = true;
+    try {
+      const response = await authFetch(
+        `/ingest/documents/${documentId}/status`,
+      );
+      if (!response.ok) throw new Error(await responseError(response));
+
+      const result: {
+        filename: string;
+        status: DocumentStatus;
+        error_message: string | null;
+        chunks: number;
+        synced_questions: number;
+      } = await response.json();
+      pageError = "";
+      if (result.status === "COMPLETED") {
+        pageNotice = `“${result.filename}” indexed: ${result.chunks} chunks and ${result.synced_questions} vector points.`;
+        activeDocumentId = null;
+      } else if (result.status === "FAILED") {
+        pageError =
+          result.error_message ??
+          `Indexing “${result.filename}” failed before its vectors were stored.`;
+        pageNotice = "";
+        activeDocumentId = null;
+      }
+    } catch (error) {
+      pageError =
+        error instanceof Error
+          ? error.message
+          : "Could not check document indexing status.";
+    } finally {
+      documentPollInFlight = false;
+    }
+  }
+
   async function runIngestion(website: Website, forceRefresh = false) {
     if (actionWebsiteId !== null) return;
     actionWebsiteId = website.id;
@@ -290,25 +380,32 @@
     const file = e.dataTransfer?.files?.[0];
 
     if (file) {
-      selectedFile = file;
+      selectDocumentFile(file);
     }
   }
 
   function handleFileInputChange(e: Event) {
     const target = e.target as HTMLInputElement;
-    selectedFile = target.files?.[0] ?? null;
+    const file = target.files?.[0] ?? null;
+    if (file) selectDocumentFile(file);
   }
 
-  function stageDocument() {
-    if (selectedFile && canStageDocument) {
-      onStageDocument?.(selectedFile, selectedCategory);
-
+  function selectDocumentFile(file: File) {
+    const extension = file.name.split(".").pop()?.toLowerCase();
+    if (!["pdf", "doc", "docx"].includes(extension ?? "")) {
       selectedFile = null;
-
-      if (fileInput) {
-        fileInput.value = "";
-      }
+      if (fileInput) fileInput.value = "";
+      pageError = "Only PDF, DOC, and DOCX files are supported.";
+      return;
     }
+    if (file.size > maxDocumentBytes) {
+      selectedFile = null;
+      if (fileInput) fileInput.value = "";
+      pageError = "Documents must be no larger than 25 MB.";
+      return;
+    }
+    pageError = "";
+    selectedFile = file;
   }
 
 </script>
@@ -480,10 +577,35 @@
       <SelectDropdown options={categories} bind:selected={selectedCategory} />
     </div>
 
+    <label class="mt-5 block max-w-md">
+      <span class="mb-2 block text-sm font-bold">Organization</span>
+      <select
+        bind:value={selectedOrgId}
+        disabled={organizationsLoading || organizations.length === 0}
+        class="w-full rounded-md border border-outline bg-white px-3 py-2.5 text-sm outline-none focus:border-primary disabled:bg-gray-100"
+      >
+        {#if organizations.length === 0}
+          <option value="">No organization available</option>
+        {:else}
+          {#each organizations as organization (organization.id)}
+            <option value={String(organization.id)}>{organization.name}</option>
+          {/each}
+        {/if}
+      </select>
+    </label>
+    {#if !organizationsLoading && organizations.length === 0}
+      <p class="mt-2 text-sm text-red-700">
+        Join or create an organization before uploading a document.
+      </p>
+    {/if}
+
     <button
-      disabled={!canStageDocument}
+      disabled={!canStageDocument ||
+        !selectedOrgId ||
+        submitting ||
+        activeDocumentId !== null}
       class="mt-4 flex flex-row items-center gap-2 rounded-md bg-primary px-5 py-3 text-sm font-semibold text-white transition-opacity duration-200 disabled:cursor-not-allowed disabled:opacity-50"
-      onclick={stageDocument}
+      onclick={() => void uploadDocument()}
     >
       <svg
         width="16"
@@ -509,8 +631,25 @@
         />
       </svg>
 
-      Stage document
+      {submitting ? "Uploading…" : "Upload and index document"}
     </button>
+
+    {#if pageError}
+      <p
+        role="alert"
+        class="mt-4 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700"
+      >
+        {pageError}
+      </p>
+    {/if}
+    {#if pageNotice}
+      <p
+        role="status"
+        class="mt-4 rounded-md border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-800"
+      >
+        {pageNotice}
+      </p>
+    {/if}
   {:else}
     <!-- Web Resource Ingestion -->
     <div class="mt-6">

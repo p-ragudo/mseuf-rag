@@ -49,7 +49,7 @@ backend/
       reranker/          base, factory, fastembed_provider, flashrank_provider, transformers_provider, schema
       semantic_cache/    base, factory, redis_cache, in_memory_cache, schemas
       vector_db/         base, factory, qdrant_provider, schema
-      ingest_pipeline/   discovery, orchestrator, chunk, chunker, clean_markdown
+      ingest_pipeline/   discovery, orchestrator, chunk, chunker, clean_markdown, document_parser
       query_pipeline/    query_pipeline, intent_classifier, context_expander, schema
     utils/       uuid_generator.py, telegram_bot.py
     main.py
@@ -141,7 +141,7 @@ For dense vectors we embed the **generated question**[cite: 1, 3]. For sparse ve
 
 ## 7. Ingestion Pipeline
 
-Triggered by `POST /ingest/run/{website_id}` (FastAPI `BackgroundTasks`) or by the Telegram `/scrape <id>` command[cite: 1, 6]. `run_full_pipeline` runs **five concurrent async workers** with `asyncio.Event` hand-offs, communicating through Postgres rows[cite: 1, 3].
+Website ingestion is triggered by `POST /ingest/run/{website_id}` (FastAPI `BackgroundTasks`) or by the Telegram `/scrape <id>` command[cite: 1, 6]. `run_full_pipeline` runs **five concurrent async workers** with `asyncio.Event` hand-offs, communicating through Postgres rows[cite: 1, 3]. Uploaded documents use `POST /ingest/documents`; PDF, DOC, and DOCX text is extracted without retaining the original file, stored as a page, then chunked, question-augmented, embedded, and synced through the same Qdrant vector path. The upload status endpoint reports completion only after every generated question has been synced to the active vector target.
 
 ```text
  discovery â”€â”€â–¶ scraper â”€â”€â–¶ chunker â”€â”€â–¶ qgen â”€â”€â–¶ qdrant_sync
@@ -156,6 +156,7 @@ Triggered by `POST /ingest/run/{website_id}` (FastAPI `BackgroundTasks`) or by t
 3. **Chunk** (`chunk.py`, `chunker.py`, `clean_markdown.py`): strips YAML frontmatter first, HTML tags, links, and noise phrases while preserving headings and lists[cite: 3]. Chunks via the structure-aware chunker (`chunker.py`) into atomic blocks (paragraphs, lists, tables, code) with breadcrumbs (`Admissions > Freshmen`), packing small sections and recording `chunk_index`, `section_id`, `part_index`, and `part_total`[cite: 3]. Replaces any old chunks for the page and updates `chunked_at`[cite: 1, 3].
 4. **Question generation** (`orchestrator.py`, `gemini_provider.py`): 10 chunks per Gemini call, 3-5 questions each, strict grounding[cite: 1, 3, 5]. Chunks marked `has_qgen=True` only when questions are returned; unreturned or failed chunks increment `qgen_attempts` (up to 3 attempts) and parse errors raise rather than failing silently[cite: 3, 5].
 5. **Qdrant sync** (`orchestrator.py`): in batches of 100 questions, generates dense embeddings with `task_type="RETRIEVAL_DOCUMENT"` and BM25 sparse vectors of the parent chunk text[cite: 3]. Upserts points into Qdrant (`wait=True`), and marks the dynamic active model column (e.g., `is_synced_gemini_768`) and `is_synced_qdrant` as True[cite: 3].
+6. **Document extraction** (`document_parser.py`): accepts PDF, DOC, and DOCX uploads up to 25 MB, extracts at most 1,000,000 characters, and records extracted text only. Uploaded sources use an internal `document://` URL and are excluded from the registered-websites list.
 
 **Fault tolerance & State Management**:
 - `run_full_pipeline` automatically reclaims stranded `IN_PROGRESS` pages on startup[cite: 3].
@@ -265,6 +266,7 @@ If an organization has no generated questions synced to the active embedding tar
 | Capability | Status |
 |---|---|
 | Discovery, scrape, chunk, qgen, embed, Qdrant sync | **[IMPLEMENTED]**[cite: 1] |
+| PDF/DOC/DOCX upload, text extraction, and confirmed Qdrant indexing | **[IMPLEMENTED]** |
 | Tenant payload partitioning + is_tenant HNSW | **[IMPLEMENTED]**[cite: 1, 10] |
 | Dense + sparse hybrid retrieval + custom chunk-level RRF | **[IMPLEMENTED]**[cite: 1, 7] |
 | Structure-aware markdown chunker (`chunker.py`) | **[IMPLEMENTED]**[cite: 3] |

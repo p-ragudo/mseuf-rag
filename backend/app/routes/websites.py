@@ -89,7 +89,10 @@ async def list_websites_by_org(
             detail="You do not have access to this organization.",
         )
 
-    stmt = select(Website).where(Website.org_id == org_id)
+    stmt = select(Website).where(
+        Website.org_id == org_id,
+        ~Website.url.startswith("document://"),
+    )
     res = await db.execute(stmt)
     return res.scalars().all()
 

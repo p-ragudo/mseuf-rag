@@ -56,6 +56,9 @@ def get_active_sync_column():
 
 def extract_sub_entity_from_url(url: str) -> str:
     parsed = urlparse(url)
+    if parsed.scheme == "document":
+        return "main"
+
     segments = [s.strip().lower() for s in parsed.path.split("/") if s.strip()]
     if segments:
         candidate = segments[0]
@@ -528,23 +531,162 @@ async def qdrant_sync_worker(org_id: int, web_id: int, is_qgen_done: asyncio.Eve
                     logger.error(f"[Qdrant Sync Error] attempt {consecutive_failures}: {err_msg[:200]}")
                     traceback.print_exc()
 
+                    if consecutive_failures >= SYNC_MAX_CONSECUTIVE_FAILURES:
+                        raise RuntimeError(
+                            f"Qdrant sync failed after {consecutive_failures} consecutive attempts."
+                        ) from e
                     if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg:
                         logger.warning("[Qdrant Sync Rate Limit] Sleeping 15s...")
                         await asyncio.sleep(15.0)
-                        consecutive_failures = 0
-                    elif consecutive_failures >= SYNC_MAX_CONSECUTIVE_FAILURES:
-                        logger.warning("[Qdrant Sync Backoff] Sleeping 10s...")
-                        await asyncio.sleep(10.0)
-                        consecutive_failures = 0
                     else:
                         await asyncio.sleep(3.0)
 
         except Exception as loop_e:
             logger.error(f"[Qdrant Sync Worker Loop Exception]: {loop_e}")
             traceback.print_exc()
+            if consecutive_failures >= SYNC_MAX_CONSECUTIVE_FAILURES:
+                raise RuntimeError(
+                    f"Qdrant sync worker stopped after {consecutive_failures} consecutive failures."
+                ) from loop_e
+            consecutive_failures += 1
+            if consecutive_failures >= SYNC_MAX_CONSECUTIVE_FAILURES:
+                raise RuntimeError(
+                    f"Qdrant sync worker stopped after {consecutive_failures} consecutive failures."
+                ) from loop_e
             await asyncio.sleep(5.0)
 
     return total_synced
+
+
+async def ingest_uploaded_document(page_id: int) -> None:
+    async with async_session() as session:
+        page = await session.get(ScrapedPage, page_id)
+        if page is None:
+            raise ValueError(f"Uploaded document page {page_id} not found")
+        website = await session.get(Website, page.web_id)
+        if website is None:
+            raise ValueError(f"Uploaded document website {page.web_id} not found")
+
+        org_id = page.org_id
+        web_id = page.web_id
+        page.status = PageProcessStatus.COMPLETED
+        page.last_scraped_at = datetime.now(timezone.utc)
+        await session.commit()
+
+    vector_sync_started = False
+    try:
+        created_chunks = 0
+        while True:
+            created = await process_and_chunk_pages(web_id=web_id, org_id=org_id)
+            created_chunks += created
+            if created == 0:
+                break
+        if created_chunks == 0:
+            raise ValueError("The uploaded document did not contain any indexable text.")
+
+        chunking_done = asyncio.Event()
+        chunking_done.set()
+        await qgen_worker(web_id=web_id, is_chunking_done=chunking_done)
+
+        async with async_session() as session:
+            chunk_count = await session.scalar(
+                select(func.count(Chunk.id))
+                .join(ScrapedPage, Chunk.page_id == ScrapedPage.id)
+                .where(ScrapedPage.id == page_id)
+            )
+            ungenerated_chunk_count = await session.scalar(
+                select(func.count(Chunk.id))
+                .join(ScrapedPage, Chunk.page_id == ScrapedPage.id)
+                .where(
+                    ScrapedPage.id == page_id,
+                    Chunk.has_qgen.is_(False),
+                )
+            )
+            question_count = await session.scalar(
+                select(func.count(GeneratedQuestion.id))
+                .join(Chunk, GeneratedQuestion.chunk_id == Chunk.id)
+                .where(Chunk.page_id == page_id)
+            )
+            questioned_chunk_count = await session.scalar(
+                select(func.count(func.distinct(GeneratedQuestion.chunk_id)))
+                .join(Chunk, GeneratedQuestion.chunk_id == Chunk.id)
+                .where(Chunk.page_id == page_id)
+            )
+
+        if (
+            not chunk_count
+            or ungenerated_chunk_count
+            or not question_count
+            or questioned_chunk_count != chunk_count
+        ):
+            raise RuntimeError("Question generation did not complete for every document chunk.")
+
+        qgen_done = asyncio.Event()
+        qgen_done.set()
+        vector_sync_started = True
+        synced_points = await qdrant_sync_worker(
+            org_id=org_id,
+            web_id=web_id,
+            is_qgen_done=qgen_done,
+        )
+
+        sync_col = get_active_sync_column()
+        async with async_session() as session:
+            total_questions = await session.scalar(
+                select(func.count(GeneratedQuestion.id))
+                .join(Chunk, GeneratedQuestion.chunk_id == Chunk.id)
+                .where(Chunk.page_id == page_id)
+            )
+            synced_questions = await session.scalar(
+                select(func.count(GeneratedQuestion.id))
+                .join(Chunk, GeneratedQuestion.chunk_id == Chunk.id)
+                .where(Chunk.page_id == page_id, sync_col.is_(True))
+            )
+
+        if not synced_points or synced_questions != total_questions:
+            raise RuntimeError(
+                "Not all generated document questions were confirmed in the vector database."
+            )
+
+        async with async_session() as session:
+            website = await session.get(Website, web_id)
+            if website is not None:
+                website.status = WebsiteScrapeStatus.COMPLETED
+                website.error_message = None
+                await session.commit()
+        try:
+            await _bump_content_version(org_id)
+        except Exception:
+            logger.exception("Failed to bump content_version for org %s", org_id)
+    except Exception as exc:
+        logger.exception("Uploaded document ingestion failed for page %s", page_id)
+        cleanup_error = None
+        if vector_sync_started:
+            try:
+                vector_db = get_vector_db()
+                await vector_db.delete_points(
+                    collection_name=settings.resolved_collection_name,
+                    filters={"group_id": str(org_id), "web_id": web_id},
+                )
+            except Exception as cleanup_exc:
+                cleanup_error = cleanup_exc
+                logger.exception(
+                    "Failed to remove partial document vectors for page %s", page_id
+                )
+
+        async with async_session() as session:
+            page = await session.get(ScrapedPage, page_id)
+            if page is not None:
+                page.status = PageProcessStatus.FAILED
+            website = await session.get(Website, web_id)
+            if website is not None:
+                website.status = WebsiteScrapeStatus.FAILED
+                error_message = f"{type(exc).__name__}: {exc}"
+                if cleanup_error is not None:
+                    error_message += f"; vector cleanup failed: {cleanup_error}"
+                website.error_message = error_message[:2000]
+            await session.commit()
+        raise
 
 
 async def reconcile_stale_points(org_id: int, web_id: int) -> int:
