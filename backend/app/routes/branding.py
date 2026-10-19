@@ -18,7 +18,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.models.org import Org
-from app.models.org_branding import OrgBranding, OrgChatHeader, OrgChatSettings
+from app.models.org_branding import (
+    OrgBranding,
+    OrgChatFont,
+    OrgChatHeader,
+    OrgChatSettings,
+)
 from app.models.org_member import OrgMember
 from app.models.user import User
 from app.routes.auth import get_current_user
@@ -28,6 +33,15 @@ router = APIRouter(prefix="/branding", tags=["branding"])
 DEFAULT_COLOR = "#7A1F2B"
 DEFAULT_ASSISTANT_NAME = "Chat Assistant"
 DEFAULT_HEADER_TAGLINE = "Admissions Intelligence Hub"
+DEFAULT_FONT_FAMILY = "system"
+SUPPORTED_FONT_FAMILIES = {
+    DEFAULT_FONT_FAMILY,
+    "arial",
+    "georgia",
+    "verdana",
+    "trebuchet",
+    "courier",
+}
 MAX_ASSISTANT_NAME_LENGTH = 50
 MAX_HEADER_TAGLINE_LENGTH = 80
 MAX_MASCOT_BYTES = 512 * 1024  # 512 KB
@@ -40,6 +54,7 @@ class BrandingOut(BaseModel):
     mascot_url: str | None  # relative path, e.g. "/branding/1/mascot?v=1760400000"
     assistant_name: str
     header_tagline: str
+    font_family: str
 
 
 def to_out(
@@ -48,6 +63,7 @@ def to_out(
     mascot_updated_at: datetime | None,
     assistant_name: str = DEFAULT_ASSISTANT_NAME,
     header_tagline: str = DEFAULT_HEADER_TAGLINE,
+    font_family: str = DEFAULT_FONT_FAMILY,
 ) -> BrandingOut:
     url = None
     if mascot_updated_at is not None:
@@ -58,6 +74,7 @@ def to_out(
         mascot_url=url,
         assistant_name=assistant_name,
         header_tagline=header_tagline,
+        font_family=font_family,
     )
 
 
@@ -108,12 +125,16 @@ async def get_branding(org_id: int, db: AsyncSession = Depends(get_db)):
     header_tagline = await db.scalar(
         select(OrgChatHeader.header_tagline).where(OrgChatHeader.org_id == org_id)
     )
+    font_family = await db.scalar(
+        select(OrgChatFont.font_family).where(OrgChatFont.org_id == org_id)
+    )
     if row is None:
         return BrandingOut(
             color=DEFAULT_COLOR,
             mascot_url=None,
             assistant_name=assistant_name or DEFAULT_ASSISTANT_NAME,
             header_tagline=header_tagline or DEFAULT_HEADER_TAGLINE,
+            font_family=font_family or DEFAULT_FONT_FAMILY,
         )
 
     return to_out(
@@ -122,6 +143,7 @@ async def get_branding(org_id: int, db: AsyncSession = Depends(get_db)):
         row.mascot_updated_at,
         assistant_name or DEFAULT_ASSISTANT_NAME,
         header_tagline or DEFAULT_HEADER_TAGLINE,
+        font_family or DEFAULT_FONT_FAMILY,
     )
 
 
@@ -149,6 +171,7 @@ async def update_branding(
     color: str = Form(...),
     assistant_name: str | None = Form(None),
     header_tagline: str | None = Form(None),
+    font_family: str | None = Form(None),
     mascot: UploadFile | None = File(None),
     remove_mascot: bool = Form(False),
     db: AsyncSession = Depends(get_db),
@@ -191,6 +214,18 @@ async def update_branding(
             detail=f"Header tagline must be {MAX_HEADER_TAGLINE_LENGTH} characters or fewer.",
         )
 
+    normalized_font_family = (
+        font_family.strip().lower() if font_family is not None else None
+    )
+    if (
+        normalized_font_family is not None
+        and normalized_font_family not in SUPPORTED_FONT_FAMILIES
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Choose a supported chat font.",
+        )
+
     branding = await db.get(OrgBranding, org_id)
     if branding is None:
         branding = OrgBranding(org_id=org_id, color=color.upper())
@@ -216,6 +251,16 @@ async def update_branding(
             db.add(chat_header)
         else:
             chat_header.header_tagline = normalized_tagline
+
+    chat_font = await db.get(OrgChatFont, org_id)
+    if normalized_font_family is not None:
+        if chat_font is None:
+            chat_font = OrgChatFont(
+                org_id=org_id, font_family=normalized_font_family
+            )
+            db.add(chat_font)
+        else:
+            chat_font.font_family = normalized_font_family
 
     if mascot is not None and mascot.filename:
         data = await mascot.read(MAX_MASCOT_BYTES + 1)
@@ -245,6 +290,8 @@ async def update_branding(
         or (chat_settings.assistant_name if chat_settings else DEFAULT_ASSISTANT_NAME),
         normalized_tagline
         or (chat_header.header_tagline if chat_header else DEFAULT_HEADER_TAGLINE),
+        normalized_font_family
+        or (chat_font.font_family if chat_font else DEFAULT_FONT_FAMILY),
     )
     await db.commit()
     return result

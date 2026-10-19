@@ -5,7 +5,9 @@
   import {
     DEFAULT_ASSISTANT_NAME,
     DEFAULT_COLOR,
+    DEFAULT_FONT_FAMILY,
     DEFAULT_HEADER_TAGLINE,
+    CHAT_FONT_FAMILIES,
     MAX_MASCOT_BYTES,
     contrastColor,
     fetchBranding,
@@ -25,6 +27,8 @@
   let savedAssistantName = $state(DEFAULT_ASSISTANT_NAME);
   let headerTagline = $state(DEFAULT_HEADER_TAGLINE);
   let savedHeaderTagline = $state(DEFAULT_HEADER_TAGLINE);
+  let fontFamily = $state<string>(DEFAULT_FONT_FAMILY);
+  let savedFontFamily = $state<string>(DEFAULT_FONT_FAMILY);
   let mascotColor = $state(DEFAULT_COLOR);
   let mascotPreview = $state<string | null>(null);
 
@@ -50,6 +54,7 @@
   let dirty = $derived(
     assistantName !== savedAssistantName ||
       headerTagline !== savedHeaderTagline ||
+      fontFamily !== savedFontFamily ||
       mascotColor.toLowerCase() !== savedColor.toLowerCase() ||
       pendingFile !== null ||
       removeMascot,
@@ -60,6 +65,8 @@
     assistantName = branding.assistant_name;
     savedHeaderTagline = branding.header_tagline;
     headerTagline = branding.header_tagline;
+    savedFontFamily = branding.font_family;
+    fontFamily = branding.font_family;
     savedColor = branding.color;
     savedMascotUrl = branding.mascot_url;
     mascotColor = branding.color;
@@ -154,6 +161,7 @@
   function discard() {
     assistantName = savedAssistantName;
     headerTagline = savedHeaderTagline;
+    fontFamily = savedFontFamily;
     mascotColor = savedColor;
     mascotPreview = savedMascotUrl;
     pendingFile = null;
@@ -175,6 +183,7 @@
           color: mascotColor,
           assistantName,
           headerTagline,
+          fontFamily,
           mascot: pendingFile,
           removeMascot,
         }),
@@ -275,6 +284,31 @@
             />
             <p class="mt-1 text-xs text-gray-500">
               Up to 50 characters. This name appears in the chat header.
+            </p>
+          </div>
+
+          <div class="mb-5">
+            <label
+              for="chat-font"
+              class="mb-2 block text-sm font-semibold text-gray-800"
+            >
+              Chat font
+            </label>
+            <select
+              id="chat-font"
+              bind:value={fontFamily}
+              disabled={loading || saving}
+              oninput={() => (successMessage = "")}
+              class="w-full rounded-md border border-outline bg-white px-3 py-2.5 text-sm outline-none focus:border-primary disabled:opacity-60"
+            >
+              {#each CHAT_FONT_FAMILIES as font (font.value)}
+                <option value={font.value} style={`font-family: ${font.css};`}>
+                  {font.label}
+                </option>
+              {/each}
+            </select>
+            <p class="mt-1 text-xs text-gray-500">
+              Choose the typeface visitors see in the chat.
             </p>
           </div>
 
@@ -469,7 +503,10 @@
         </div>
 
         <div class="overflow-hidden">
-          <div class="flex min-h-[620px] flex-col bg-[#F5F8FB]">
+          <div
+            class="flex min-h-[620px] flex-col bg-[#F5F8FB]"
+            style={`font-family: ${CHAT_FONT_FAMILIES.find((font) => font.value === fontFamily)?.css ?? CHAT_FONT_FAMILIES[0].css};`}
+          >
             <!-- Chat header -->
             <header
               class="flex flex-row items-center justify-between gap-4 border-b-2 border-outline bg-white px-4 py-3"

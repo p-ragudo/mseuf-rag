@@ -6,6 +6,27 @@ const API_URL: string = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
 export const DEFAULT_COLOR = "#7A1F2B";
 export const DEFAULT_ASSISTANT_NAME = "Chat Assistant";
 export const DEFAULT_HEADER_TAGLINE = "Admissions Intelligence Hub";
+export const DEFAULT_FONT_FAMILY = "system";
+export const CHAT_FONT_FAMILIES = [
+  {
+    value: "system",
+    label: "System default",
+    css: 'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+  },
+  { value: "arial", label: "Arial", css: "Arial, sans-serif" },
+  { value: "georgia", label: "Georgia", css: "Georgia, serif" },
+  { value: "verdana", label: "Verdana", css: "Verdana, sans-serif" },
+  {
+    value: "trebuchet",
+    label: "Trebuchet MS",
+    css: '"Trebuchet MS", sans-serif',
+  },
+  {
+    value: "courier",
+    label: "Courier New",
+    css: '"Courier New", monospace',
+  },
+] as const;
 export const MAX_MASCOT_BYTES = 512 * 1024; // keep in sync with the backend
 
 /** An API error that keeps the HTTP status, so callers can tell a 404 from a network failure. */
@@ -24,6 +45,7 @@ export interface Branding {
   mascot_url: string | null; // absolute URL, ready to use in <img src>
   assistant_name: string;
   header_tagline: string;
+  font_family: string;
 }
 
 interface BrandingResponse {
@@ -31,14 +53,19 @@ interface BrandingResponse {
   mascot_url: string | null; // relative path from the API
   assistant_name?: string;
   header_tagline?: string;
+  font_family?: string;
 }
 
 function toBranding(data: BrandingResponse): Branding {
+  const font = CHAT_FONT_FAMILIES.find(
+    (candidate) => candidate.value === data.font_family,
+  );
   return {
     color: data.color,
     mascot_url: data.mascot_url ? `${API_URL}${data.mascot_url}` : null,
     assistant_name: data.assistant_name || DEFAULT_ASSISTANT_NAME,
     header_tagline: data.header_tagline || DEFAULT_HEADER_TAGLINE,
+    font_family: font?.value ?? DEFAULT_FONT_FAMILY,
   };
 }
 
@@ -69,6 +96,7 @@ export async function saveBranding(
     color: string;
     assistantName: string;
     headerTagline: string;
+    fontFamily: string;
     mascot?: File | null;
     removeMascot?: boolean;
   },
@@ -77,6 +105,7 @@ export async function saveBranding(
   form.append("color", options.color);
   form.append("assistant_name", options.assistantName);
   form.append("header_tagline", options.headerTagline);
+  form.append("font_family", options.fontFamily);
   if (options.mascot) form.append("mascot", options.mascot);
   else if (options.removeMascot) form.append("remove_mascot", "true");
 

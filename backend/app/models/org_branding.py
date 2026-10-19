@@ -51,3 +51,14 @@ class OrgChatHeader(Base):
     header_tagline: Mapped[str] = mapped_column(
         String(80), default="Admissions Intelligence Hub", nullable=False
     )
+
+
+class OrgChatFont(Base):
+    __tablename__ = "org_chat_fonts"
+
+    org_id: Mapped[int] = mapped_column(
+        ForeignKey("orgs.id", ondelete="CASCADE"), primary_key=True
+    )
+    font_family: Mapped[str] = mapped_column(
+        String(30), default="system", nullable=False
+    )

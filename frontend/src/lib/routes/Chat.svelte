@@ -5,7 +5,9 @@
   import {
     DEFAULT_COLOR,
     DEFAULT_ASSISTANT_NAME,
+    DEFAULT_FONT_FAMILY,
     DEFAULT_HEADER_TAGLINE,
+    CHAT_FONT_FAMILIES,
     HttpError,
     contrastColor,
     fetchBranding,
@@ -69,6 +71,11 @@
   let mascotUrl = $state<string | null>(null);
   let assistantName = $state(DEFAULT_ASSISTANT_NAME);
   let headerTagline = $state(DEFAULT_HEADER_TAGLINE);
+  let fontFamily = $state<string>(DEFAULT_FONT_FAMILY);
+  let fontFamilyCss = $derived(
+    CHAT_FONT_FAMILIES.find((font) => font.value === fontFamily)?.css ??
+      CHAT_FONT_FAMILIES[0].css,
+  );
 
   // A missing organization comes back as 404 "Organization ... not found" (or 422
   // when the id isn't a number). A bare 404 "Not Found" means the route itself
@@ -87,6 +94,7 @@
       mascotUrl = branding.mascot_url;
       assistantName = branding.assistant_name;
       headerTagline = branding.header_tagline;
+      fontFamily = branding.font_family;
       orgStatus = "ready";
     } catch (error) {
       if (org !== orgId) return;
@@ -161,6 +169,7 @@
     mascotUrl = null;
     assistantName = DEFAULT_ASSISTANT_NAME;
     headerTagline = DEFAULT_HEADER_TAGLINE;
+    fontFamily = DEFAULT_FONT_FAMILY;
     loadBranding(orgId);
     loadKnowledgeBaseStatus(orgId);
   });
@@ -432,7 +441,7 @@
 {:else if knowledgeBaseStatus === "incomplete"}
   <main
     class="flex h-dvh items-center justify-center bg-[#F5F8FB] px-4 text-center sm:px-6"
-    style="--brand: {color}; --brand-tint: {color}18; --brand-contrast: {contrastColor(color)};"
+    style="--brand: {color}; --brand-tint: {color}18; --brand-contrast: {contrastColor(color)}; font-family: {fontFamilyCss};"
     role="status"
   >
     <div class="max-w-xl rounded-xl border border-outline bg-white p-8 shadow-sm">
