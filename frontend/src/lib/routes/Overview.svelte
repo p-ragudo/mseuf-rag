@@ -233,9 +233,9 @@
     <h3
       class="mb-2 flex flex-row gap-2 text-sm font-semibold uppercase tracking-wider text-primary"
     >
-      <span class="bg-primary w-1 rounded-2xl"></span>INSTITUTION COMMAND CENTER
+      <span class="bg-primary w-1 rounded-2xl"></span>ORGANIZATION OVERVIEW
     </h3>
-    <h1 class="text-2xl font-bold sm:text-3xl">Overview</h1>
+    <h1 class="text-2xl font-bold sm:text-3xl">Dashboard</h1>
     <p class="text-gray-600">
       See what students ask, and where your team is needed.
     </p>

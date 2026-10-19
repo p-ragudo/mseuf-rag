@@ -74,11 +74,11 @@
   class="flex min-w-0 flex-row items-center justify-between gap-2 border-b-2 border-b-outline bg-white px-3 py-2 sm:gap-4 sm:px-4"
 >
   <div class="flex flex-col justify-center">
-    <h2 class="hidden text-primary sm:block">UNI ORG</h2>
+    <h2 class="hidden text-xs font-bold uppercase tracking-wider text-primary sm:block">MSEUF RAG</h2>
 
     <h1 class="max-w-[60vw] text-sm font-semibold leading-tight sm:max-w-none sm:text-xl">
       Admissions Intelligence Hub
-      <span class="hidden font-normal text-[#59616E] sm:inline">/ Rooney Admin</span>
+      <span class="hidden font-normal text-[#59616E] sm:inline">/ Admin workspace</span>
     </h1>
   </div>
 

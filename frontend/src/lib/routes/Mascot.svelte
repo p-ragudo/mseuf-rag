@@ -189,14 +189,14 @@
         class="mb-2 flex flex-row gap-2 text-sm font-semibold uppercase tracking-wider text-primary"
       >
         <span class="w-1 rounded-2xl bg-primary"></span>
-        CHAT CUSTOMIZATION
+        ASSISTANT CUSTOMIZATION
       </h3>
 
-      <h1 class="text-2xl font-bold sm:text-3xl">Mascot</h1>
+      <h1 class="text-2xl font-bold sm:text-3xl">Chat Branding</h1>
 
       <p class="text-gray-600">
-        Customize the name, header tagline, mascot, and color used by your
-        organization's chat assistant.
+        Customize the name, appearance, and header message shown to people
+        using your organization’s chat assistant.
       </p>
     </div>
 
@@ -218,9 +218,9 @@
       <div class="flex flex-col gap-5">
         <WhiteCard>
           <div class="mb-4">
-            <h2 class="text-lg font-bold">Mascot settings</h2>
+            <h2 class="text-lg font-bold">Assistant appearance</h2>
             <p class="mt-1 text-sm text-gray-500">
-              Set the chat name, header tagline, mascot, and primary color.
+              Set the assistant name, header message, mascot, and brand color.
             </p>
           </div>
 
@@ -411,7 +411,7 @@
         <!-- Mascot preview -->
         <WhiteCard>
           <div class="mb-4">
-            <h2 class="text-lg font-bold">Mascot preview</h2>
+            <h2 class="text-lg font-bold">Live preview</h2>
             <p class="mt-1 text-sm text-gray-500">
               This is how the mascot will appear in the chat.
             </p>

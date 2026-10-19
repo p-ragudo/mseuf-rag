@@ -18,16 +18,14 @@
     class="hidden flex-row items-center gap-4 border-b-2 border-b-outline px-4 py-2 md:flex"
   >
     <div
-      class="flex h-10 w-10 items-center justify-center rounded-md bg-primary font-bold text-white"
+      class="flex h-10 w-10 items-center justify-center rounded-md bg-primary text-xs font-bold tracking-wide text-white"
     >
-      S
+      RAG
     </div>
 
     <div class="mt-2">
-      <h2 class="text-base font-bold">
-        Org name <span class="text-primary">mascot</span>
-      </h2>
-      <p class="text-sm font-semibold text-gray-500">Admission Intelligence</p>
+      <h2 class="text-base font-bold">MSEUF RAG</h2>
+      <p class="text-sm font-semibold text-gray-500">Admissions Assistant</p>
     </div>
   </div>
 
@@ -35,18 +33,18 @@
     aria-label="Workspace navigation"
     class="w-full p-1 text-sm font-semibold text-gray-500 md:p-4"
   >
-    <h3 class="hidden md:block">WORKSPACE</h3>
+    <h3 class="hidden text-xs font-bold uppercase tracking-wider text-gray-400 md:block">Workspace</h3>
 
     <ul class="flex items-stretch justify-around gap-1 overflow-x-auto md:mt-2 md:block md:space-y-1">
-      <NavItem href="/overview" text="Overview" icon={OverviewIcon} />
-      <NavItem href="/members" text="Members" icon={PersonsIcon} />
+      <NavItem href="/overview" text="Dashboard" icon={OverviewIcon} />
+      <NavItem href="/members" text="Team" icon={PersonsIcon} />
       <NavItem
         href="/knowledge-base"
         text="Knowledge Base"
         icon={KnowledgeBaseIcon}
       />
       <!-- <NavItem href="/escalation" text="Escalation" icon={EscalationIcon} /> -->
-      <NavItem href="/mascot" text="Mascot" icon={MascotIcon} />
+      <NavItem href="/mascot" text="Chat Branding" icon={MascotIcon} />
     </ul>
   </nav>
 

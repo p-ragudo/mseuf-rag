@@ -141,7 +141,7 @@ For dense vectors we embed the **generated question**[cite: 1, 3]. For sparse ve
 
 ## 7. Ingestion Pipeline
 
-Website ingestion is triggered by `POST /ingest/run/{website_id}` (FastAPI `BackgroundTasks`) or by the Telegram `/scrape <id>` command[cite: 1, 6]. `run_full_pipeline` runs **five concurrent async workers** with `asyncio.Event` hand-offs, communicating through Postgres rows[cite: 1, 3]. Uploaded documents use `POST /ingest/documents`; PDF, DOC, and DOCX text is extracted without retaining the original file, stored as a page, then chunked, question-augmented, embedded, and synced through the same Qdrant vector path. The upload status endpoint reports completion only after every generated question has been synced to the active vector target.
+Website ingestion is triggered by `POST /ingest/run/{website_id}` (FastAPI `BackgroundTasks`) or by the Telegram `/scrape <id>` command[cite: 1, 6]. `run_full_pipeline` runs **five concurrent async workers** with `asyncio.Event` hand-offs, communicating through Postgres rows[cite: 1, 3]. Uploaded documents use `POST /ingest/documents`; PDF, DOC, and DOCX text is extracted without retaining the original file, stored as a page, then chunked, question-augmented, embedded, and synced through the same Qdrant vector path. `GET /ingest/documents?org_id=...` lists a member's documents; `PUT /ingest/documents/{document_id}` replaces and re-indexes one, and `DELETE` removes its Qdrant vectors before deleting its PostgreSQL rows. Mutations are rejected while indexing is in progress and fail without deleting database content if vector cleanup fails. The upload status endpoint reports completion only after every generated question has been synced to the active vector target.
 
 ```text
  discovery â”€â”€â–¶ scraper â”€â”€â–¶ chunker â”€â”€â–¶ qgen â”€â”€â–¶ qdrant_sync
@@ -266,7 +266,7 @@ If an organization has no generated questions synced to the active embedding tar
 | Capability | Status |
 |---|---|
 | Discovery, scrape, chunk, qgen, embed, Qdrant sync | **[IMPLEMENTED]**[cite: 1] |
-| PDF/DOC/DOCX upload, text extraction, and confirmed Qdrant indexing | **[IMPLEMENTED]** |
+| PDF/DOC/DOCX upload, text extraction, confirmed Qdrant indexing, replacement, and deletion | **[IMPLEMENTED]** |
 | Tenant payload partitioning + is_tenant HNSW | **[IMPLEMENTED]**[cite: 1, 10] |
 | Dense + sparse hybrid retrieval + custom chunk-level RRF | **[IMPLEMENTED]**[cite: 1, 7] |
 | Structure-aware markdown chunker (`chunker.py`) | **[IMPLEMENTED]**[cite: 3] |

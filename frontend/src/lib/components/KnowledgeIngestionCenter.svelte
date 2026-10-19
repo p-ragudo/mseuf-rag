@@ -13,6 +13,7 @@
 
   type WebsiteStatus = "PENDING" | "IN_PROGRESS" | "COMPLETED" | "FAILED";
   type DocumentStatus = "PENDING" | "IN_PROGRESS" | "COMPLETED" | "FAILED";
+  type IngestStatus = WebsiteStatus | DocumentStatus;
 
   type Website = {
     id: number;
@@ -31,6 +32,17 @@
       chunks: { total: number };
       questions: { total_generated: number; synced_active_model: number };
     };
+  };
+
+  type IngestedDocument = {
+    document_id: number;
+    filename: string;
+    category: string;
+    status: DocumentStatus;
+    error_message: string | null;
+    chunks: number;
+    questions: number;
+    synced_questions: number;
   };
 
   interface Props {
@@ -53,6 +65,7 @@
   let selectedCategory = $state(untrack(() => categories[0] ?? ""));
   let selectedFile = $state<File | null>(null);
   let activeDocumentId = $state<number | null>(null);
+  let editingDocumentId = $state<number | null>(null);
   let documentPollInFlight = false;
   let isDraggingOver = $state(false);
   let fileInput = $state<HTMLInputElement>();
@@ -63,10 +76,13 @@
   let organizations = $state<Organization[]>([]);
   let selectedOrgId = $state("");
   let websites = $state<Website[]>([]);
+  let documents = $state<IngestedDocument[]>([]);
   let organizationsLoading = $state(true);
   let websitesLoading = $state(false);
+  let documentsLoading = $state(false);
   let submitting = $state(false);
   let actionWebsiteId = $state<number | null>(null);
+  let actionDocumentId = $state<number | null>(null);
   let pageError = $state("");
   let pageNotice = $state("");
   let websiteRequest = 0;
@@ -84,6 +100,8 @@
     const orgId = selectedOrgId;
     if (orgId) void loadWebsites(orgId);
     else websites = [];
+    if (orgId) void loadDocuments(orgId);
+    else documents = [];
   });
 
   $effect(() => {
@@ -94,6 +112,20 @@
 
     const interval = window.setInterval(() => {
       if (selectedOrgId) void loadWebsites(selectedOrgId);
+    }, 5000);
+
+    return () => window.clearInterval(interval);
+  });
+
+  $effect(() => {
+    const hasRunningDocument = documents.some(
+      (document) =>
+        document.status === "PENDING" || document.status === "IN_PROGRESS",
+    );
+    if (!hasRunningDocument) return;
+
+    const interval = window.setInterval(() => {
+      if (selectedOrgId) void loadDocuments(selectedOrgId);
     }, 5000);
 
     return () => window.clearInterval(interval);
@@ -191,6 +223,24 @@
     }
   }
 
+  async function loadDocuments(orgId: string) {
+    documentsLoading = true;
+    try {
+      const response = await authFetch(
+        `/ingest/documents?org_id=${encodeURIComponent(orgId)}`,
+      );
+      if (!response.ok) throw new Error(await responseError(response));
+      if (orgId === selectedOrgId) {
+        documents = await response.json();
+      }
+    } catch (error) {
+      pageError =
+        error instanceof Error ? error.message : "Could not load documents.";
+    } finally {
+      documentsLoading = false;
+    }
+  }
+
   async function addAndIngestWebsite() {
     const url = webUrl.trim();
     if (!isValidHttpUrl(url)) {
@@ -255,22 +305,32 @@
     pageNotice = "";
     const form = new FormData();
     form.append("file", selectedFile);
+    const replacingDocumentId = editingDocumentId;
+    if (replacingDocumentId === null) {
     form.append("org_id", selectedOrgId);
+    }
     form.append("category", selectedCategory);
 
     try {
-      const response = await authFetch("/ingest/documents", {
-        method: "POST",
-        body: form,
-      });
-      if (!response.ok) throw new Error(await responseError(response));
+    const response = await authFetch(
+      replacingDocumentId === null
+        ? "/ingest/documents"
+        : `/ingest/documents/${replacingDocumentId}`,
+      {
+        method: replacingDocumentId === null ? "POST" : "PUT",
+      body: form,
+      },
+    );
+    if (!response.ok) throw new Error(await responseError(response));
 
-      const result: { document_id: number; filename: string } =
-        await response.json();
-      selectedFile = null;
-      if (fileInput) fileInput.value = "";
-      activeDocumentId = result.document_id;
-      pageNotice = `“${result.filename}” uploaded. Waiting for vector indexing…`;
+    const result: { document_id: number; filename: string } =
+      await response.json();
+    selectedFile = null;
+    editingDocumentId = null;
+    if (fileInput) fileInput.value = "";
+    activeDocumentId = result.document_id;
+    pageNotice = `${replacingDocumentId === null ? "Uploaded" : "Replacement uploaded"} “${result.filename}”. Waiting for vector indexing…`;
+    await loadDocuments(selectedOrgId);
     } catch (error) {
       pageError =
         error instanceof Error ? error.message : "Could not upload document.";
@@ -299,12 +359,14 @@
       if (result.status === "COMPLETED") {
         pageNotice = `“${result.filename}” indexed: ${result.chunks} chunks and ${result.synced_questions} vector points.`;
         activeDocumentId = null;
+        await loadDocuments(selectedOrgId);
       } else if (result.status === "FAILED") {
         pageError =
           result.error_message ??
           `Indexing “${result.filename}” failed before its vectors were stored.`;
         pageNotice = "";
         activeDocumentId = null;
+        await loadDocuments(selectedOrgId);
       }
     } catch (error) {
       pageError =
@@ -369,8 +431,68 @@
     }
   }
 
-  function statusLabel(status: WebsiteStatus): string {
+  function startDocumentUpdate(document: IngestedDocument) {
+    editingDocumentId = document.document_id;
+    selectedFile = null;
+    if (categories.includes(document.category)) {
+      selectedCategory = document.category;
+    }
+    pageError = "";
+    pageNotice = `Choose a replacement file for “${document.filename}”.`;
+    if (fileInput) {
+      fileInput.value = "";
+      fileInput.click();
+    }
+  }
+
+  function cancelDocumentUpdate() {
+    editingDocumentId = null;
+    selectedFile = null;
+    if (fileInput) fileInput.value = "";
+    pageNotice = "";
+  }
+
+  async function deleteDocument(document: IngestedDocument) {
+    if (
+      actionDocumentId !== null ||
+      document.status === "IN_PROGRESS" ||
+      document.status === "PENDING" ||
+      !window.confirm(
+        `Delete “${document.filename}” and permanently remove its indexed content?`,
+      )
+    ) {
+      return;
+    }
+
+    actionDocumentId = document.document_id;
+    pageError = "";
+    pageNotice = "";
+    try {
+      const response = await authFetch(
+        `/ingest/documents/${document.document_id}`,
+        { method: "DELETE" },
+      );
+      if (!response.ok) throw new Error(await responseError(response));
+      pageNotice = `“${document.filename}” and its indexed content were deleted.`;
+      if (editingDocumentId === document.document_id) cancelDocumentUpdate();
+      await loadDocuments(selectedOrgId);
+    } catch (error) {
+      pageError =
+        error instanceof Error ? error.message : "Could not delete document.";
+    } finally {
+      actionDocumentId = null;
+    }
+  }
+
+  function statusLabel(status: IngestStatus): string {
     return status.replace("_", " ").toLowerCase();
+  }
+
+  function statusTone(status: IngestStatus): string {
+    if (status === "COMPLETED") return "bg-green-100 text-green-800";
+    if (status === "FAILED") return "bg-red-100 text-red-800";
+    if (status === "IN_PROGRESS") return "bg-blue-100 text-blue-800";
+    return "bg-gray-100 text-gray-700";
   }
 
   function handleDrop(e: DragEvent) {
@@ -543,7 +665,10 @@
 
         <button
           class="mt-4 text-sm font-semibold text-primary hover:underline"
-          onclick={() => (selectedFile = null)}
+          onclick={() => {
+            selectedFile = null;
+            if (fileInput) fileInput.value = "";
+          }}
         >
           Remove file
         </button>
@@ -560,15 +685,14 @@
         >
           Browse files
         </button>
-
-        <input
-          bind:this={fileInput}
-          type="file"
-          accept=".pdf,.doc,.docx"
-          class="hidden"
-          onchange={handleFileInputChange}
-        />
       {/if}
+      <input
+        bind:this={fileInput}
+        type="file"
+        accept=".pdf,.doc,.docx"
+        class="hidden"
+        onchange={handleFileInputChange}
+      />
     </div>
 
     <div class="mt-6">
@@ -631,8 +755,21 @@
         />
       </svg>
 
-      {submitting ? "Uploading…" : "Upload and index document"}
+      {submitting
+        ? "Uploading…"
+        : editingDocumentId !== null
+          ? "Replace and re-index document"
+          : "Upload and index document"}
     </button>
+    {#if editingDocumentId !== null}
+      <button
+        type="button"
+        class="ml-3 mt-4 rounded-md border border-outline px-4 py-3 text-sm font-semibold text-gray-700 hover:bg-gray-50"
+        onclick={cancelDocumentUpdate}
+      >
+        Cancel replacement
+      </button>
+    {/if}
 
     {#if pageError}
       <p
@@ -650,6 +787,91 @@
         {pageNotice}
       </p>
     {/if}
+
+    <section class="mt-8 border-t border-outline pt-6">
+      <div class="mb-4 flex items-center justify-between gap-4">
+        <div>
+          <h3 class="text-lg font-bold">Uploaded documents</h3>
+          <p class="mt-1 text-sm text-gray-500">
+            Replace a document to re-index new content, or remove it and its
+            vectors from the knowledge base.
+          </p>
+        </div>
+        <button
+          type="button"
+          class="shrink-0 rounded-md border border-outline bg-white px-3 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+          disabled={documentsLoading || !selectedOrgId}
+          onclick={() => selectedOrgId && loadDocuments(selectedOrgId)}
+        >
+          Refresh list
+        </button>
+      </div>
+
+      {#if documentsLoading && documents.length === 0}
+        <p class="py-6 text-center text-sm text-gray-500">Loading documents…</p>
+      {:else if documents.length === 0}
+        <div class="rounded-lg border border-dashed border-outline px-4 py-8 text-center text-sm text-gray-500">
+          No documents uploaded for this organization yet.
+        </div>
+      {:else}
+        <div class="space-y-3">
+          {#each documents as document (document.document_id)}
+            <article class="rounded-lg border border-outline bg-white p-4">
+              <div
+                class="flex flex-col justify-between gap-4 md:flex-row md:items-start"
+              >
+                <div class="min-w-0 flex-1">
+                  <p class="break-all text-sm font-semibold text-gray-900">
+                    {document.filename}
+                  </p>
+                  <p class="mt-1 text-xs text-gray-500">
+                    {document.category || "Uncategorized"} · {document.chunks}
+                    chunks · {document.synced_questions}/
+                    {document.questions} vectors indexed
+                  </p>
+                  <span
+                    class={`mt-2 inline-flex rounded-full px-2.5 py-1 text-xs font-bold uppercase ${statusTone(document.status)}`}
+                  >
+                    {statusLabel(document.status)}
+                  </span>
+                  {#if document.error_message}
+                    <p class="mt-2 break-words text-sm text-red-700">
+                      {document.error_message}
+                    </p>
+                  {/if}
+                </div>
+                <div class="flex shrink-0 flex-wrap gap-2">
+                  <button
+                    type="button"
+                    class="rounded-md border border-outline px-3 py-2 text-xs font-semibold hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+                    disabled={document.status === "PENDING" ||
+                      document.status === "IN_PROGRESS" ||
+                      actionDocumentId !== null ||
+                      activeDocumentId !== null}
+                    onclick={() => startDocumentUpdate(document)}
+                  >
+                    Replace document
+                  </button>
+                  <button
+                    type="button"
+                    class="rounded-md px-3 py-2 text-xs font-semibold text-red-700 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50"
+                    disabled={document.status === "PENDING" ||
+                      document.status === "IN_PROGRESS" ||
+                      actionDocumentId !== null ||
+                      activeDocumentId !== null}
+                    onclick={() => void deleteDocument(document)}
+                  >
+                    {actionDocumentId === document.document_id
+                      ? "Deleting…"
+                      : "Delete"}
+                  </button>
+                </div>
+              </div>
+            </article>
+          {/each}
+        </div>
+      {/if}
+    </section>
   {:else}
     <!-- Web Resource Ingestion -->
     <div class="mt-6">
