@@ -13,6 +13,7 @@
     type Branding,
   } from "../branding.svelte";
   import { authFetch } from "../auth.svelte";
+  import { setActiveOrganization } from "../org.svelte";
 
   type Organization = { id: number; name: string };
 
@@ -38,6 +39,13 @@
   let saving = $state(false);
   let errorMessage = $state("");
   let successMessage = $state("");
+
+  $effect(() => {
+    const organization = organizations.find(
+      (item) => String(item.id) === selectedOrgId,
+    );
+    if (organization) setActiveOrganization(organization);
+  });
 
   let dirty = $derived(
     assistantName !== savedAssistantName ||

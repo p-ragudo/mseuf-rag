@@ -25,6 +25,10 @@ export const orgState: OrgState = $state({
   error: null,
 });
 
+export function setActiveOrganization(org: Organization | null): void {
+  orgState.org = org;
+}
+
 async function parseError(res: Response): Promise<string> {
   try {
     const data = await res.json();

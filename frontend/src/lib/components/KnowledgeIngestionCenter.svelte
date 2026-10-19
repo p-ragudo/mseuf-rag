@@ -3,6 +3,7 @@
   import { untrack } from "svelte";
   import SelectDropdown from "./SelectDropdown.svelte";
   import { authFetch } from "../auth.svelte";
+  import { setActiveOrganization } from "../org.svelte";
 
   type Tab = "document" | "web";
 
@@ -91,6 +92,13 @@
   let canStageDocument = $derived(
     selectedFile !== null && selectedCategory !== "",
   );
+
+  $effect(() => {
+    const organization = organizations.find(
+      (item) => String(item.id) === selectedOrgId,
+    );
+    if (organization) setActiveOrganization(organization);
+  });
 
   onMount(() => {
     void loadOrganizations();

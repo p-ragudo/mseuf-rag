@@ -5,10 +5,13 @@
   import MascotIcon from "../icons/MascotIcon.svelte";
   import OverviewIcon from "../icons/OverviewIcon.svelte";
   import PersonsIcon from "../icons/PersonsIcon.svelte";
+  import { orgState } from "../org.svelte";
 
   interface Props {
     currentRoute: string;
   }
+
+  let organizationName = $derived(orgState.org?.name ?? "Workspace");
 </script>
 
 <aside
@@ -24,8 +27,8 @@
     </div>
 
     <div>
-      <h2 class="text-base font-bold">MSEUF RAG</h2>
-      <p class="text-sm font-semibold text-gray-500">Admissions Assistant</p>
+      <h2 class="text-base font-bold">{organizationName}</h2>
+      <p class="text-sm font-semibold text-gray-500">Organization workspace</p>
     </div>
   </div>
 

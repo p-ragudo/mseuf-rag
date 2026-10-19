@@ -3,6 +3,7 @@
   import AppLayout from "../components/AppLayout.svelte";
   import WhiteCard from "../components/WhiteCard.svelte";
   import { authFetch } from "../auth.svelte";
+  import { setActiveOrganization } from "../org.svelte";
 
   type Organization = { id: number; name: string };
   type OrganizationMember = {
@@ -27,6 +28,13 @@
   let memberError = $state("");
   let memberNotice = $state("");
   let membersRequestId = 0;
+
+  $effect(() => {
+    const organization = organizations.find(
+      (item) => String(item.id) === selectedOrgId,
+    );
+    if (organization) setActiveOrganization(organization);
+  });
 
   onMount(async () => {
     try {

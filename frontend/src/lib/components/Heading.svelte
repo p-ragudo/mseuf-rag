@@ -2,17 +2,12 @@
   import { fly } from "svelte/transition";
   import { replace } from "svelte-spa-router";
   import DropDownIcon from "../icons/DropDownIcon.svelte";
-  import ProfileMenu from "./ProfileMenu.svelte";
   import { auth, logout } from "../auth.svelte";
-
-  type Profile = {
-    id: string;
-    name: string;
-    initials: string;
-  };
+  import { orgState } from "../org.svelte";
 
   let open = $state(false);
   let container: HTMLDivElement | undefined = $state();
+  let organizationName = $derived(orgState.org?.name ?? "Workspace");
 
   let displayName = $derived(
     auth.user
@@ -27,29 +22,6 @@
   );
 
   let subtitle = $derived(auth.user?.email ?? "Role");
-
-  const profiles: Profile[] = [
-    {
-      id: "1",
-      name: "MSEUF",
-      initials: "MS",
-    },
-    {
-      id: "2",
-      name: "UNI Org",
-      initials: "UN",
-    },
-    {
-      id: "3",
-      name: "Test Organization",
-      initials: "TO",
-    },
-  ];
-
-  function handleSelect(profile: Profile) {
-    console.log("selected", profile);
-    open = false;
-  }
 
   function handleLogout() {
     open = false;
@@ -74,7 +46,9 @@
   class="flex h-16 min-w-0 shrink-0 flex-row items-center justify-between gap-2 border-b-2 border-b-outline bg-white px-3 sm:gap-4 sm:px-4"
 >
   <div class="flex flex-col justify-center">
-    <h2 class="hidden text-xs font-bold uppercase tracking-wider text-primary sm:block">MSEUF RAG</h2>
+    <h2 class="hidden text-xs font-bold uppercase tracking-wider text-primary sm:block">
+      {organizationName}
+    </h2>
 
     <h1 class="max-w-[60vw] text-sm font-semibold leading-tight sm:max-w-none sm:text-xl">
       Admissions Intelligence Hub
@@ -112,12 +86,6 @@
         transition:fly={{ y: -8, duration: 150 }}
         class="absolute right-0 top-full z-50 mt-2 w-64 overflow-hidden rounded-lg border border-outline bg-white shadow-lg"
       >
-        <!-- <div
-          class="[&>*]:!static [&>*]:!inset-auto [&>*]:!m-0 [&>*]:!w-full [&>*]:!rounded-none [&>*]:!border-0 [&>*]:!shadow-none"
-        >
-          <ProfileMenu title="User Menu" {profiles} onSelect={handleSelect} />
-        </div> -->
-
         <div class="border-t border-outline p-1">
           <button
             type="button"

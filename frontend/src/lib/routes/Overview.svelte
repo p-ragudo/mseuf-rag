@@ -12,6 +12,7 @@
   import { onMount } from "svelte";
   import { push } from "svelte-spa-router";
   import { authFetch } from "../auth.svelte";
+  import { setActiveOrganization } from "../org.svelte";
 
   type Organization = { id: number; name: string };
   type StatsResponse = {
@@ -28,6 +29,35 @@
   let selectedOrgId = $state("");
   let organizationsLoading = $state(true);
   let organizationError = $state("");
+  let chatLinkMessage = $state("");
+
+  let selectedOrganization = $derived(
+    organizations.find((organization) => String(organization.id) === selectedOrgId),
+  );
+  let organizationChatUrl = $derived(
+    selectedOrganization
+      ? `${window.location.origin}${window.location.pathname}#/chat/${selectedOrganization.id}`
+      : "",
+  );
+
+  async function copyChatLink() {
+    if (!organizationChatUrl) return;
+
+    try {
+      await navigator.clipboard.writeText(organizationChatUrl);
+      chatLinkMessage = "Chat link copied.";
+    } catch {
+      chatLinkMessage = "Could not copy the chat link. Select and copy the link above.";
+    }
+  }
+
+  $effect(() => {
+    const organization = organizations.find(
+      (item) => String(item.id) === selectedOrgId,
+    );
+    if (organization) setActiveOrganization(organization);
+  });
+
   onMount(async () => {
     try {
       const response = await authFetch("/orgs/");
@@ -282,6 +312,35 @@
         </button>
       </div>
     </WhiteCard>
+
+    {#if selectedOrganization}
+      <section
+        aria-label="Organization chat link"
+        class="mb-4 flex flex-col gap-3 rounded-lg border border-outline bg-white p-4 sm:flex-row sm:items-center sm:justify-between"
+      >
+        <div class="min-w-0">
+          <h2 class="text-sm font-semibold">Share your organization’s chat</h2>
+          <a
+            class="mt-1 block break-all text-sm text-primary underline"
+            href={organizationChatUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            {organizationChatUrl}
+          </a>
+          {#if chatLinkMessage}
+            <p class="mt-1 text-xs text-gray-600" role="status">{chatLinkMessage}</p>
+          {/if}
+        </div>
+        <button
+          type="button"
+          class="shrink-0 rounded-md border border-outline bg-[#F5F8FB] px-3 py-2 text-sm font-semibold hover:cursor-pointer hover:bg-accent"
+          onclick={copyChatLink}
+        >
+          Copy chat link
+        </button>
+      </section>
+    {/if}
 
     {#if organizationError}
       <div
