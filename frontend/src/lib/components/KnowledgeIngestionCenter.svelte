@@ -12,6 +12,7 @@
     name: string;
   };
 
+  type OrganizationRole = "admin" | "designer" | "ingester" | "member";
   type WebsiteStatus = "PENDING" | "IN_PROGRESS" | "COMPLETED" | "FAILED";
   type DocumentStatus = "PENDING" | "IN_PROGRESS" | "COMPLETED" | "FAILED";
   type IngestStatus = WebsiteStatus | DocumentStatus;
@@ -93,8 +94,14 @@
   let actionDocumentId = $state<number | null>(null);
   let pageError = $state("");
   let pageNotice = $state("");
+  let currentRole = $state<OrganizationRole>("member");
+  let roleError = $state("");
   let websiteRequest = 0;
+  let roleRequest = 0;
   const maxDocumentBytes = 25 * 1024 * 1024;
+  let canManageIngestion = $derived(
+    currentRole === "admin" || currentRole === "ingester",
+  );
 
   let canStageDocument = $derived(
     selectedFile !== null &&
@@ -115,10 +122,16 @@
 
   $effect(() => {
     const orgId = selectedOrgId;
-    if (orgId) void loadWebsites(orgId);
-    else websites = [];
-    if (orgId) void loadDocuments(orgId);
-    else documents = [];
+    if (orgId) {
+      currentRole = "member";
+      void loadCurrentRole(orgId);
+      void loadWebsites(orgId);
+      void loadDocuments(orgId);
+    } else {
+      websites = [];
+      documents = [];
+      currentRole = "member";
+    }
   });
 
   $effect(() => {
@@ -201,6 +214,31 @@
           : "Could not load your organizations.";
     } finally {
       organizationsLoading = false;
+    }
+  }
+
+  async function loadCurrentRole(orgId: string) {
+    const request = ++roleRequest;
+    roleError = "";
+    try {
+      const response = await authFetch(`/orgs/${orgId}/members`);
+      if (!response.ok) throw new Error(await responseError(response));
+      const result: { current_role: OrganizationRole } = await response.json();
+      if (request !== roleRequest || orgId !== selectedOrgId) return;
+      if (
+        !["admin", "designer", "ingester", "member"].includes(
+          result.current_role,
+        )
+      ) {
+        throw new Error("The organization returned an unsupported member role.");
+      }
+      currentRole = result.current_role;
+    } catch (error) {
+      if (request !== roleRequest || orgId !== selectedOrgId) return;
+      roleError =
+        error instanceof Error
+          ? error.message
+          : "Could not check your organization role.";
     }
   }
 
@@ -634,7 +672,12 @@
     </button>
   </div>
 
+  {#if roleError}
+    <p role="alert" class="mt-4 text-sm text-red-700">{roleError}</p>
+  {/if}
+
   {#if activeTab === "document"}
+    {#if canManageIngestion}
     <!-- Drop zone -->
     <div
       class={`mt-6 flex flex-col items-center justify-center rounded-lg border-2 border-dashed px-3 py-10 text-center sm:px-6 sm:py-14 ${
@@ -814,6 +857,13 @@
         Cancel replacement
       </button>
     {/if}
+    {:else}
+      <p class="mt-5 rounded-md bg-gray-50 px-4 py-3 text-sm text-gray-600">
+        This organization is in read-only mode for your role. Ask an
+        administrator to assign you the Knowledge Ingester role to upload or
+        manage documents.
+      </p>
+    {/if}
 
     {#if pageError}
       <p
@@ -884,6 +934,7 @@
                     </p>
                   {/if}
                 </div>
+                {#if canManageIngestion}
                 <div class="flex shrink-0 flex-wrap gap-2">
                   <button
                     type="button"
@@ -910,6 +961,7 @@
                       : "Delete"}
                   </button>
                 </div>
+                {/if}
               </div>
             </article>
           {/each}
@@ -939,6 +991,7 @@
           </select>
         </label>
 
+        {#if canManageIngestion}
         <form
           class="mt-5"
           onsubmit={(event) => {
@@ -979,6 +1032,13 @@
             Ingestion runs in the background.
           </p>
         </form>
+        {:else}
+          <p class="mt-5 rounded-md bg-gray-50 px-4 py-3 text-sm text-gray-600">
+            This organization is in read-only mode for your role. Ask an
+            administrator to assign you the Knowledge Ingester role to manage
+            websites.
+          </p>
+        {/if}
       {/if}
     </div>
 
@@ -1082,6 +1142,7 @@
                   {/if}
                 </div>
 
+                {#if canManageIngestion}
                 <div class="flex shrink-0 flex-wrap gap-2">
                   <button
                     type="button"
@@ -1113,6 +1174,7 @@
                     Remove
                   </button>
                 </div>
+                {/if}
               </div>
             </article>
           {/each}

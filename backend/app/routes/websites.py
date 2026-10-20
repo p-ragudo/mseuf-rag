@@ -12,6 +12,7 @@ from app.models.scraped_page import ScrapedPage
 from app.schemas.tenant import WebsiteCreate, WebsiteResponse
 from app.services.vector_db.factory import get_vector_db
 from app.routes.auth import get_current_user
+from app.utils.org_roles import CONTENT_MANAGER_ROLES, require_org_role
 
 router = APIRouter(prefix="/websites", tags=["Websites"])
 
@@ -22,17 +23,13 @@ async def create_website(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    membership_res = await db.execute(
-        select(OrgMember).where(
-            OrgMember.org_id == payload.org_id,
-            OrgMember.user_id == current_user.id,
-        )
+    await require_org_role(
+        db,
+        payload.org_id,
+        current_user,
+        CONTENT_MANAGER_ROLES,
+        "Only organization administrators and ingesters can manage websites.",
     )
-    if not membership_res.scalar_one_or_none():
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="You do not have access to this organization.",
-        )
 
     clean_url = str(payload.url).rstrip("/")
     existing_site = await db.execute(
@@ -123,6 +120,13 @@ async def delete_website(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Website not found or unauthorized.",
         )
+    await require_org_role(
+        db,
+        website.org_id,
+        current_user,
+        CONTENT_MANAGER_ROLES,
+        "Only organization administrators and ingesters can manage websites.",
+    )
 
     # Clean up Qdrant points across all pages for this website
     vector_db = get_vector_db()

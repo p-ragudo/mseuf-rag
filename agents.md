@@ -67,7 +67,7 @@ users 1--* org_members *--1 orgs 1--* websites 1--1 website_scrape_schedules
 | Table | Key fields |
 |---|---|
 | `orgs` | id, creator_id, name[cite: 1, 6] |
-| `org_members` | (user_id, org_id) PK, `roles` string ("admin"/"member"); organization member-management requires creator/admin access. Admins can remove members and hand off their role; organization creator retains independent owner/admin access. |
+| `org_members` | (user_id, org_id) PK, `roles` string (`admin`, `designer`, `ingester`, or `member`). Admins manage members and assign roles; the organization creator retains protected owner/admin access. |
 | `org_chat_settings` | `org_id` PK/FK, configurable `assistant_name` (defaults to "Chat Assistant") |
 | `org_chat_headers` | `org_id` PK/FK, configurable `header_tagline` (defaults to "Admissions Intelligence Hub") |
 | `org_chat_fonts` | `org_id` PK/FK, configurable `font_family` from the chat font allowlist (defaults to "system") |
@@ -132,11 +132,11 @@ For dense vectors we embed the **generated question**[cite: 1, 3]. For sparse ve
 - Semantic cache is tenant-scoped and campus-scoped through a composite `org_id` tag filter (`<org_id>_<campus>`) on lookup and store[cite: 7, 9].
 - The QA system prompt is parameterized with the org name (loaded from Postgres)[cite: 1, 4, 7].
 - Ingest and website routes verify that the user belongs to the owning org via `OrgMember`[cite: 1, 6].
+- Organization roles are enforced on write routes: `admin` manages members and all organization settings/content; `designer` updates chat branding; `ingester` manages websites and indexed documents; `member` retains read/query access. Admins can assign all four roles, multiple admins are supported, and the creator remains a protected admin.
 - Context expansion validates tenant isolation directly in SQL (`ScrapedPage.org_id == org_id`)[cite: 7].
 
 **Not implemented / open**[cite: 1]
 - No physical collection or shard isolation per tenant; isolation relies on payload filtering and tenant-aware HNSW graphs[cite: 1, 10].
-- Role enforcement (`admin` vs `member`) is implemented for organization member management: admins can add/remove members and transfer their admin role to another member. The organization creator retains independent owner/admin access and cannot be removed; transferring from the owner grants another admin without demoting the owner. Other mutate routes still allow any org member to trigger ingestion or register websites[cite: 1, 6].
 - Deleting an org or website cascades in Postgres but does not clean up Qdrant points[cite: 1, 6].
 - Several heuristics retain university-specific naming assumptions (e.g. `classify_academic_level`, SHS strands)[cite: 1, 3].
 
@@ -280,7 +280,7 @@ If an organization has no generated questions synced to the active embedding tar
 | Scope verification / LLM-based query gatekeeper | [PLANNED][cite: 1] |
 | Automated recurring scrape scheduler (`website_scrape_schedules`) | [PLANNED][cite: 1, 6] |
 | Qdrant point cleanup on page/website re-scrape or deletion | [IMPLEMENTED][cite: 1] |
-| Role-based organization member management, removal, and admin handoff | **[IMPLEMENTED]** |
+| Admin-managed organization roles (`admin`, `designer`, `ingester`, `member`) and route-level permissions | **[IMPLEMENTED]** |
 | Dense chunk embedding baseline for ablation | [PLANNED][cite: 1] |
 
 ## 13. Conventions for Agents Editing This Repo

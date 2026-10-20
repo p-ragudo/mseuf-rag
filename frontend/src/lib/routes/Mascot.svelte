@@ -18,9 +18,11 @@
   import { setActiveOrganization } from "../org.svelte";
 
   type Organization = { id: number; name: string };
+  type OrganizationRole = "admin" | "designer" | "ingester" | "member";
 
   let organizations = $state<Organization[]>([]);
   let selectedOrgId = $state("");
+  let currentRole = $state<OrganizationRole>("member");
   let organizationsLoading = $state(true);
   let organizationRequest = 0;
   let assistantName = $state(DEFAULT_ASSISTANT_NAME);
@@ -43,6 +45,9 @@
   let saving = $state(false);
   let errorMessage = $state("");
   let successMessage = $state("");
+  let canEditBranding = $derived(
+    currentRole === "admin" || currentRole === "designer",
+  );
 
   $effect(() => {
     const organization = organizations.find(
@@ -78,12 +83,34 @@
   async function load(orgId: string) {
     const request = ++organizationRequest;
     loading = true;
+    currentRole = "member";
     errorMessage = "";
     try {
-      const branding = await fetchBranding(orgId);
-      if (request === organizationRequest) applySaved(branding);
+      const [branding, roleResponse] = await Promise.all([
+        fetchBranding(orgId),
+        authFetch(`/orgs/${orgId}/members`),
+      ]);
+      if (!roleResponse.ok) {
+        throw new Error(
+          `Could not check your organization role (${roleResponse.status}).`,
+        );
+      }
+      const roleResult: { current_role: OrganizationRole } =
+        await roleResponse.json();
+      if (
+        !["admin", "designer", "ingester", "member"].includes(
+          roleResult.current_role,
+        )
+      ) {
+        throw new Error("The organization returned an unsupported member role.");
+      }
+      if (request === organizationRequest) {
+        currentRole = roleResult.current_role;
+        applySaved(branding);
+      }
     } catch (error) {
       if (request === organizationRequest) {
+        currentRole = "member";
         errorMessage =
           error instanceof Error ? error.message : "Could not load your saved settings.";
       }
@@ -119,6 +146,7 @@
   });
 
   function handleMascotUpload(event: Event) {
+    if (!canEditBranding) return;
     const input = event.currentTarget as HTMLInputElement;
     const file = input.files?.[0];
 
@@ -152,6 +180,7 @@
   }
 
   function handleRemoveMascot() {
+    if (!canEditBranding) return;
     mascotPreview = null;
     pendingFile = null;
     removeMascot = savedMascotUrl !== null;
@@ -159,6 +188,7 @@
   }
 
   function discard() {
+    if (loading || !canEditBranding) return;
     assistantName = savedAssistantName;
     headerTagline = savedHeaderTagline;
     fontFamily = savedFontFamily;
@@ -171,7 +201,7 @@
   }
 
   async function save() {
-    if (!dirty || saving || !selectedOrgId) return;
+    if (!canEditBranding || !dirty || saving || loading || !selectedOrgId) return;
 
     saving = true;
     errorMessage = "";
@@ -230,6 +260,13 @@
       </select>
     </label>
 
+    {#if !loading && !canEditBranding}
+      <p class="mb-5 rounded-md bg-gray-50 px-4 py-3 text-sm text-gray-600">
+        Your role can view chat branding but cannot edit it. Ask an
+        administrator to assign you the Brander / Designer role.
+      </p>
+    {/if}
+
     <div class="grid grid-cols-1 gap-5 xl:grid-cols-[360px_minmax(0,1fr)]">
       <!-- Settings -->
       <div class="flex flex-col gap-5">
@@ -254,7 +291,7 @@
               bind:value={headerTagline}
               maxlength="80"
               required
-              disabled={loading || saving}
+              disabled={loading || saving || !canEditBranding}
               oninput={() => (successMessage = "")}
               class="w-full rounded-md border border-outline bg-white px-3 py-2.5 text-sm outline-none focus:border-primary disabled:opacity-60"
               placeholder={DEFAULT_HEADER_TAGLINE}
@@ -277,7 +314,7 @@
               bind:value={assistantName}
               maxlength="50"
               required
-              disabled={loading || saving}
+              disabled={loading || saving || !canEditBranding}
               oninput={() => (successMessage = "")}
               class="w-full rounded-md border border-outline bg-white px-3 py-2.5 text-sm outline-none focus:border-primary disabled:opacity-60"
               placeholder={DEFAULT_ASSISTANT_NAME}
@@ -297,7 +334,7 @@
             <select
               id="chat-font"
               bind:value={fontFamily}
-              disabled={loading || saving}
+              disabled={loading || saving || !canEditBranding}
               oninput={() => (successMessage = "")}
               class="w-full rounded-md border border-outline bg-white px-3 py-2.5 text-sm outline-none focus:border-primary disabled:opacity-60"
             >
@@ -329,7 +366,7 @@
                 type="color"
                 bind:value={mascotColor}
                 oninput={() => (successMessage = "")}
-                disabled={loading}
+                disabled={loading || !canEditBranding}
                 class="h-10 w-12 cursor-pointer rounded-md border-0 bg-transparent p-0"
               />
 
@@ -353,7 +390,11 @@
 
             <label
               for="mascot-upload"
-              class="flex min-h-40 cursor-pointer flex-col items-center justify-center rounded-lg border-2 border-dashed border-outline bg-[#F5F8FB] px-4 py-6 text-center transition-colors hover:border-primary hover:bg-accent"
+              class={`flex min-h-40 flex-col items-center justify-center rounded-lg border-2 border-dashed border-outline bg-[#F5F8FB] px-4 py-6 text-center transition-colors ${
+                canEditBranding
+                  ? "cursor-pointer hover:border-primary hover:bg-accent"
+                  : "cursor-not-allowed opacity-60"
+              }`}
             >
               {#if mascotPreview}
                 <img
@@ -399,7 +440,7 @@
               id="mascot-upload"
               type="file"
               accept="image/png"
-              disabled={loading}
+              disabled={loading || !canEditBranding}
               class="hidden"
               onchange={handleMascotUpload}
             />
@@ -422,7 +463,7 @@
                 type="button"
                 class="rounded-md bg-primary px-4 py-2.5 text-sm font-semibold text-white transition-opacity duration-200 hover:cursor-pointer disabled:cursor-not-allowed disabled:opacity-60"
                 onclick={save}
-                disabled={!dirty || saving || loading}
+                disabled={!canEditBranding || !dirty || saving || loading}
               >
                 {saving ? "Saving..." : "Save changes"}
               </button>
@@ -431,7 +472,7 @@
                 type="button"
                 class="rounded-md border border-outline bg-[#F5F8FB] px-4 py-2.5 text-sm font-semibold transition-opacity duration-200 hover:cursor-pointer disabled:cursor-not-allowed disabled:opacity-60"
                 onclick={discard}
-                disabled={!dirty || saving}
+                disabled={!canEditBranding || !dirty || saving || loading}
               >
                 Discard
               </button>
@@ -441,7 +482,7 @@
                   type="button"
                   class="ml-auto text-sm font-semibold text-red-600 hover:cursor-pointer hover:underline disabled:cursor-not-allowed disabled:opacity-60"
                   onclick={handleRemoveMascot}
-                  disabled={saving}
+                  disabled={saving || !canEditBranding}
                 >
                   Remove mascot
                 </button>

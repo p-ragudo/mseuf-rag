@@ -6,12 +6,13 @@
   import { setActiveOrganization } from "../org.svelte";
 
   type Organization = { id: number; name: string };
+  type OrganizationRole = "admin" | "designer" | "ingester" | "member";
   type OrganizationMember = {
     user_id: number;
     email: string;
     first_name: string;
     last_name: string;
-    role: string;
+    role: OrganizationRole;
   };
 
   let organizations = $state<Organization[]>([]);
@@ -28,6 +29,23 @@
   let memberError = $state("");
   let memberNotice = $state("");
   let membersRequestId = 0;
+
+  function isOrganizationRole(role: string): role is OrganizationRole {
+    return ["admin", "designer", "ingester", "member"].includes(role);
+  }
+
+  function roleLabel(role: OrganizationRole): string {
+    switch (role) {
+      case "admin":
+        return "Administrator";
+      case "designer":
+        return "Brander / Designer";
+      case "ingester":
+        return "Knowledge Ingester";
+      case "member":
+        return "Member";
+    }
+  }
 
   $effect(() => {
     const organization = organizations.find(
@@ -98,8 +116,12 @@
 
   $effect(() => {
     const orgId = selectedOrgId;
+    organizationMembers = [];
+    canManageMembers = false;
+    organizationOwnerId = null;
+    currentUserId = null;
+    memberNotice = "";
     if (orgId) void loadMembers(orgId);
-    else organizationMembers = [];
   });
 
   async function addMember(event: SubmitEvent) {
@@ -128,14 +150,26 @@
     }
   }
 
-  async function transferAdminship(member: OrganizationMember) {
+  async function updateMemberRole(
+    member: OrganizationMember,
+    role: OrganizationRole,
+  ) {
     if (
       !selectedOrgId ||
       memberActionUserId !== null ||
+      role === member.role ||
+      member.user_id === organizationOwnerId ||
+      member.user_id === currentUserId
+    ) {
+      return;
+    }
+
+    if (
       !window.confirm(
-        `Transfer adminship to ${member.first_name} ${member.last_name}? You will become a member.`,
+        `Change ${member.first_name} ${member.last_name}'s role from ${roleLabel(member.role)} to ${roleLabel(role)}?`,
       )
     ) {
+      await loadMembers(selectedOrgId);
       return;
     }
 
@@ -144,21 +178,23 @@
     memberNotice = "";
     try {
       const response = await authFetch(
-        `/orgs/${selectedOrgId}/members/${member.user_id}/transfer-admin`,
-        { method: "POST" },
+        `/orgs/${selectedOrgId}/members/${member.user_id}`,
+        {
+          method: "PATCH",
+          body: JSON.stringify({ role }),
+        },
       );
       if (!response.ok) throw new Error(await responseError(response));
 
-      memberNotice =
-        currentUserId === organizationOwnerId
-          ? `Admin access granted to ${member.first_name} ${member.last_name}. The organization owner retains admin access.`
-          : `Adminship transferred to ${member.first_name} ${member.last_name}. Your role is now member.`;
+      memberNotice = `${member.first_name} ${member.last_name} now has the ${roleLabel(role)} role.`;
       await loadMembers(selectedOrgId);
     } catch (error) {
-      memberError =
+      const message =
         error instanceof Error
           ? error.message
-          : "Could not transfer adminship.";
+          : "Could not update this member's role.";
+      await loadMembers(selectedOrgId);
+      memberError = message;
     } finally {
       memberActionUserId = null;
     }
@@ -225,6 +261,7 @@
         <span class="mb-2 block text-sm font-semibold">Organization</span>
         <select
           bind:value={selectedOrgId}
+          disabled={membersLoading || memberActionUserId !== null}
           class="w-full rounded-md border border-outline bg-white px-3 py-2.5 text-sm outline-none focus:border-primary"
         >
           {#each organizations as organization (organization.id)}
@@ -241,8 +278,7 @@
             <h2 class="text-lg font-bold">Team members</h2>
             <p class="mt-1 text-sm text-gray-500">
               Add existing accounts by email to grant access to this
-              organization. Administrators can transfer adminship or remove
-              members.
+              organization. Administrators can assign roles or remove members.
             </p>
           </div>
           <span class="text-sm text-gray-500">
@@ -261,9 +297,10 @@
 
         {#if canManageMembers}
           <p class="mt-4 text-sm text-gray-500">
-            Transferring adminship makes the selected member an administrator
-            and changes your role to member. The organization owner always
-            retains admin access.
+            Administrators manage members and have full access. Brander /
+            Designers manage chat branding. Knowledge Ingesters manage websites
+            and indexed documents. Members can view and query the organization
+            content.
           </p>
           <form
             class="mt-3 flex flex-col gap-2 sm:flex-row"
@@ -311,27 +348,37 @@
                     class="rounded-full bg-gray-100 px-2.5 py-1 text-xs font-semibold uppercase tracking-wide text-gray-600"
                   >
                     {member.user_id === organizationOwnerId
-                      ? "Owner · Admin"
-                      : member.role}
+                      ? "Owner · Administrator"
+                      : roleLabel(member.role)}
                   </span>
                   {#if canManageMembers && member.user_id !== organizationOwnerId}
-                    {#if member.role !== "admin"}
-                      <button
-                        type="button"
-                        class="rounded-md border border-outline px-3 py-2 text-xs font-semibold text-primary hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50"
-                        disabled={memberActionUserId !== null}
-                        onclick={() => void transferAdminship(member)}
+                    {#if member.user_id !== currentUserId}
+                      <label class="sr-only" for={`member-role-${member.user_id}`}>
+                        Role for {member.first_name} {member.last_name}
+                      </label>
+                      <select
+                        id={`member-role-${member.user_id}`}
+                        value={member.role}
+                        class="rounded-md border border-outline bg-white px-2.5 py-2 text-xs font-semibold outline-none focus:border-primary disabled:cursor-not-allowed disabled:opacity-50"
+                        disabled={membersLoading || memberActionUserId !== null}
+                        onchange={(event) => {
+                          const role = event.currentTarget.value;
+                          if (isOrganizationRole(role)) {
+                            void updateMemberRole(member, role);
+                          }
+                        }}
                       >
-                        {memberActionUserId === member.user_id
-                          ? "Updating…"
-                          : "Transfer adminship"}
-                      </button>
+                        <option value="member">Member</option>
+                        <option value="designer">Brander / Designer</option>
+                        <option value="ingester">Knowledge Ingester</option>
+                        <option value="admin">Administrator</option>
+                      </select>
                     {/if}
                     {#if member.user_id !== currentUserId}
                       <button
                         type="button"
                         class="rounded-md px-3 py-2 text-xs font-semibold text-red-700 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50"
-                        disabled={memberActionUserId !== null}
+                        disabled={membersLoading || memberActionUserId !== null}
                         onclick={() => void removeMember(member)}
                       >
                         {memberActionUserId === member.user_id

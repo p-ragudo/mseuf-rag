@@ -18,6 +18,14 @@ from app.routes.ingest import (
 )
 
 
+@pytest.fixture(autouse=True)
+def allow_ingestion_role(monkeypatch):
+    async def allow_role(_db, _org_id, _user, _allowed_roles, _detail):
+        return "ingester"
+
+    monkeypatch.setattr(ingest_route, "require_org_role", allow_role)
+
+
 class FakeMembershipResult:
     def scalar_one_or_none(self):
         return object()

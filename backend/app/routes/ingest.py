@@ -41,6 +41,7 @@ from app.services.ingest_pipeline.orchestrator import (
 )
 from app.services.vector_db.factory import get_vector_db
 from app.routes.auth import get_current_user
+from app.utils.org_roles import CONTENT_MANAGER_ROLES, require_org_role
 
 router = APIRouter(prefix="/ingest", tags=["Ingest Pipeline"])
 logger = logging.getLogger(__name__)
@@ -176,6 +177,13 @@ async def trigger_ingestion(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Website {website_id} not found or you lack access permissions.",
         )
+    await require_org_role(
+        db,
+        website.org_id,
+        current_user,
+        CONTENT_MANAGER_ROLES,
+        "Only organization administrators and ingesters can manage knowledge ingestion.",
+    )
 
     if website.status == WebsiteScrapeStatus.IN_PROGRESS:
         raise HTTPException(
@@ -210,17 +218,13 @@ async def upload_document(
             detail="The category must be between 1 and 100 characters.",
         )
 
-    membership = await db.execute(
-        select(OrgMember).where(
-            OrgMember.org_id == org_id,
-            OrgMember.user_id == current_user.id,
-        )
+    await require_org_role(
+        db,
+        org_id,
+        current_user,
+        CONTENT_MANAGER_ROLES,
+        "Only organization administrators and ingesters can manage knowledge ingestion.",
     )
-    if membership.scalar_one_or_none() is None:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="You do not have access to this organization.",
-        )
 
     filename, extracted_text = await _extract_uploaded_file(file)
 
@@ -342,6 +346,13 @@ async def replace_document(
     db: AsyncSession = Depends(get_db),
 ):
     page, website = await _get_document_for_member(document_id, current_user, db)
+    await require_org_role(
+        db,
+        website.org_id,
+        current_user,
+        CONTENT_MANAGER_ROLES,
+        "Only organization administrators and ingesters can manage knowledge ingestion.",
+    )
     if website.status == WebsiteScrapeStatus.IN_PROGRESS:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -393,6 +404,13 @@ async def delete_document(
     db: AsyncSession = Depends(get_db),
 ):
     page, website = await _get_document_for_member(document_id, current_user, db)
+    await require_org_role(
+        db,
+        website.org_id,
+        current_user,
+        CONTENT_MANAGER_ROLES,
+        "Only organization administrators and ingesters can manage knowledge ingestion.",
+    )
     if website.status == WebsiteScrapeStatus.IN_PROGRESS:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,

@@ -8,7 +8,9 @@ from app.models.org_member import OrgMember
 from app.routes.orgs import (
     remove_organization_member,
     transfer_organization_admin,
+    update_organization_member_role,
 )
+from app.schemas.tenant import OrgMemberUpdate
 
 
 class FakeDatabase:
@@ -124,6 +126,96 @@ def test_admin_cannot_transfer_adminship_to_owner():
         )
 
     assert error.value.status_code == 409
+    assert actor.roles == "admin"
+    assert not db.committed
+
+
+@pytest.mark.parametrize("role", ["admin", "designer", "ingester", "member"])
+def test_admin_can_assign_member_roles_without_changing_their_own_role(role):
+    actor = _membership(8, "admin")
+    target = _membership(9, "member")
+    target_user = SimpleNamespace(
+        id=9,
+        email="member@example.edu",
+        first_name="Team",
+        last_name="Member",
+    )
+
+    class RoleDatabase:
+        def __init__(self):
+            self.scalar_results = [_org(), actor]
+            self.committed = False
+
+        async def scalar(self, _statement):
+            return self.scalar_results.pop(0)
+
+        async def get(self, model, key):
+            if model is OrgMember:
+                return {(9, 1): target}.get(key)
+            assert model.__name__ == "User"
+            return target_user if key == 9 else None
+
+        async def commit(self):
+            self.committed = True
+
+    db = RoleDatabase()
+    result = asyncio.run(
+        update_organization_member_role(
+            org_id=1,
+            user_id=9,
+            payload=OrgMemberUpdate(role=role),
+            current_user=SimpleNamespace(id=8),
+            db=db,
+        )
+    )
+
+    assert target.roles == role
+    assert actor.roles == "admin"
+    assert result.role == role
+    assert db.committed
+
+
+def test_admin_cannot_change_the_owner_role():
+    actor = _membership(8, "admin")
+    owner = _membership(7, "admin")
+    db = FakeDatabase(
+        _org(),
+        actor,
+        {(7, 1): owner},
+    )
+
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(
+            update_organization_member_role(
+                org_id=1,
+                user_id=7,
+                payload=OrgMemberUpdate(role="designer"),
+                current_user=SimpleNamespace(id=8),
+                db=db,
+            )
+        )
+
+    assert error.value.status_code == 409
+    assert owner.roles == "admin"
+    assert not db.committed
+
+
+def test_admin_cannot_change_their_own_role():
+    actor = _membership(8, "admin")
+    db = FakeDatabase(_org(), actor, {(8, 1): actor})
+
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(
+            update_organization_member_role(
+                org_id=1,
+                user_id=8,
+                payload=OrgMemberUpdate(role="member"),
+                current_user=SimpleNamespace(id=8),
+                db=db,
+            )
+        )
+
+    assert error.value.status_code == 400
     assert actor.roles == "admin"
     assert not db.committed
 

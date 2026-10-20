@@ -24,9 +24,9 @@ from app.models.org_branding import (
     OrgChatHeader,
     OrgChatSettings,
 )
-from app.models.org_member import OrgMember
 from app.models.user import User
 from app.routes.auth import get_current_user
+from app.utils.org_roles import BRANDING_MANAGER_ROLES, require_org_role
 
 router = APIRouter(prefix="/branding", tags=["branding"])
 
@@ -78,23 +78,14 @@ def to_out(
     )
 
 
-async def require_org_access(db: AsyncSession, org_id: int, user: User) -> None:
-    org = await db.scalar(select(Org).where(Org.id == org_id))
-    if not org:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Organization not found"
-        )
-
-    member = await db.scalar(
-        select(OrgMember).where(
-            OrgMember.org_id == org_id, OrgMember.user_id == user.id
-        )
+async def require_branding_editor(db: AsyncSession, org_id: int, user: User) -> None:
+    await require_org_role(
+        db,
+        org_id,
+        user,
+        BRANDING_MANAGER_ROLES,
+        "Only organization administrators and designers can update chat branding.",
     )
-    if org.creator_id != user.id and not member:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="You are not a member of this organization",
-        )
 
 
 # ---- public: the chat page has no logged-in user ----
@@ -177,7 +168,7 @@ async def update_branding(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    await require_org_access(db, org_id, current_user)
+    await require_branding_editor(db, org_id, current_user)
 
     if not HEX_COLOR.match(color):
         raise HTTPException(

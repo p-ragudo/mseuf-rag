@@ -26,7 +26,7 @@ def test_update_branding_saves_supported_font(monkeypatch):
     async def allow_org_access(_db, _org_id, _user):
         return None
 
-    monkeypatch.setattr(branding_route, "require_org_access", allow_org_access)
+    monkeypatch.setattr(branding_route, "require_branding_editor", allow_org_access)
     db = FakeDatabase()
 
     result = asyncio.run(
@@ -52,7 +52,7 @@ def test_update_branding_rejects_unsupported_font(monkeypatch):
     async def allow_org_access(_db, _org_id, _user):
         return None
 
-    monkeypatch.setattr(branding_route, "require_org_access", allow_org_access)
+    monkeypatch.setattr(branding_route, "require_branding_editor", allow_org_access)
 
     with pytest.raises(HTTPException) as error:
         asyncio.run(

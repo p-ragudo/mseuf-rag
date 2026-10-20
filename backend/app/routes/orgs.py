@@ -10,6 +10,7 @@ from app.schemas.tenant import (
     OrgCreate,
     OrgMemberCreate,
     OrgMemberSummary,
+    OrgMemberUpdate,
     OrgMembersResponse,
     OrgResponse,
     PublicOrgResponse,
@@ -140,11 +141,28 @@ async def list_organization_members(
         )
         for user, role in rows.all()
     ]
+    current_role = (
+        "admin"
+        if org.creator_id == current_user.id
+        else await db.scalar(
+            select(OrgMember.roles).where(
+                OrgMember.org_id == org_id,
+                OrgMember.user_id == current_user.id,
+            )
+        )
+    )
+    if current_role is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You are not a member of this organization.",
+        )
+
     return OrgMembersResponse(
         members=members,
         can_manage=can_manage,
         owner_id=org.creator_id,
         current_user_id=current_user.id,
+        current_role=current_role,
     )
 
 
@@ -197,6 +215,61 @@ async def add_organization_member(
     db.add(membership)
     await db.commit()
 
+    return OrgMemberSummary(
+        user_id=user.id,
+        email=user.email,
+        first_name=user.first_name,
+        last_name=user.last_name,
+        role=membership.roles,
+    )
+
+
+@router.patch(
+    "/{org_id}/members/{user_id}",
+    response_model=OrgMemberSummary,
+)
+async def update_organization_member_role(
+    org_id: int,
+    user_id: int,
+    payload: OrgMemberUpdate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    org = await db.scalar(
+        select(Org).where(Org.id == org_id).with_for_update()
+    )
+    if not org:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Organization not found."
+        )
+
+    _, can_manage = await get_org_admin_status(db, org, current_user)
+    if not can_manage:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only organization administrators can change member roles.",
+        )
+    if user_id == org.creator_id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="The organization owner must remain an administrator.",
+        )
+    if user_id == current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="You cannot change your own role.",
+        )
+
+    membership = await db.get(OrgMember, (user_id, org_id))
+    if membership is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="The selected user is not a member of this organization.",
+        )
+
+    membership.roles = payload.role
+    await db.commit()
+    user = await db.get(User, user_id)
     return OrgMemberSummary(
         user_id=user.id,
         email=user.email,
