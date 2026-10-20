@@ -12,6 +12,7 @@
     contrastColor,
     fetchBranding,
   } from "../branding.svelte";
+  import { setDocumentHead } from "../document-head";
   import NotFound from "./NotFound.svelte";
 
   type Source = {
@@ -100,15 +101,44 @@
     return error.status === 404 && /organi[sz]ation/i.test(error.message);
   }
 
+  async function fetchOrganizationName(org: string): Promise<string | null> {
+    try {
+      const response = await fetch(`${API_URL}/orgs/public/${org}`);
+      if (!response.ok) {
+        throw new HttpError(
+          response.status,
+          `Organization could not be loaded (${response.status}).`,
+        );
+      }
+      const organization: unknown = await response.json();
+      if (
+        !organization ||
+        typeof organization !== "object" ||
+        !("name" in organization) ||
+        typeof organization.name !== "string"
+      ) {
+        throw new Error("The organization response was invalid.");
+      }
+      return organization.name;
+    } catch (error) {
+      console.error("Could not load the organization name for the page title.", error);
+      return null;
+    }
+  }
+
   async function loadBranding(org: string) {
     try {
-      const branding = await fetchBranding(org);
+      const [branding, organizationName] = await Promise.all([
+        fetchBranding(org),
+        fetchOrganizationName(org),
+      ]);
       if (org !== orgId) return; // organization changed while loading
       color = branding.color;
       mascotUrl = branding.mascot_url;
       assistantName = branding.assistant_name;
       headerTagline = branding.header_tagline;
       fontFamily = branding.font_family;
+      setDocumentHead(organizationName, branding.mascot_url);
       orgStatus = "ready";
     } catch (error) {
       if (org !== orgId) return;

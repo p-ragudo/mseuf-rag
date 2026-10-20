@@ -4,6 +4,9 @@
   import Router, { replace } from "svelte-spa-router";
   import routes from "./routes";
   import { auth, authFetch, initAuth } from "./lib/auth.svelte";
+  import { fetchBranding } from "./lib/branding.svelte";
+  import { setDocumentHead } from "./lib/document-head";
+  import { orgState } from "./lib/org.svelte";
 
   type MembershipState = "idle" | "checking" | "member" | "none" | "error";
 
@@ -11,6 +14,43 @@
   let membershipState = $state<MembershipState>("idle");
   let membershipError = $state("");
   let membershipRequest = 0;
+  let brandingRequest = 0;
+
+  $effect(() => {
+    const route = currentHash;
+    const organization = orgState.org;
+    const request = ++brandingRequest;
+
+    if (
+      route.startsWith("/chat/") ||
+      route.startsWith("/login") ||
+      !organization
+    ) {
+      setDocumentHead(null, null);
+      return;
+    }
+
+    setDocumentHead(organization.name, null);
+    void fetchBranding(organization.id)
+      .then((branding) => {
+        if (
+          request !== brandingRequest ||
+          orgState.org?.id !== organization.id ||
+          currentHash.startsWith("/chat/")
+        ) {
+          return;
+        }
+        setDocumentHead(organization.name, branding.mascot_url);
+      })
+      .catch((error: unknown) => {
+        if (request === brandingRequest) {
+          console.error(
+            "Could not load the organization mascot for the favicon.",
+            error,
+          );
+        }
+      });
+  });
 
   onMount(() => {
     const refreshMembership = () => {
