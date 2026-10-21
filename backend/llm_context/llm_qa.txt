@@ -1,4 +1,4 @@
-from app/services/llm_qa/
+from backend/app/services/llm_qa/
 
 base_qa.py:
 from abc import ABC, abstractmethod
@@ -10,10 +10,6 @@ class BaseQASynthesizer(ABC):
     async def generate_answer(self, request: QARequest, org_name: str = "the institution") -> QAResponse:
         """Accepts a QARequest (query + retrieved contexts) and returns a QAResponse."""
         pass
-
-
-
-
 
 factory.py:
 from .base_qa import BaseQASynthesizer
@@ -33,10 +29,6 @@ def get_qa_synthesizer(provider: str = None) -> BaseQASynthesizer:
     #     return OpenAIQASynthesizer(model_name=model)
 
     raise ValueError(f"Unsupported QA LLM provider: {provider}")
-
-
-
-
 
 gemini_provider.py:
 import asyncio
@@ -128,13 +120,6 @@ class GeminiQASynthesizer(BaseQASynthesizer):
         return QAResponse(answer=text or EMPTY_ANSWER_FALLBACK, sources=sources)
 
 
-
-
-
-
-
-
-
 schema.py:
 from typing import List, Optional
 from pydantic import BaseModel, Field
@@ -183,13 +168,6 @@ class QAResponse(BaseModel):
         description="Unique source URLs or references used to synthesize the answer"
     )
 
-
-
-
-
-
-
-
 sys_instructions.py:
 def build_system_instruction(org_name: str = "the institution") -> str:
     return f"""You are the official, highly accurate AI assistant for {org_name}.
@@ -218,3 +196,4 @@ CRITICAL INSTRUCTIONS:
    - If the only relevant document covers a past academic period (earlier than the current one), say which period it covers and that it may be outdated, unless the user asked about that period.
    - Do not present information from a past period as current. If a document has no date information and conflicts with a dated one, prefer the dated one and mention the uncertainty briefly.
 """
+

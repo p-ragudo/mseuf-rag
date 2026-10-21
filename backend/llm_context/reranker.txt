@@ -1,5 +1,4 @@
-from app/services/reranker
-
+from backend/app/services/reranker
 
 __init__.py:
 from app.services.reranker.base import BaseReranker
@@ -7,13 +6,6 @@ from app.services.reranker.factory import get_reranker
 from app.services.reranker.schema import RerankCandidate, RerankResult
 
 __all__ = ["BaseReranker", "get_reranker", "RerankCandidate", "RerankResult"]
-
-
-
-
-
-
-
 
 base.py:
 from abc import ABC, abstractmethod
@@ -37,13 +29,6 @@ class BaseReranker(ABC):
         """
         pass
 
-
-
-
-
-
-
-
 factory.py:
 from functools import lru_cache
 from app.core.config import settings
@@ -65,13 +50,6 @@ class RerankerFactory:
 @lru_cache(maxsize=1)
 def get_reranker() -> BaseReranker:
     return RerankerFactory.create()
-
-
-
-
-
-
-
 
 fastembed_provider.py:
 import asyncio
@@ -141,13 +119,6 @@ class FastEmbedReranker(BaseReranker):
         return await asyncio.to_thread(
             self._sync_rerank, query, candidates, top_k, score_threshold
         )
-
-
-
-
-
-
-
 
 flashrank_provider.py:
 import asyncio
@@ -223,13 +194,6 @@ class FlashRankReranker(BaseReranker):
             self._sync_rerank, query, candidates, top_k, score_threshold
         )
 
-
-
-
-
-
-
-
 schema.py:
 from typing import Any, Dict, List
 from pydantic import BaseModel, Field
@@ -253,13 +217,6 @@ class RerankResult(BaseModel):
     rerank_score: float
     payload: Dict[str, Any] = Field(default_factory=dict)
     matched_questions: List[MatchedQuestionDetail] = Field(default_factory=list)
-
-
-
-
-
-
-
 
 transformers_provider.py:
 import asyncio

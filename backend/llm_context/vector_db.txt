@@ -1,4 +1,4 @@
-from app/services/vector_db/
+from backend/app/services/vector_db/
 
 base.py:
 from abc import ABC, abstractmethod
@@ -85,14 +85,6 @@ class BaseVectorDB(ABC):
     async def close(self) -> None:
         pass
 
-
-
-
-
-
-
-
-
 factory.py:
 from typing import Optional
 
@@ -108,15 +100,6 @@ def get_vector_db(provider: Optional[str] = None) -> BaseVectorDB:
         return QdrantVectorDB()
 
     raise ValueError(f"Unsupported Vector DB provider: {provider}")
-
-
-
-
-
-
-
-
-
 
 qdrant_provider.py:
 import asyncio
@@ -478,14 +461,6 @@ class QdrantVectorDB(BaseVectorDB):
                 res = self.client.close()
                 if asyncio.iscoroutine(res):
                     await res
-
-
-
-
-
-
-
-
 
 schema.py:
 from typing import Any, Dict, List, Optional, Union

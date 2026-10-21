@@ -1,4 +1,4 @@
-from app/services/ingest_pipeline/
+from backend/app/services/ingest_pipeline/
 
 chunk.py:
 import hashlib
@@ -95,1154 +95,6 @@ async def process_and_chunk_pages(
 
         await session.commit()
     return total_created
-
-
-
-
-
-
-
-
-
-
-
-clean_markdown.py:
-import re
-
-_FRONTMATTER_RE = re.compile(r"\A---\s*\n.*?\n---\s*\n", re.DOTALL)
-
-
-def clean_markdown(raw_markdown: str) -> str:
-    """
-    Cleans raw crawler markdown while preserving the structure the chunker needs:
-    headings, list markers, list indentation (nested items), numbering and tables.
-
-    Changes vs the old version:
-      * YAML frontmatter is stripped FIRST (it used to be dead code, because the
-        '---' rule below removed the delimiters before the check ran).
-      * Leading indentation is preserved (the old `[ \\t]+ -> ' '` flattened
-        nested lists and indented continuation lines).
-      * Escaped numbering such as '3\\.' is restored to '3.' so numbered steps
-        are recognised as one list.
-      * HTML tag stripping only matches real tags, so "< 5 units > 2" survives.
-    """
-    if not raw_markdown:
-        return ""
-
-    text = raw_markdown.replace("\r\n", "\n").replace("\r", "\n").replace(" ", " ")
-
-    text = _FRONTMATTER_RE.sub("", text, count=1)
-
-    text = re.sub(r"(?i)<br\s*/?>", "\n", text)
-    text = re.sub(r"</?[a-zA-Z][^>]*>", " ", text)
-
-    text = re.sub(r"!\[[^\]]*\]\([^\)]*\)", "", text)
-    text = re.sub(r"\[([^\]]+)\]\([^\)]+\)", r"\1", text)
-    text = re.sub(r"https?://\S+", "", text)
-
-    # Horizontal rules (standalone ---, ***, ___). Table separator rows contain '|' so they are safe.
-    text = re.sub(r"^[ \t]*[-*_]{3,}[ \t]*$", "", text, flags=re.MULTILINE)
-
-    text = re.sub(
-        r"(?i)\b(share on facebook|share on x|share on twitter|share on linkedin|share via email)\b",
-        "",
-        text,
-    )
-
-    # Restore escaped ordered-list markers: "3\." -> "3."
-    text = re.sub(r"^(\s*\d{1,3})\\([.)])", r"\1\2", text, flags=re.MULTILINE)
-
-    # Trim trailing whitespace per line and collapse inner runs of spaces,
-    # but never touch leading indentation.
-    cleaned_lines = []
-    for line in text.split("\n"):
-        stripped = line.rstrip()
-        indent_len = len(stripped) - len(stripped.lstrip(" \t"))
-        indent, rest = stripped[:indent_len], stripped[indent_len:]
-        rest = re.sub(r"[ \t]{2,}", " ", rest)
-        cleaned_lines.append(indent + rest if rest else "")
-    text = "\n".join(cleaned_lines)
-
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    return text.strip()
-
-
-
-
-
-
-
-
-
-
-discovery.py:
-import xml.etree.ElementTree as ET
-from typing import List, Optional, Set
-from urllib.parse import urljoin, urlparse
-from urllib.robotparser import RobotFileParser
-from datetime import datetime, timezone
-
-import httpx
-from crawl4ai import AsyncWebCrawler, CrawlerRunConfig, CacheMode
-from sqlalchemy.dialects.postgresql import insert
-
-from app.core.database import async_session
-from app.models.scraped_page import ScrapedPage, PageProcessStatus
-
-DEFAULT_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
-
-
-def _normalize_url(url: str) -> str:
-    parsed = urlparse(url)
-    return parsed._replace(fragment="").geturl().rstrip("/")
-
-
-def _is_crawl_trap(url: str) -> bool:
-    """
-    Blocks infinite calendar query loops, filters, and dynamic pagination traps.
-    e.g. /events?view=2025-05, /calendar?month=...
-    """
-    parsed = urlparse(url)
-    query = parsed.query.lower()
-    path = parsed.path.lower()
-
-    # Block recursive calendar/events queries
-    trap_params = ["view=", "month=", "year=", "date=", "filter=", "calendar_"]
-    if any(param in query for param in trap_params):
-        return True
-
-    # Block media / binary downloads discovered accidentally
-    ignored_extensions = (
-        ".pdf", ".jpg", ".jpeg", ".png", ".gif", ".webp", ".zip",
-        ".docx", ".xlsx", ".pptx", ".mp4", ".svg"
-    )
-    if any(path.endswith(ext) for ext in ignored_extensions):
-        return True
-
-    return False
-
-
-async def _fetch_sitemap_urls(
-    client: httpx.AsyncClient,
-    sitemap_url: str,
-    visited_sitemaps: Set[str],
-) -> Set[str]:
-    clean_sitemap_url = _normalize_url(sitemap_url)
-    if clean_sitemap_url in visited_sitemaps:
-        return set()
-
-    visited_sitemaps.add(clean_sitemap_url)
-    discovered: Set[str] = set()
-
-    try:
-        resp = await client.get(clean_sitemap_url, timeout=15.0, follow_redirects=True)
-        if resp.status_code != 200 or not resp.text.strip():
-            return discovered
-
-        root = ET.fromstring(resp.text)
-        namespace = {"ns": root.tag.split("}")[0].strip("{")} if "}" in root.tag else {}
-
-        # Sitemap index
-        sitemap_tags = (
-            root.findall(".//ns:sitemap/ns:loc", namespace)
-            if namespace
-            else root.findall(".//sitemap/loc")
-        )
-        if sitemap_tags:
-            for tag in sitemap_tags:
-                if tag.text:
-                    child_urls = await _fetch_sitemap_urls(
-                        client, tag.text.strip(), visited_sitemaps
-                    )
-                    discovered.update(child_urls)
-            return discovered
-
-        # Direct page URLs
-        url_tags = (
-            root.findall(".//ns:url/ns:loc", namespace)
-            if namespace
-            else root.findall(".//url/loc")
-        )
-        for tag in url_tags:
-            if tag.text:
-                norm = _normalize_url(tag.text.strip())
-                if not _is_crawl_trap(norm):
-                    discovered.add(norm)
-
-    except Exception:
-        pass
-
-    return discovered
-
-
-async def _discover_from_sitemaps(
-    base_url: str,
-    robot_parser: Optional[RobotFileParser] = None,
-) -> Set[str]:
-    parsed = urlparse(base_url)
-    root_origin = f"{parsed.scheme}://{parsed.netloc}"
-    discovered: Set[str] = set()
-    candidate_sitemaps: List[str] = []
-    visited_sitemaps: Set[str] = set()
-
-    async with httpx.AsyncClient(headers={"User-Agent": DEFAULT_USER_AGENT}) as client:
-        try:
-            robots_resp = await client.get(
-                f"{root_origin}/robots.txt", timeout=10.0, follow_redirects=True
-            )
-            if robots_resp.status_code == 200:
-                for line in robots_resp.text.splitlines():
-                    if line.lower().startswith("sitemap:"):
-                        candidate_sitemaps.append(line.split(":", 1)[1].strip())
-        except Exception:
-            pass
-
-        candidate_sitemaps.extend([
-            f"{root_origin}/sitemap.xml",
-            f"{root_origin}/sitemap_index.xml",
-            f"{root_origin}/wp-sitemap.xml",
-        ])
-
-        for sm_url in list(dict.fromkeys(candidate_sitemaps)):
-            urls = await _fetch_sitemap_urls(client, sm_url, visited_sitemaps)
-            discovered.update(urls)
-
-    if robot_parser:
-        discovered = {
-            url for url in discovered if robot_parser.can_fetch(DEFAULT_USER_AGENT, url)
-        }
-
-    return discovered
-
-
-async def _discover_from_internal_links(
-    base_url: str,
-    robot_parser: Optional[RobotFileParser] = None,
-) -> Set[str]:
-    domain = urlparse(base_url).netloc
-    found: Set[str] = set()
-
-    config = CrawlerRunConfig(cache_mode=CacheMode.BYPASS)
-    async with AsyncWebCrawler() as crawler:
-        result = await crawler.arun(url=base_url, config=config)
-        if result.success and result.links:
-            for item in result.links.get("internal", []):
-                href = item.get("href")
-                if not href:
-                    continue
-                full_url = urljoin(base_url, href)
-                if urlparse(full_url).netloc == domain:
-                    clean = _normalize_url(full_url)
-                    if not _is_crawl_trap(clean):
-                        if not robot_parser or robot_parser.can_fetch(DEFAULT_USER_AGENT, clean):
-                            found.add(clean)
-
-    return found
-
-
-async def _get_robot_parser(base_url: str) -> RobotFileParser:
-    parsed = urlparse(base_url)
-    robots_url = f"{parsed.scheme}://{parsed.netloc}/robots.txt"
-    parser = RobotFileParser()
-
-    try:
-        async with httpx.AsyncClient(headers={"User-Agent": DEFAULT_USER_AGENT}) as client:
-            resp = await client.get(robots_url, timeout=10.0, follow_redirects=True)
-            if resp.status_code == 200:
-                parser.parse(resp.text.splitlines())
-            else:
-                parser.allow_all = True
-    except Exception:
-        parser.allow_all = True
-
-    return parser
-
-
-async def run_discovery(
-    org_id: int, 
-    web_id: int, 
-    base_url: str,
-    max_pages: Optional[int] = None,
-) -> int:
-    clean_base = _normalize_url(base_url)
-    robot_parser = await _get_robot_parser(clean_base)
-
-    urls = await _discover_from_sitemaps(clean_base, robot_parser=robot_parser)
-    if not urls:
-        urls = await _discover_from_internal_links(clean_base, robot_parser=robot_parser)
-
-    if robot_parser.can_fetch(DEFAULT_USER_AGENT, clean_base):
-        urls.add(clean_base)
-
-    filtered_urls = [u for u in urls if not _is_crawl_trap(u)]
-    if not filtered_urls:
-        return 0
-
-    sorted_urls = sorted(filtered_urls)
-    if max_pages and max_pages > 0 and len(sorted_urls) > max_pages:
-        sorted_urls = [clean_base] + [u for u in sorted_urls if u != clean_base][:max_pages - 1]
-
-    records = [
-        {
-            "org_id": org_id,
-            "web_id": web_id,
-            "url": target_url,
-            "markdown_content": None,
-            "status": PageProcessStatus.PENDING,
-            "retries": 0,
-        }
-        for target_url in sorted_urls
-    ]
-
-    now = datetime.now(timezone.utc)
-    BATCH_SIZE = 200
-
-    async with async_session() as session:
-        for i in range(0, len(records), BATCH_SIZE):
-            batch = [{**r, "last_seen_at": now} for r in records[i:i + BATCH_SIZE]]
-            stmt = (
-                insert(ScrapedPage)
-                .values(batch)
-                .on_conflict_do_update(
-                    index_elements=["org_id", "web_id", "url"],
-                    set_={"last_seen_at": now},
-                )
-            )
-            await session.execute(stmt)
-            await session.commit()
-
-    # total URLs discovered this run (used by the purge safety guard), not only new ones
-    return len(sorted_urls)
-
-
-
-
-
-
-
-
-
-
-
-orchestrator.py:
-import asyncio
-import hashlib
-import logging
-import re
-import traceback
-from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional
-from urllib.parse import urlparse
-
-from crawl4ai import AsyncWebCrawler, CrawlerRunConfig, CacheMode
-from sqlalchemy import delete, or_, select, update, func
-
-from app.core.config import settings
-from app.core.database import async_session
-from app.models.chunk import Chunk
-from app.models.generated_question import GeneratedQuestion
-from app.models.org import Org
-from app.models.scraped_page import PageProcessStatus, ScrapedPage
-from app.models.website import Website, WebsiteScrapeStatus
-from app.services.embeddings.factory import get_embedder
-from app.services.embeddings.sparse_embedder import get_sparse_embedder
-from app.services.ingest_pipeline.chunk import process_and_chunk_pages
-from app.services.ingest_pipeline.chunker import (  # noqa: F401
-    estimate_token_count,
-    is_substantive_chunk,
-)
-from app.services.ingest_pipeline.clean_markdown import clean_markdown
-from app.services.ingest_pipeline.discovery import run_discovery
-from app.services.llm_qgen.factory import get_question_generator
-from app.services.llm_qgen.schema import RawChunk
-from app.services.vector_db.factory import get_vector_db
-from app.services.vector_db.schema import SparseVectorData, VectorPoint
-from app.utils.temporal import extract_doc_period
-from app.utils.uuid_generator import generate_chunk_id, generate_doc_id, generate_question_id
-
-logger = logging.getLogger(__name__)
-
-QGEN_MAX_ATTEMPTS = 3
-SYNC_MAX_CONSECUTIVE_FAILURES = 5
-DEFAULT_REFRESH_AFTER_HOURS = 12.0
-PURGE_MAX_FRACTION = 0.5
-
-def get_active_sync_column():
-    provider = (settings.embedding_provider or "").strip().lower()
-    dim = getattr(settings, "embedding_dimension", None) or getattr(settings, "vector_dim", 768)
-
-    if provider == "gemini":
-        col_name = "is_synced_gemini_768" if dim == 768 else "is_synced_gemini"
-    elif "bge" in provider or "bge" in (settings.embedding_model or "").lower():
-        col_name = "is_synced_bge_m3"
-    else:
-        col_name = "is_synced_qdrant"
-
-    return getattr(GeneratedQuestion, col_name, GeneratedQuestion.is_synced_qdrant)
-
-
-def extract_sub_entity_from_url(url: str) -> str:
-    parsed = urlparse(url)
-    segments = [s.strip().lower() for s in parsed.path.split("/") if s.strip()]
-    if segments:
-        candidate = segments[0]
-        ignored = {
-            "pages", "news", "announcement", "announcements", "events", "about",
-            "article", "posts", "home", "index", "admission", "admissions",
-            "academics", "programs", "apply", "contact", "scholarships",
-            "tuition", "student-life", "services",
-        }
-        if candidate not in ignored:
-            return candidate
-    return "main"
-
-
-def classify_academic_level(url: str, text: str = "") -> str:
-    path = urlparse(url).path.lower()
-    lower_text = text[:400].lower()
-
-    if "senior-high" in path or "strand" in lower_text or "shs" in path:
-        return "shs"
-    if "basic-education" in path or "elementary" in path or "junior-high" in path:
-        return "basic_ed"
-    if "undergraduate" in path:
-        return "undergraduate"
-    if re.search(r"(?<!under)graduate", path) or "master" in lower_text or "doctor" in lower_text:
-        return "graduate"
-    return "undergraduate"
-
-
-def classify_document_type(url: str, text: str = "") -> str:
-    path = urlparse(url).path.lower()
-    ephemeral_indicators = [
-        "/news", "/announcement", "/announcements",
-        "/events", "/event", "/blog", "/posts", "/press",
-        "/memorandum", "/advisory", "/bulletin",
-    ]
-    if any(token in path for token in ephemeral_indicators):
-        return "ephemeral"
-
-    if re.search(r"/(?:19|20)\d{2}/", path):
-        return "ephemeral"
-
-    current_year = datetime.now().year
-    for m in re.finditer(r"a\.?y\.?\s*(20\d{2})", text[:600].lower()):
-        if int(m.group(1)) <= current_year - 2:
-            return "ephemeral"
-
-    return "evergreen"
-
-
-def _hash_markdown(markdown: str) -> str:
-    """Strips transient dates and numbers to prevent false change detection."""
-    text = clean_markdown(markdown or "")
-    # Remove dynamic timestamps, visitor numbers, and relative dates
-    text = re.sub(r"\b\d{1,2}:\d{2}(?::\d{2})?\s*(?:am|pm)?\b", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"\b(?:today|yesterday|just now|\d+\s+minutes?\s+ago)\b", "", text, flags=re.IGNORECASE)
-    normalized = re.sub(r"\s+", " ", text).strip().lower()
-    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
-
-
-def _apply_scrape_result(page: ScrapedPage, markdown: str) -> bool:
-    now = datetime.now(timezone.utc)
-    new_hash = _hash_markdown(markdown)
-    old_hash = page.content_hash or (
-        _hash_markdown(page.markdown_content) if page.markdown_content else None
-    )
-
-    page.last_scraped_at = now
-    page.content_hash = new_hash
-    page.status = PageProcessStatus.COMPLETED
-
-    if new_hash == old_hash and page.markdown_content:
-        return False
-
-    page.markdown_content = markdown
-    page.content_changed_at = now
-    page.chunked_at = None
-    return True
-
-
-def _register_failure(page: ScrapedPage, max_retries: int) -> None:
-    page.retries += 1
-    if page.retries < max_retries:
-        page.status = PageProcessStatus.PENDING
-    elif page.markdown_content:
-        logger.warning(f"[Scraper] Refresh failed for {page.url}; retaining previous valid version.")
-        page.status = PageProcessStatus.COMPLETED
-    else:
-        page.status = PageProcessStatus.FAILED
-
-
-async def scraper_worker(web_id: int, is_discovery_done: asyncio.Event, max_retries: int = 3) -> int:
-    total_scraped = 0
-    config = CrawlerRunConfig(
-        cache_mode=CacheMode.BYPASS,
-        excluded_tags=["nav", "footer", "header", "script", "style", "noscript", "aside", "form"],
-        exclude_external_links=True,
-        exclude_social_media_links=True,
-        page_timeout=35000,
-        wait_until="domcontentloaded",
-        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
-    )
-
-    crawler = AsyncWebCrawler()
-    await crawler.start()
-
-    try:
-        while True:
-            async with async_session() as session:
-                stmt = (
-                    select(ScrapedPage)
-                    .where(
-                        ScrapedPage.web_id == web_id,
-                        ScrapedPage.status == PageProcessStatus.PENDING,
-                        ScrapedPage.retries < max_retries,
-                    )
-                    .limit(10)
-                )
-                res = await session.execute(stmt)
-                pages = res.scalars().all()
-
-                if not pages:
-                    if is_discovery_done.is_set():
-                        break
-                    await asyncio.sleep(1.0)
-                    continue
-
-                for page in pages:
-                    page.status = PageProcessStatus.IN_PROGRESS
-                await session.commit()
-
-                for page in pages:
-                    try:
-                        crawl_result = await crawler.arun(url=page.url, config=config)
-                        if crawl_result.success and crawl_result.markdown:
-                            _apply_scrape_result(page, str(crawl_result.markdown))
-                            total_scraped += 1
-                        else:
-                            _register_failure(page, max_retries)
-                    except Exception as e:
-                        logger.warning(f"[Scraper Error] {page.url}: {e}")
-                        _register_failure(page, max_retries)
-
-                    await asyncio.sleep(0.5)
-
-                await session.commit()
-    finally:
-        await crawler.close()
-
-    return total_scraped
-
-
-async def _has_pending_chunks_to_create(web_id: int) -> bool:
-    async with async_session() as session:
-        count = await session.scalar(
-            select(func.count(ScrapedPage.id)).where(
-                ScrapedPage.web_id == web_id,
-                ScrapedPage.status == PageProcessStatus.COMPLETED,
-                ScrapedPage.chunked_at.is_(None),
-                ScrapedPage.markdown_content.is_not(None),
-            )
-        )
-        return (count or 0) > 0
-
-
-async def chunker_worker(web_id: int, is_scraping_done: asyncio.Event) -> int:
-    total_chunks = 0
-    while True:
-        try:
-            created = await process_and_chunk_pages(web_id=web_id, batch_size=20)
-            if created > 0:
-                total_chunks += created
-                continue
-
-            if is_scraping_done.is_set():
-                if not await _has_pending_chunks_to_create(web_id):
-                    break
-
-            await asyncio.sleep(1.5)
-        except Exception as e:
-            logger.error(f"[Chunker Worker Exception]: {e}")
-            traceback.print_exc()
-            await asyncio.sleep(2.0)
-
-    return total_chunks
-
-
-async def _has_pending_qgen_chunks(web_id: int) -> bool:
-    async with async_session() as session:
-        count = await session.scalar(
-            select(func.count(Chunk.id))
-            .join(ScrapedPage, Chunk.page_id == ScrapedPage.id)
-            .where(
-                ScrapedPage.web_id == web_id,
-                Chunk.has_qgen.is_(False),
-                Chunk.qgen_attempts < QGEN_MAX_ATTEMPTS,
-            )
-        )
-        return (count or 0) > 0
-
-
-async def qgen_worker(web_id: int, is_chunking_done: asyncio.Event) -> int:
-    total_questions = 0
-    generator = get_question_generator()
-    CHUNK_BATCH_SIZE = 10
-
-    while True:
-        try:
-            async with async_session() as session:
-                stmt = (
-                    select(
-                        Chunk.id,
-                        Chunk.content,
-                        Chunk.heading_path,
-                        ScrapedPage.org_id,
-                        ScrapedPage.url.label("page_url"),
-                    )
-                    .join(ScrapedPage, Chunk.page_id == ScrapedPage.id)
-                    .where(
-                        ScrapedPage.web_id == web_id,
-                        Chunk.has_qgen.is_(False),
-                        Chunk.qgen_attempts < QGEN_MAX_ATTEMPTS,
-                    )
-                    .order_by(Chunk.id)
-                    .limit(CHUNK_BATCH_SIZE)
-                )
-                rows = (await session.execute(stmt)).all()
-
-                if not rows:
-                    if is_chunking_done.is_set():
-                        if not await _has_pending_qgen_chunks(web_id):
-                            break
-                    await asyncio.sleep(2.0)
-                    continue
-
-                chunk_ids = [r.id for r in rows]
-                payloads: List[RawChunk] = []
-                for r in rows:
-                    tenant_str = str(r.org_id)
-                    payloads.append(
-                        RawChunk(
-                            id=str(r.id),
-                            doc_id=generate_doc_id(tenant_id=tenant_str, source_url=r.page_url),
-                            source_url=r.page_url,
-                            title=r.heading_path or r.page_url.split("/")[-1] or "Homepage",
-                            content=r.content,
-                            tags=[tenant_str],
-                        )
-                    )
-
-                try:
-                    generated_map = await generator.generate_questions_batch(payloads)
-
-                    new_questions: List[GeneratedQuestion] = []
-                    done_ids: List[int] = []
-                    for p in payloads:
-                        if p.id not in generated_map:
-                            continue
-                        done_ids.append(int(p.id))
-                        for item in generated_map[p.id]:
-                            q_text = (item.content if hasattr(item, "content") else str(item)).strip()
-                            if q_text:
-                                new_questions.append(
-                                    GeneratedQuestion(
-                                        chunk_id=int(p.id),
-                                        question=q_text,
-                                        is_synced_qdrant=False,
-                                    )
-                                )
-                                total_questions += 1
-
-                    if new_questions:
-                        session.add_all(new_questions)
-                    if done_ids:
-                        await session.execute(
-                            update(Chunk).where(Chunk.id.in_(done_ids)).values(has_qgen=True)
-                        )
-                    missed = [cid for cid in chunk_ids if cid not in done_ids]
-                    if missed:
-                        await session.execute(
-                            update(Chunk)
-                            .where(Chunk.id.in_(missed))
-                            .values(qgen_attempts=Chunk.qgen_attempts + 1)
-                        )
-                    await session.commit()
-
-                except Exception as e:
-                    await session.rollback()
-                    logger.error(f"[QGen Batch Error] chunks={chunk_ids}: {e}")
-                    async with async_session() as err_sess:
-                        await err_sess.execute(
-                            update(Chunk)
-                            .where(Chunk.id.in_(chunk_ids))
-                            .values(qgen_attempts=Chunk.qgen_attempts + 1)
-                        )
-                        await err_sess.commit()
-
-            await asyncio.sleep(2.0)
-        except Exception as outer_e:
-            logger.error(f"[QGen Worker Exception]: {outer_e}")
-            traceback.print_exc()
-            await asyncio.sleep(3.0)
-
-    return total_questions
-
-
-async def _has_pending_sync_questions(web_id: int) -> bool:
-    sync_col = get_active_sync_column()
-    async with async_session() as session:
-        count = await session.scalar(
-            select(func.count(GeneratedQuestion.id))
-            .join(Chunk, GeneratedQuestion.chunk_id == Chunk.id)
-            .join(ScrapedPage, Chunk.page_id == ScrapedPage.id)
-            .where(
-                ScrapedPage.web_id == web_id,
-                sync_col.is_(False),
-            )
-        )
-        return (count or 0) > 0
-
-
-async def qdrant_sync_worker(org_id: int, web_id: int, is_qgen_done: asyncio.Event) -> int:
-    total_synced = 0
-    vector_db = get_vector_db()
-    embedder = get_embedder()
-    sparse_embedder = get_sparse_embedder()
-    target_collection = settings.resolved_collection_name
-    sync_col = get_active_sync_column()
-
-    await vector_db.create_collection_if_not_exists(
-        collection_name=target_collection,
-        dense_vector_size=embedder.dimension,
-        distance="Cosine",
-        enable_quantization=settings.quantization_enabled,
-    )
-
-    tenant_key = str(org_id)
-    EMBED_DB_BATCH_SIZE = 100
-    consecutive_failures = 0
-
-    while True:
-        try:
-            async with async_session() as session:
-                stmt = (
-                    select(
-                        GeneratedQuestion.id.label("q_id"),
-                        GeneratedQuestion.question.label("q_text"),
-                        Chunk.id.label("chunk_id"),
-                        Chunk.content.label("chunk_content"),
-                        Chunk.chunk_index.label("chunk_index"),
-                        Chunk.section_id.label("section_id"),
-                        Chunk.heading_path.label("heading_path"),
-                        Chunk.part_index.label("part_index"),
-                        Chunk.part_total.label("part_total"),
-                        ScrapedPage.id.label("page_id"),
-                        ScrapedPage.url.label("page_url"),
-                        ScrapedPage.doc_period.label("page_doc_period"),
-                        ScrapedPage.content_changed_at.label("page_updated_at"),
-                    )
-                    .join(Chunk, GeneratedQuestion.chunk_id == Chunk.id)
-                    .join(ScrapedPage, Chunk.page_id == ScrapedPage.id)
-                    .where(
-                        ScrapedPage.web_id == web_id,
-                        sync_col.is_(False),
-                    )
-                    .order_by(GeneratedQuestion.id)
-                    .limit(EMBED_DB_BATCH_SIZE)
-                )
-                rows = (await session.execute(stmt)).all()
-
-                if not rows:
-                    if is_qgen_done.is_set():
-                        if not await _has_pending_sync_questions(web_id):
-                            break
-                    await asyncio.sleep(2.0)
-                    continue
-
-                try:
-                    embedded_results = await embedder.embed(
-                        [r.q_text for r in rows], task_type="RETRIEVAL_DOCUMENT"
-                    )
-                    if len(embedded_results) != len(rows):
-                        raise ValueError(
-                            f"Embedding mismatch: expected {len(rows)}, got {len(embedded_results)}"
-                        )
-
-                    chunk_sparse_cache: Dict[int, SparseVectorData] = {}
-                    points_to_upsert: List[VectorPoint] = []
-                    synced_q_ids: List[int] = []
-
-                    for row, emb_res in zip(rows, embedded_results):
-                        doc_type = classify_document_type(row.page_url, row.chunk_content)
-                        campus = extract_sub_entity_from_url(row.page_url)
-                        academic_level = classify_academic_level(row.page_url, row.chunk_content)
-                        doc_period = extract_doc_period(
-                            row.chunk_content, url=row.page_url, heading=row.heading_path or ""
-                        ) or row.page_doc_period
-
-                        if row.chunk_id not in chunk_sparse_cache:
-                            sparse_data = await sparse_embedder.embed_text(row.chunk_content)
-                            if not sparse_data.indices:
-                                sparse_data = SparseVectorData(indices=[0], values=[0.0])
-                            chunk_sparse_cache[row.chunk_id] = sparse_data
-                        sparse_data = chunk_sparse_cache[row.chunk_id]
-
-                        chunk_uuid = generate_chunk_id(
-                            tenant_id=tenant_key,
-                            source_url=row.page_url,
-                            chunk_index=row.chunk_id,
-                            content=row.chunk_content,
-                        )
-                        point_uuid = generate_question_id(chunk_id=chunk_uuid, question=row.q_text)
-
-                        points_to_upsert.append(
-                            VectorPoint(
-                                id=point_uuid,
-                                vector={
-                                    "question_dense": emb_res.values,
-                                    "chunk_sparse": sparse_data,
-                                },
-                                payload={
-                                    "group_id": tenant_key,
-                                    "web_id": web_id,
-                                    "parent_chunk_id": chunk_uuid,
-                                    "question_text": row.q_text,
-                                    "chunk_text": row.chunk_content,
-                                    "source_url": row.page_url,
-                                    "page_id": row.page_id,
-                                    "chunk_id": row.chunk_id,
-                                    "chunk_index": row.chunk_index,
-                                    "section_id": row.section_id,
-                                    "heading_path": row.heading_path,
-                                    "part_index": row.part_index,
-                                    "part_total": row.part_total,
-                                    "doc_type": doc_type,
-                                    "campus": campus,
-                                    "academic_level": academic_level,
-                                    "doc_period": doc_period,
-                                    "page_updated_at": (
-                                        row.page_updated_at.isoformat()
-                                        if row.page_updated_at else None
-                                    ),
-                                },
-                            )
-                        )
-                        synced_q_ids.append(row.q_id)
-
-                    await vector_db.upsert_points(
-                        collection_name=target_collection, points=points_to_upsert
-                    )
-
-                    await session.execute(
-                        update(GeneratedQuestion)
-                        .where(GeneratedQuestion.id.in_(synced_q_ids))
-                        .values({
-                            sync_col.key: True,
-                            GeneratedQuestion.is_synced_qdrant: True,
-                        })
-                    )
-                    await session.commit()
-                    total_synced += len(points_to_upsert)
-                    consecutive_failures = 0
-
-                    await asyncio.sleep(0.3)
-
-                except Exception as e:
-                    await session.rollback()
-                    consecutive_failures += 1
-                    err_msg = str(e)
-                    logger.error(f"[Qdrant Sync Error] attempt {consecutive_failures}: {err_msg[:200]}")
-                    traceback.print_exc()
-
-                    if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg:
-                        logger.warning("[Qdrant Sync Rate Limit] Sleeping 15s...")
-                        await asyncio.sleep(15.0)
-                        consecutive_failures = 0
-                    elif consecutive_failures >= SYNC_MAX_CONSECUTIVE_FAILURES:
-                        logger.warning("[Qdrant Sync Backoff] Sleeping 10s...")
-                        await asyncio.sleep(10.0)
-                        consecutive_failures = 0
-                    else:
-                        await asyncio.sleep(3.0)
-
-        except Exception as loop_e:
-            logger.error(f"[Qdrant Sync Worker Loop Exception]: {loop_e}")
-            traceback.print_exc()
-            await asyncio.sleep(5.0)
-
-    return total_synced
-
-
-async def reconcile_stale_points(org_id: int, web_id: int) -> int:
-    """Removes Qdrant points of re-chunked pages whose chunk_id no longer exists in SQL."""
-    async with async_session() as session:
-        page_ids = list(
-            (
-                await session.execute(
-                    select(ScrapedPage.id).where(
-                        ScrapedPage.web_id == web_id,
-                        ScrapedPage.qdrant_cleanup_pending.is_(True),
-                    )
-                )
-            ).scalars().all()
-        )
-    if not page_ids:
-        return 0
-
-    vector_db = get_vector_db()
-    try:
-        for page_id in page_ids:
-            async with async_session() as session:
-                live_chunk_ids = list(
-                    (
-                        await session.execute(select(Chunk.id).where(Chunk.page_id == page_id))
-                    ).scalars().all()
-                )
-
-            # Purge any points associated with this page that do not match active chunk IDs
-            await vector_db.delete_points(
-                collection_name=settings.resolved_collection_name,
-                filters={"group_id": str(org_id), "page_id": page_id},
-                must_not={"chunk_id": live_chunk_ids} if live_chunk_ids else None,
-            )
-
-            async with async_session() as session:
-                await session.execute(
-                    update(ScrapedPage)
-                    .where(ScrapedPage.id == page_id)
-                    .values(qdrant_cleanup_pending=False)
-                )
-                await session.commit()
-    finally:
-        await vector_db.close()
-
-    logger.info(f"[Reconcile] Swept stale points for {len(page_ids)} pages (web {web_id}).")
-    return len(page_ids)
-
-
-async def purge_missing_pages(
-    org_id: int, web_id: int, run_started_at: datetime, discovered_count: int
-) -> int:
-    """Removes pages (SQL rows + Qdrant points) that were dropped from the site."""
-    async with async_session() as session:
-        total = await session.scalar(
-            select(func.count(ScrapedPage.id)).where(ScrapedPage.web_id == web_id)
-        ) or 0
-        stale_ids = list(
-            (
-                await session.execute(
-                    select(ScrapedPage.id).where(
-                        ScrapedPage.web_id == web_id,
-                        or_(
-                            ScrapedPage.last_seen_at.is_(None),
-                            ScrapedPage.last_seen_at < run_started_at,
-                        ),
-                    )
-                )
-            ).scalars().all()
-        )
-
-    if not stale_ids:
-        return 0
-    if discovered_count <= 0 or len(stale_ids) > PURGE_MAX_FRACTION * max(total, 1):
-        logger.warning(
-            f"[Purge Guard] Skipped: {len(stale_ids)}/{total} missing, {discovered_count} discovered."
-        )
-        return 0
-
-    vector_db = get_vector_db()
-    try:
-        for page_id in stale_ids:
-            await vector_db.delete_points(
-                collection_name=settings.resolved_collection_name,
-                filters={"group_id": str(org_id), "page_id": page_id},
-            )
-    finally:
-        await vector_db.close()
-
-    async with async_session() as session:
-        await session.execute(delete(ScrapedPage).where(ScrapedPage.id.in_(stale_ids)))
-        await session.commit()
-
-    logger.info(f"[Purge] Purged {len(stale_ids)} pages no longer present on web {web_id}.")
-    return len(stale_ids)
-
-
-async def _bump_content_version(org_id: int) -> None:
-    async with async_session() as session:
-        await session.execute(
-            update(Org).where(Org.id == org_id).values(content_version=Org.content_version + 1)
-        )
-        await session.commit()
-
-
-async def run_full_pipeline(
-    website_id: int,
-    refresh_after_hours: Optional[float] = DEFAULT_REFRESH_AFTER_HOURS,
-    force_refresh: bool = False,
-) -> dict:
-    run_started_at = datetime.now(timezone.utc)
-
-    async with async_session() as session:
-        website = await session.get(Website, website_id)
-        if not website:
-            raise ValueError(f"Website with id {website_id} not found")
-
-        website.status = WebsiteScrapeStatus.IN_PROGRESS
-        website.error_message = None
-
-        await session.execute(
-            update(ScrapedPage)
-            .where(
-                ScrapedPage.web_id == website_id,
-                ScrapedPage.status == PageProcessStatus.IN_PROGRESS,
-            )
-            .values(status=PageProcessStatus.PENDING)
-        )
-
-        if force_refresh:
-            await session.execute(
-                update(ScrapedPage)
-                .where(ScrapedPage.web_id == website_id)
-                .values(status=PageProcessStatus.PENDING, retries=0)
-            )
-        elif refresh_after_hours is not None:
-            cutoff = run_started_at - timedelta(hours=refresh_after_hours)
-            await session.execute(
-                update(ScrapedPage)
-                .where(
-                    ScrapedPage.web_id == website_id,
-                    ScrapedPage.status.in_([PageProcessStatus.COMPLETED, PageProcessStatus.FAILED]),
-                    or_(
-                        ScrapedPage.last_scraped_at.is_(None),
-                        ScrapedPage.last_scraped_at < cutoff,
-                    ),
-                )
-                .values(status=PageProcessStatus.PENDING, retries=0)
-            )
-        await session.commit()
-
-        org_id = website.org_id
-        base_url = website.url
-
-    is_discovery_done = asyncio.Event()
-    is_scraping_done = asyncio.Event()
-    is_chunking_done = asyncio.Event()
-    is_qgen_done = asyncio.Event()
-
-    async def _discovery_task():
-        try:
-            return await run_discovery(org_id=org_id, web_id=website_id, base_url=base_url)
-        except Exception as e:
-            logger.error(f"Discovery stage failed: {e}")
-            raise
-        finally:
-            is_discovery_done.set()
-
-    async def _scraper_task():
-        try:
-            return await scraper_worker(web_id=website_id, is_discovery_done=is_discovery_done)
-        except Exception as e:
-            logger.error(f"Scraper stage failed: {e}")
-            raise
-        finally:
-            is_scraping_done.set()
-
-    async def _chunker_task():
-        try:
-            return await chunker_worker(web_id=website_id, is_scraping_done=is_scraping_done)
-        except Exception as e:
-            logger.error(f"Chunker stage failed: {e}")
-            raise
-        finally:
-            is_chunking_done.set()
-
-    async def _qgen_task():
-        try:
-            return await qgen_worker(web_id=website_id, is_chunking_done=is_chunking_done)
-        except Exception as e:
-            logger.error(f"QGen stage failed: {e}")
-            raise
-        finally:
-            is_qgen_done.set()
-
-    async def _sync_task():
-        try:
-            return await qdrant_sync_worker(org_id=org_id, web_id=website_id, is_qgen_done=is_qgen_done)
-        except Exception as e:
-            logger.error(f"Qdrant Sync stage failed: {e}")
-            raise
-
-    results = await asyncio.gather(
-        _discovery_task(),
-        _scraper_task(),
-        _chunker_task(),
-        _qgen_task(),
-        _sync_task(),
-        return_exceptions=True,
-    )
-
-    errors = [r for r in results if isinstance(r, BaseException)]
-
-    def _num(v) -> int:
-        return v if isinstance(v, int) else 0
-
-    cleaned_pages = purged_pages = 0
-    if not errors:
-        try:
-            cleaned_pages = await reconcile_stale_points(org_id, website_id)
-            purged_pages = await purge_missing_pages(
-                org_id, website_id, run_started_at, discovered_count=_num(results[0])
-            )
-        except Exception as e:
-            logger.error(f"Reconciliation error for website {website_id}: {e}")
-            traceback.print_exc()
-            errors.append(e)
-
-    if _num(results[2]) > 0 or cleaned_pages > 0 or purged_pages > 0:
-        try:
-            await _bump_content_version(org_id)
-        except Exception as e:
-            logger.error(f"Failed to bump content_version for org {org_id}: {e}")
-
-    async with async_session() as session:
-        website = await session.get(Website, website_id)
-        if website:
-            if errors:
-                website.status = WebsiteScrapeStatus.FAILED
-                err_strings = [f"{type(e).__name__}: {e}" for e in errors]
-                website.error_message = "; ".join(err_strings)[:2000]
-                logger.error(f"Pipeline failed for website {website_id}: {website.error_message}")
-            else:
-                website.status = WebsiteScrapeStatus.COMPLETED
-                website.error_message = None
-            await session.commit()
-
-    if errors:
-        raise errors[0]
-
-    discovered_urls, scraped_pages, created_chunks, generated_questions, synced_qdrant_points = results
-    return {
-        "discovered_urls": discovered_urls,
-        "scraped_pages": scraped_pages,
-        "created_chunks": created_chunks,
-        "generated_questions": generated_questions,
-        "synced_qdrant_points": synced_qdrant_points,
-        "swept_pages": cleaned_pages,
-        "purged_pages": purged_pages,
-    }
-
-
-
-
-
-
-
-
-
-
-
 
 chunker.py:
 """
@@ -1745,3 +597,1624 @@ def chunk_markdown(
     for i, d in enumerate(drafts):  # contiguous reading order, gaps from dropped chunks removed
         d.chunk_index = i
     return drafts
+
+
+
+clean_markdown.py:
+import re
+
+_FRONTMATTER_RE = re.compile(r"\A---\s*\n.*?\n---\s*\n", re.DOTALL)
+
+
+def clean_markdown(raw_markdown: str) -> str:
+    """
+    Cleans raw crawler markdown while preserving the structure the chunker needs:
+    headings, list markers, list indentation (nested items), numbering and tables.
+
+    Changes vs the old version:
+      * YAML frontmatter is stripped FIRST (it used to be dead code, because the
+        '---' rule below removed the delimiters before the check ran).
+      * Leading indentation is preserved (the old `[ \\t]+ -> ' '` flattened
+        nested lists and indented continuation lines).
+      * Escaped numbering such as '3\\.' is restored to '3.' so numbered steps
+        are recognised as one list.
+      * HTML tag stripping only matches real tags, so "< 5 units > 2" survives.
+    """
+    if not raw_markdown:
+        return ""
+
+    text = raw_markdown.replace("\r\n", "\n").replace("\r", "\n").replace(" ", " ")
+
+    text = _FRONTMATTER_RE.sub("", text, count=1)
+
+    text = re.sub(r"(?i)<br\s*/?>", "\n", text)
+    text = re.sub(r"</?[a-zA-Z][^>]*>", " ", text)
+
+    text = re.sub(r"!\[[^\]]*\]\([^\)]*\)", "", text)
+    text = re.sub(r"\[([^\]]+)\]\([^\)]+\)", r"\1", text)
+    text = re.sub(r"https?://\S+", "", text)
+
+    # Horizontal rules (standalone ---, ***, ___). Table separator rows contain '|' so they are safe.
+    text = re.sub(r"^[ \t]*[-*_]{3,}[ \t]*$", "", text, flags=re.MULTILINE)
+
+    text = re.sub(
+        r"(?i)\b(share on facebook|share on x|share on twitter|share on linkedin|share via email)\b",
+        "",
+        text,
+    )
+
+    # Restore escaped ordered-list markers: "3\." -> "3."
+    text = re.sub(r"^(\s*\d{1,3})\\([.)])", r"\1\2", text, flags=re.MULTILINE)
+
+    # Trim trailing whitespace per line and collapse inner runs of spaces,
+    # but never touch leading indentation.
+    cleaned_lines = []
+    for line in text.split("\n"):
+        stripped = line.rstrip()
+        indent_len = len(stripped) - len(stripped.lstrip(" \t"))
+        indent, rest = stripped[:indent_len], stripped[indent_len:]
+        rest = re.sub(r"[ \t]{2,}", " ", rest)
+        cleaned_lines.append(indent + rest if rest else "")
+    text = "\n".join(cleaned_lines)
+
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+
+discovery.py:
+import xml.etree.ElementTree as ET
+from typing import List, Optional, Set
+from urllib.parse import urljoin, urlparse
+from urllib.robotparser import RobotFileParser
+from datetime import datetime, timezone
+
+import httpx
+from crawl4ai import AsyncWebCrawler, CrawlerRunConfig, CacheMode
+from sqlalchemy.dialects.postgresql import insert
+
+from app.core.database import async_session
+from app.models.scraped_page import ScrapedPage, PageProcessStatus
+
+DEFAULT_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+
+
+def _normalize_url(url: str) -> str:
+    parsed = urlparse(url)
+    return parsed._replace(fragment="").geturl().rstrip("/")
+
+
+def _is_crawl_trap(url: str) -> bool:
+    """
+    Blocks infinite calendar query loops, filters, and dynamic pagination traps.
+    e.g. /events?view=2025-05, /calendar?month=...
+    """
+    parsed = urlparse(url)
+    query = parsed.query.lower()
+    path = parsed.path.lower()
+
+    # Block recursive calendar/events queries
+    trap_params = ["view=", "month=", "year=", "date=", "filter=", "calendar_"]
+    if any(param in query for param in trap_params):
+        return True
+
+    # Block media / binary downloads discovered accidentally
+    ignored_extensions = (
+        ".pdf", ".jpg", ".jpeg", ".png", ".gif", ".webp", ".zip",
+        ".docx", ".xlsx", ".pptx", ".mp4", ".svg"
+    )
+    if any(path.endswith(ext) for ext in ignored_extensions):
+        return True
+
+    return False
+
+
+async def _fetch_sitemap_urls(
+    client: httpx.AsyncClient,
+    sitemap_url: str,
+    visited_sitemaps: Set[str],
+) -> Set[str]:
+    clean_sitemap_url = _normalize_url(sitemap_url)
+    if clean_sitemap_url in visited_sitemaps:
+        return set()
+
+    visited_sitemaps.add(clean_sitemap_url)
+    discovered: Set[str] = set()
+
+    try:
+        resp = await client.get(clean_sitemap_url, timeout=15.0, follow_redirects=True)
+        if resp.status_code != 200 or not resp.text.strip():
+            return discovered
+
+        root = ET.fromstring(resp.text)
+        namespace = {"ns": root.tag.split("}")[0].strip("{")} if "}" in root.tag else {}
+
+        # Sitemap index
+        sitemap_tags = (
+            root.findall(".//ns:sitemap/ns:loc", namespace)
+            if namespace
+            else root.findall(".//sitemap/loc")
+        )
+        if sitemap_tags:
+            for tag in sitemap_tags:
+                if tag.text:
+                    child_urls = await _fetch_sitemap_urls(
+                        client, tag.text.strip(), visited_sitemaps
+                    )
+                    discovered.update(child_urls)
+            return discovered
+
+        # Direct page URLs
+        url_tags = (
+            root.findall(".//ns:url/ns:loc", namespace)
+            if namespace
+            else root.findall(".//url/loc")
+        )
+        for tag in url_tags:
+            if tag.text:
+                norm = _normalize_url(tag.text.strip())
+                if not _is_crawl_trap(norm):
+                    discovered.add(norm)
+
+    except Exception:
+        pass
+
+    return discovered
+
+
+async def _discover_from_sitemaps(
+    base_url: str,
+    robot_parser: Optional[RobotFileParser] = None,
+) -> Set[str]:
+    parsed = urlparse(base_url)
+    root_origin = f"{parsed.scheme}://{parsed.netloc}"
+    discovered: Set[str] = set()
+    candidate_sitemaps: List[str] = []
+    visited_sitemaps: Set[str] = set()
+
+    async with httpx.AsyncClient(headers={"User-Agent": DEFAULT_USER_AGENT}) as client:
+        try:
+            robots_resp = await client.get(
+                f"{root_origin}/robots.txt", timeout=10.0, follow_redirects=True
+            )
+            if robots_resp.status_code == 200:
+                for line in robots_resp.text.splitlines():
+                    if line.lower().startswith("sitemap:"):
+                        candidate_sitemaps.append(line.split(":", 1)[1].strip())
+        except Exception:
+            pass
+
+        candidate_sitemaps.extend([
+            f"{root_origin}/sitemap.xml",
+            f"{root_origin}/sitemap_index.xml",
+            f"{root_origin}/wp-sitemap.xml",
+        ])
+
+        for sm_url in list(dict.fromkeys(candidate_sitemaps)):
+            urls = await _fetch_sitemap_urls(client, sm_url, visited_sitemaps)
+            discovered.update(urls)
+
+    if robot_parser:
+        discovered = {
+            url for url in discovered if robot_parser.can_fetch(DEFAULT_USER_AGENT, url)
+        }
+
+    return discovered
+
+
+async def _discover_from_internal_links(
+    base_url: str,
+    robot_parser: Optional[RobotFileParser] = None,
+) -> Set[str]:
+    domain = urlparse(base_url).netloc
+    found: Set[str] = set()
+
+    config = CrawlerRunConfig(cache_mode=CacheMode.BYPASS)
+    async with AsyncWebCrawler() as crawler:
+        result = await crawler.arun(url=base_url, config=config)
+        if result.success and result.links:
+            for item in result.links.get("internal", []):
+                href = item.get("href")
+                if not href:
+                    continue
+                full_url = urljoin(base_url, href)
+                if urlparse(full_url).netloc == domain:
+                    clean = _normalize_url(full_url)
+                    if not _is_crawl_trap(clean):
+                        if not robot_parser or robot_parser.can_fetch(DEFAULT_USER_AGENT, clean):
+                            found.add(clean)
+
+    return found
+
+
+async def _get_robot_parser(base_url: str) -> RobotFileParser:
+    parsed = urlparse(base_url)
+    robots_url = f"{parsed.scheme}://{parsed.netloc}/robots.txt"
+    parser = RobotFileParser()
+
+    try:
+        async with httpx.AsyncClient(headers={"User-Agent": DEFAULT_USER_AGENT}) as client:
+            resp = await client.get(robots_url, timeout=10.0, follow_redirects=True)
+            if resp.status_code == 200:
+                parser.parse(resp.text.splitlines())
+            else:
+                parser.allow_all = True
+    except Exception:
+        parser.allow_all = True
+
+    return parser
+
+
+async def run_discovery(
+    org_id: int, 
+    web_id: int, 
+    base_url: str,
+    max_pages: Optional[int] = None,
+) -> int:
+    clean_base = _normalize_url(base_url)
+    robot_parser = await _get_robot_parser(clean_base)
+
+    urls = await _discover_from_sitemaps(clean_base, robot_parser=robot_parser)
+    if not urls:
+        urls = await _discover_from_internal_links(clean_base, robot_parser=robot_parser)
+
+    if robot_parser.can_fetch(DEFAULT_USER_AGENT, clean_base):
+        urls.add(clean_base)
+
+    filtered_urls = [u for u in urls if not _is_crawl_trap(u)]
+    if not filtered_urls:
+        return 0
+
+    sorted_urls = sorted(filtered_urls)
+    if max_pages and max_pages > 0 and len(sorted_urls) > max_pages:
+        sorted_urls = [clean_base] + [u for u in sorted_urls if u != clean_base][:max_pages - 1]
+
+    records = [
+        {
+            "org_id": org_id,
+            "web_id": web_id,
+            "url": target_url,
+            "markdown_content": None,
+            "status": PageProcessStatus.PENDING,
+            "retries": 0,
+        }
+        for target_url in sorted_urls
+    ]
+
+    now = datetime.now(timezone.utc)
+    BATCH_SIZE = 200
+
+    async with async_session() as session:
+        for i in range(0, len(records), BATCH_SIZE):
+            batch = [{**r, "last_seen_at": now} for r in records[i:i + BATCH_SIZE]]
+            stmt = (
+                insert(ScrapedPage)
+                .values(batch)
+                .on_conflict_do_update(
+                    index_elements=["org_id", "web_id", "url"],
+                    set_={"last_seen_at": now},
+                )
+            )
+            await session.execute(stmt)
+            await session.commit()
+
+    # total URLs discovered this run (used by the purge safety guard), not only new ones
+    return len(sorted_urls)
+
+
+document_parser.py:
+import io
+import shutil
+import subprocess
+import tempfile
+import zipfile
+from pathlib import Path
+
+
+MAX_DOCUMENT_TEXT_CHARS = 1_000_000
+MAX_DOCX_UNCOMPRESSED_BYTES = 100 * 1024 * 1024
+MAX_SPREADSHEET_UNCOMPRESSED_BYTES = 100 * 1024 * 1024
+
+
+class DocumentExtractionError(ValueError):
+    pass
+
+
+class DocumentParserUnavailableError(RuntimeError):
+    pass
+
+
+def _limit_text(text: str) -> str:
+    text = text.strip()
+    if len(text) > MAX_DOCUMENT_TEXT_CHARS:
+        raise DocumentExtractionError(
+            f"Extracted document text exceeds {MAX_DOCUMENT_TEXT_CHARS:,} characters."
+        )
+    if not text:
+        raise DocumentExtractionError("No readable text was found in the document.")
+    return text
+
+
+def _extract_pdf(data: bytes) -> str:
+    try:
+        from pypdf import PdfReader
+
+        reader = PdfReader(io.BytesIO(data), strict=False)
+    except ImportError as exc:
+        raise DocumentParserUnavailableError(
+            "PDF support is not installed. Install the backend requirements and restart the service."
+        ) from exc
+
+    try:
+        if reader.is_encrypted and not reader.decrypt(""):
+            raise DocumentExtractionError("Password-protected PDFs are not supported.")
+        if len(reader.pages) > 2_000:
+            raise DocumentExtractionError("PDFs may contain no more than 2,000 pages.")
+
+        pages = []
+        character_count = 0
+        for page in reader.pages:
+            page_text = page.extract_text() or ""
+            character_count += len(page_text)
+            if character_count > MAX_DOCUMENT_TEXT_CHARS:
+                raise DocumentExtractionError(
+                    f"Extracted document text exceeds {MAX_DOCUMENT_TEXT_CHARS:,} characters."
+                )
+            pages.append(page_text)
+    except DocumentExtractionError:
+        raise
+    except Exception as exc:
+        raise DocumentExtractionError("Could not read this PDF file.") from exc
+    return _limit_text("\n\n".join(pages))
+
+
+def _extract_docx(data: bytes) -> str:
+    try:
+        from docx import Document
+
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            entries = archive.infolist()
+            if (
+                len(entries) > 5_000
+                or sum(info.file_size for info in entries)
+                > MAX_DOCX_UNCOMPRESSED_BYTES
+            ):
+                raise DocumentExtractionError("The DOCX file expands beyond the supported size.")
+        document = Document(io.BytesIO(data))
+    except (DocumentExtractionError, DocumentParserUnavailableError):
+        raise
+    except ImportError as exc:
+        raise DocumentParserUnavailableError(
+            "DOCX support is not installed. Install the backend requirements and restart the service."
+        ) from exc
+    except Exception as exc:
+        raise DocumentExtractionError("Could not read this DOCX file.") from exc
+
+    blocks = [paragraph.text for paragraph in document.paragraphs if paragraph.text.strip()]
+    for table in document.tables:
+        for row in table.rows:
+            cells = [cell.text.strip() for cell in row.cells if cell.text.strip()]
+            if cells:
+                blocks.append(" | ".join(cells))
+    return _limit_text("\n\n".join(blocks))
+
+
+def _extract_doc(data: bytes) -> str:
+    antiword = shutil.which("antiword")
+    if antiword is None:
+        raise DocumentExtractionError(
+            "Legacy .doc files require antiword; upload a PDF or DOCX instead."
+        )
+
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".doc") as document_file:
+            document_file.write(data)
+            document_file.flush()
+            result = subprocess.run(
+                [antiword, document_file.name],
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=30,
+            )
+    except subprocess.TimeoutExpired as exc:
+        raise DocumentExtractionError("Reading this DOC file timed out.") from exc
+    except OSError as exc:
+        raise DocumentExtractionError("Could not read this DOC file.") from exc
+
+    if result.returncode != 0:
+        raise DocumentExtractionError("Could not read this DOC file.")
+    return _limit_text(result.stdout)
+
+
+def _extract_xlsx(data: bytes) -> str:
+    try:
+        from openpyxl import load_workbook
+
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            entries = archive.infolist()
+            if (
+                len(entries) > 5_000
+                or sum(info.file_size for info in entries)
+                > MAX_SPREADSHEET_UNCOMPRESSED_BYTES
+            ):
+                raise DocumentExtractionError(
+                    "The XLSX file expands beyond the supported size."
+                )
+        workbook = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+    except DocumentExtractionError:
+        raise
+    except ImportError as exc:
+        raise DocumentParserUnavailableError(
+            "XLSX support is not installed. Install the backend requirements and restart the service."
+        ) from exc
+    except Exception as exc:
+        raise DocumentExtractionError("Could not read this XLSX file.") from exc
+
+    try:
+        rows = []
+        character_count = 0
+        for worksheet in workbook.worksheets:
+            for row in worksheet.iter_rows(values_only=True):
+                cells = [str(value).strip() for value in row if value is not None]
+                if not cells:
+                    continue
+                row_text = " | ".join(cells)
+                character_count += len(row_text)
+                if character_count > MAX_DOCUMENT_TEXT_CHARS:
+                    raise DocumentExtractionError(
+                        f"Extracted document text exceeds {MAX_DOCUMENT_TEXT_CHARS:,} characters."
+                    )
+                rows.append(row_text)
+        return _limit_text("\n\n".join(rows))
+    except DocumentExtractionError:
+        raise
+    except Exception as exc:
+        raise DocumentExtractionError("Could not read this XLSX file.") from exc
+    finally:
+        workbook.close()
+
+
+def _extract_xls(data: bytes) -> str:
+    try:
+        import xlrd
+
+        workbook = xlrd.open_workbook(file_contents=data, on_demand=True)
+    except ImportError as exc:
+        raise DocumentParserUnavailableError(
+            "XLS support is not installed. Install the backend requirements and restart the service."
+        ) from exc
+    except Exception as exc:
+        raise DocumentExtractionError("Could not read this XLS file.") from exc
+
+    try:
+        rows = []
+        character_count = 0
+        for worksheet in workbook.sheets():
+            for row_index in range(worksheet.nrows):
+                cells = [
+                    str(value).strip()
+                    for value in worksheet.row_values(row_index)
+                    if value not in ("", None)
+                ]
+                if not cells:
+                    continue
+                row_text = " | ".join(cells)
+                character_count += len(row_text)
+                if character_count > MAX_DOCUMENT_TEXT_CHARS:
+                    raise DocumentExtractionError(
+                        f"Extracted document text exceeds {MAX_DOCUMENT_TEXT_CHARS:,} characters."
+                    )
+                rows.append(row_text)
+        return _limit_text("\n\n".join(rows))
+    except DocumentExtractionError:
+        raise
+    except Exception as exc:
+        raise DocumentExtractionError("Could not read this XLS file.") from exc
+    finally:
+        workbook.release_resources()
+
+
+def extract_document_text(filename: str, data: bytes) -> str:
+    extension = Path(filename).suffix.lower()
+    if extension == ".pdf":
+        return _extract_pdf(data)
+    if extension == ".docx":
+        return _extract_docx(data)
+    if extension == ".doc":
+        return _extract_doc(data)
+    if extension == ".xlsx":
+        return _extract_xlsx(data)
+    if extension == ".xls":
+        return _extract_xls(data)
+    raise DocumentExtractionError("Only PDF, DOC, DOCX, XLS, and XLSX files are supported.")
+
+
+orchestrator.py:
+import asyncio
+import hashlib
+import logging
+import re
+import traceback
+from datetime import datetime, timedelta, timezone
+from typing import Dict, List, Optional
+from urllib.parse import urlparse
+
+from crawl4ai import AsyncWebCrawler, CrawlerRunConfig, CacheMode
+from sqlalchemy import delete, or_, select, update, func
+
+from app.core.config import settings
+from app.core.database import async_session
+from app.models.chunk import Chunk
+from app.models.generated_question import GeneratedQuestion
+from app.models.org import Org
+from app.models.scraped_page import PageProcessStatus, ScrapedPage
+from app.models.website import Website, WebsiteScrapeStatus
+from app.services.embeddings.factory import get_embedder
+from app.services.embeddings.sparse_embedder import get_sparse_embedder
+from app.services.ingest_pipeline.chunk import process_and_chunk_pages
+from app.services.ingest_pipeline.chunker import (  # noqa: F401
+    estimate_token_count,
+    is_substantive_chunk,
+)
+from app.services.ingest_pipeline.clean_markdown import clean_markdown
+from app.services.ingest_pipeline.discovery import run_discovery
+from app.services.llm_qgen.factory import get_question_generator
+from app.services.llm_qgen.schema import RawChunk
+from app.services.vector_db.factory import get_vector_db
+from app.services.vector_db.schema import SparseVectorData, VectorPoint
+from app.utils.temporal import extract_doc_period
+from app.utils.uuid_generator import generate_chunk_id, generate_doc_id, generate_question_id
+
+logger = logging.getLogger(__name__)
+
+QGEN_MAX_ATTEMPTS = 3
+SYNC_MAX_CONSECUTIVE_FAILURES = 5
+DEFAULT_REFRESH_AFTER_HOURS = 12.0
+PURGE_MAX_FRACTION = 0.5
+
+def get_active_sync_column():
+    provider = (settings.embedding_provider or "").strip().lower()
+    dim = getattr(settings, "embedding_dimension", None) or getattr(settings, "vector_dim", 768)
+
+    if provider == "gemini":
+        col_name = "is_synced_gemini_768" if dim == 768 else "is_synced_gemini"
+    elif "bge" in provider or "bge" in (settings.embedding_model or "").lower():
+        col_name = "is_synced_bge_m3"
+    else:
+        col_name = "is_synced_qdrant"
+
+    return getattr(GeneratedQuestion, col_name, GeneratedQuestion.is_synced_qdrant)
+
+
+def extract_sub_entity_from_url(url: str) -> str:
+    parsed = urlparse(url)
+    if parsed.scheme == "document":
+        return "main"
+
+    segments = [s.strip().lower() for s in parsed.path.split("/") if s.strip()]
+    if segments:
+        candidate = segments[0]
+        ignored = {
+            "pages", "news", "announcement", "announcements", "events", "about",
+            "article", "posts", "home", "index", "admission", "admissions",
+            "academics", "programs", "apply", "contact", "scholarships",
+            "tuition", "student-life", "services",
+        }
+        if candidate not in ignored:
+            return candidate
+    return "main"
+
+
+def classify_academic_level(url: str, text: str = "") -> str:
+    path = urlparse(url).path.lower()
+    lower_text = text[:400].lower()
+
+    if "senior-high" in path or "strand" in lower_text or "shs" in path:
+        return "shs"
+    if "basic-education" in path or "elementary" in path or "junior-high" in path:
+        return "basic_ed"
+    if "undergraduate" in path:
+        return "undergraduate"
+    if re.search(r"(?<!under)graduate", path) or "master" in lower_text or "doctor" in lower_text:
+        return "graduate"
+    return "undergraduate"
+
+
+def classify_document_type(url: str, text: str = "") -> str:
+    path = urlparse(url).path.lower()
+    ephemeral_indicators = [
+        "/news", "/announcement", "/announcements",
+        "/events", "/event", "/blog", "/posts", "/press",
+        "/memorandum", "/advisory", "/bulletin",
+    ]
+    if any(token in path for token in ephemeral_indicators):
+        return "ephemeral"
+
+    if re.search(r"/(?:19|20)\d{2}/", path):
+        return "ephemeral"
+
+    current_year = datetime.now().year
+    for m in re.finditer(r"a\.?y\.?\s*(20\d{2})", text[:600].lower()):
+        if int(m.group(1)) <= current_year - 2:
+            return "ephemeral"
+
+    return "evergreen"
+
+
+def _hash_markdown(markdown: str) -> str:
+    """Strips transient dates and numbers to prevent false change detection."""
+    text = clean_markdown(markdown or "")
+    # Remove dynamic timestamps, visitor numbers, and relative dates
+    text = re.sub(r"\b\d{1,2}:\d{2}(?::\d{2})?\s*(?:am|pm)?\b", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\b(?:today|yesterday|just now|\d+\s+minutes?\s+ago)\b", "", text, flags=re.IGNORECASE)
+    normalized = re.sub(r"\s+", " ", text).strip().lower()
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _apply_scrape_result(page: ScrapedPage, markdown: str) -> bool:
+    now = datetime.now(timezone.utc)
+    new_hash = _hash_markdown(markdown)
+    old_hash = page.content_hash or (
+        _hash_markdown(page.markdown_content) if page.markdown_content else None
+    )
+
+    page.last_scraped_at = now
+    page.content_hash = new_hash
+    page.status = PageProcessStatus.COMPLETED
+
+    if new_hash == old_hash and page.markdown_content:
+        return False
+
+    page.markdown_content = markdown
+    page.content_changed_at = now
+    page.chunked_at = None
+    return True
+
+
+def _register_failure(page: ScrapedPage, max_retries: int) -> None:
+    page.retries += 1
+    if page.retries < max_retries:
+        page.status = PageProcessStatus.PENDING
+    elif page.markdown_content:
+        logger.warning(f"[Scraper] Refresh failed for {page.url}; retaining previous valid version.")
+        page.status = PageProcessStatus.COMPLETED
+    else:
+        page.status = PageProcessStatus.FAILED
+
+
+async def scraper_worker(web_id: int, is_discovery_done: asyncio.Event, max_retries: int = 3) -> int:
+    total_scraped = 0
+    config = CrawlerRunConfig(
+        cache_mode=CacheMode.BYPASS,
+        excluded_tags=["nav", "footer", "header", "script", "style", "noscript", "aside", "form"],
+        exclude_external_links=True,
+        exclude_social_media_links=True,
+        page_timeout=35000,
+        wait_until="domcontentloaded",
+        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+    )
+
+    crawler = AsyncWebCrawler()
+    await crawler.start()
+
+    try:
+        while True:
+            async with async_session() as session:
+                stmt = (
+                    select(ScrapedPage)
+                    .where(
+                        ScrapedPage.web_id == web_id,
+                        ScrapedPage.status == PageProcessStatus.PENDING,
+                        ScrapedPage.retries < max_retries,
+                    )
+                    .limit(10)
+                )
+                res = await session.execute(stmt)
+                pages = res.scalars().all()
+
+                if not pages:
+                    if is_discovery_done.is_set():
+                        break
+                    await asyncio.sleep(1.0)
+                    continue
+
+                for page in pages:
+                    page.status = PageProcessStatus.IN_PROGRESS
+                await session.commit()
+
+                for page in pages:
+                    try:
+                        crawl_result = await crawler.arun(url=page.url, config=config)
+                        if crawl_result.success and crawl_result.markdown:
+                            _apply_scrape_result(page, str(crawl_result.markdown))
+                            total_scraped += 1
+                        else:
+                            _register_failure(page, max_retries)
+                    except Exception as e:
+                        logger.warning(f"[Scraper Error] {page.url}: {e}")
+                        _register_failure(page, max_retries)
+
+                    await asyncio.sleep(0.5)
+
+                await session.commit()
+    finally:
+        await crawler.close()
+
+    return total_scraped
+
+
+async def _has_pending_chunks_to_create(web_id: int) -> bool:
+    async with async_session() as session:
+        count = await session.scalar(
+            select(func.count(ScrapedPage.id)).where(
+                ScrapedPage.web_id == web_id,
+                ScrapedPage.status == PageProcessStatus.COMPLETED,
+                ScrapedPage.chunked_at.is_(None),
+                ScrapedPage.markdown_content.is_not(None),
+            )
+        )
+        return (count or 0) > 0
+
+
+async def chunker_worker(web_id: int, is_scraping_done: asyncio.Event) -> int:
+    total_chunks = 0
+    while True:
+        try:
+            created = await process_and_chunk_pages(web_id=web_id, batch_size=20)
+            if created > 0:
+                total_chunks += created
+                continue
+
+            if is_scraping_done.is_set():
+                if not await _has_pending_chunks_to_create(web_id):
+                    break
+
+            await asyncio.sleep(1.5)
+        except Exception as e:
+            logger.error(f"[Chunker Worker Exception]: {e}")
+            traceback.print_exc()
+            await asyncio.sleep(2.0)
+
+    return total_chunks
+
+
+async def _has_pending_qgen_chunks(web_id: int) -> bool:
+    async with async_session() as session:
+        count = await session.scalar(
+            select(func.count(Chunk.id))
+            .join(ScrapedPage, Chunk.page_id == ScrapedPage.id)
+            .where(
+                ScrapedPage.web_id == web_id,
+                Chunk.has_qgen.is_(False),
+                Chunk.qgen_attempts < QGEN_MAX_ATTEMPTS,
+            )
+        )
+        return (count or 0) > 0
+
+
+async def qgen_worker(web_id: int, is_chunking_done: asyncio.Event) -> int:
+    total_questions = 0
+    generator = get_question_generator()
+    CHUNK_BATCH_SIZE = 10
+
+    while True:
+        try:
+            async with async_session() as session:
+                stmt = (
+                    select(
+                        Chunk.id,
+                        Chunk.content,
+                        Chunk.heading_path,
+                        ScrapedPage.org_id,
+                        ScrapedPage.url.label("page_url"),
+                    )
+                    .join(ScrapedPage, Chunk.page_id == ScrapedPage.id)
+                    .where(
+                        ScrapedPage.web_id == web_id,
+                        Chunk.has_qgen.is_(False),
+                        Chunk.qgen_attempts < QGEN_MAX_ATTEMPTS,
+                    )
+                    .order_by(Chunk.id)
+                    .limit(CHUNK_BATCH_SIZE)
+                )
+                rows = (await session.execute(stmt)).all()
+
+                if not rows:
+                    if is_chunking_done.is_set():
+                        if not await _has_pending_qgen_chunks(web_id):
+                            break
+                    await asyncio.sleep(2.0)
+                    continue
+
+                chunk_ids = [r.id for r in rows]
+                payloads: List[RawChunk] = []
+                for r in rows:
+                    tenant_str = str(r.org_id)
+                    payloads.append(
+                        RawChunk(
+                            id=str(r.id),
+                            doc_id=generate_doc_id(tenant_id=tenant_str, source_url=r.page_url),
+                            source_url=r.page_url,
+                            title=r.heading_path or r.page_url.split("/")[-1] or "Homepage",
+                            content=r.content,
+                            tags=[tenant_str],
+                        )
+                    )
+
+                try:
+                    generated_map = await generator.generate_questions_batch(payloads)
+
+                    new_questions: List[GeneratedQuestion] = []
+                    done_ids: List[int] = []
+                    for p in payloads:
+                        if p.id not in generated_map:
+                            continue
+                        done_ids.append(int(p.id))
+                        for item in generated_map[p.id]:
+                            q_text = (item.content if hasattr(item, "content") else str(item)).strip()
+                            if q_text:
+                                new_questions.append(
+                                    GeneratedQuestion(
+                                        chunk_id=int(p.id),
+                                        question=q_text,
+                                        is_synced_qdrant=False,
+                                    )
+                                )
+                                total_questions += 1
+
+                    if new_questions:
+                        session.add_all(new_questions)
+                    if done_ids:
+                        await session.execute(
+                            update(Chunk).where(Chunk.id.in_(done_ids)).values(has_qgen=True)
+                        )
+                    missed = [cid for cid in chunk_ids if cid not in done_ids]
+                    if missed:
+                        await session.execute(
+                            update(Chunk)
+                            .where(Chunk.id.in_(missed))
+                            .values(qgen_attempts=Chunk.qgen_attempts + 1)
+                        )
+                    await session.commit()
+
+                except Exception as e:
+                    await session.rollback()
+                    logger.error(f"[QGen Batch Error] chunks={chunk_ids}: {e}")
+                    async with async_session() as err_sess:
+                        await err_sess.execute(
+                            update(Chunk)
+                            .where(Chunk.id.in_(chunk_ids))
+                            .values(qgen_attempts=Chunk.qgen_attempts + 1)
+                        )
+                        await err_sess.commit()
+
+            await asyncio.sleep(2.0)
+        except Exception as outer_e:
+            logger.error(f"[QGen Worker Exception]: {outer_e}")
+            traceback.print_exc()
+            await asyncio.sleep(3.0)
+
+    return total_questions
+
+
+async def _has_pending_sync_questions(web_id: int) -> bool:
+    sync_col = get_active_sync_column()
+    async with async_session() as session:
+        count = await session.scalar(
+            select(func.count(GeneratedQuestion.id))
+            .join(Chunk, GeneratedQuestion.chunk_id == Chunk.id)
+            .join(ScrapedPage, Chunk.page_id == ScrapedPage.id)
+            .where(
+                ScrapedPage.web_id == web_id,
+                sync_col.is_(False),
+            )
+        )
+        return (count or 0) > 0
+
+
+async def qdrant_sync_worker(org_id: int, web_id: int, is_qgen_done: asyncio.Event) -> int:
+    total_synced = 0
+    vector_db = get_vector_db()
+    embedder = get_embedder()
+    sparse_embedder = get_sparse_embedder()
+    target_collection = settings.resolved_collection_name
+    sync_col = get_active_sync_column()
+
+    await vector_db.create_collection_if_not_exists(
+        collection_name=target_collection,
+        dense_vector_size=embedder.dimension,
+        distance="Cosine",
+        enable_quantization=settings.quantization_enabled,
+    )
+
+    tenant_key = str(org_id)
+    EMBED_DB_BATCH_SIZE = 100
+    consecutive_failures = 0
+
+    while True:
+        try:
+            async with async_session() as session:
+                stmt = (
+                    select(
+                        GeneratedQuestion.id.label("q_id"),
+                        GeneratedQuestion.question.label("q_text"),
+                        Chunk.id.label("chunk_id"),
+                        Chunk.content.label("chunk_content"),
+                        Chunk.chunk_index.label("chunk_index"),
+                        Chunk.section_id.label("section_id"),
+                        Chunk.heading_path.label("heading_path"),
+                        Chunk.part_index.label("part_index"),
+                        Chunk.part_total.label("part_total"),
+                        ScrapedPage.id.label("page_id"),
+                        ScrapedPage.url.label("page_url"),
+                        ScrapedPage.doc_period.label("page_doc_period"),
+                        ScrapedPage.content_changed_at.label("page_updated_at"),
+                    )
+                    .join(Chunk, GeneratedQuestion.chunk_id == Chunk.id)
+                    .join(ScrapedPage, Chunk.page_id == ScrapedPage.id)
+                    .where(
+                        ScrapedPage.web_id == web_id,
+                        sync_col.is_(False),
+                    )
+                    .order_by(GeneratedQuestion.id)
+                    .limit(EMBED_DB_BATCH_SIZE)
+                )
+                rows = (await session.execute(stmt)).all()
+
+                if not rows:
+                    if is_qgen_done.is_set():
+                        if not await _has_pending_sync_questions(web_id):
+                            break
+                    await asyncio.sleep(2.0)
+                    continue
+
+                try:
+                    embedded_results = await embedder.embed(
+                        [r.q_text for r in rows], task_type="RETRIEVAL_DOCUMENT"
+                    )
+                    if len(embedded_results) != len(rows):
+                        raise ValueError(
+                            f"Embedding mismatch: expected {len(rows)}, got {len(embedded_results)}"
+                        )
+
+                    chunk_sparse_cache: Dict[int, SparseVectorData] = {}
+                    points_to_upsert: List[VectorPoint] = []
+                    synced_q_ids: List[int] = []
+
+                    for row, emb_res in zip(rows, embedded_results):
+                        doc_type = classify_document_type(row.page_url, row.chunk_content)
+                        campus = extract_sub_entity_from_url(row.page_url)
+                        academic_level = classify_academic_level(row.page_url, row.chunk_content)
+                        doc_period = extract_doc_period(
+                            row.chunk_content, url=row.page_url, heading=row.heading_path or ""
+                        ) or row.page_doc_period
+
+                        if row.chunk_id not in chunk_sparse_cache:
+                            sparse_data = await sparse_embedder.embed_text(row.chunk_content)
+                            if not sparse_data.indices:
+                                sparse_data = SparseVectorData(indices=[0], values=[0.0])
+                            chunk_sparse_cache[row.chunk_id] = sparse_data
+                        sparse_data = chunk_sparse_cache[row.chunk_id]
+
+                        chunk_uuid = generate_chunk_id(
+                            tenant_id=tenant_key,
+                            source_url=row.page_url,
+                            chunk_index=row.chunk_id,
+                            content=row.chunk_content,
+                        )
+                        point_uuid = generate_question_id(chunk_id=chunk_uuid, question=row.q_text)
+
+                        points_to_upsert.append(
+                            VectorPoint(
+                                id=point_uuid,
+                                vector={
+                                    "question_dense": emb_res.values,
+                                    "chunk_sparse": sparse_data,
+                                },
+                                payload={
+                                    "group_id": tenant_key,
+                                    "web_id": web_id,
+                                    "parent_chunk_id": chunk_uuid,
+                                    "question_text": row.q_text,
+                                    "chunk_text": row.chunk_content,
+                                    "source_url": row.page_url,
+                                    "page_id": row.page_id,
+                                    "chunk_id": row.chunk_id,
+                                    "chunk_index": row.chunk_index,
+                                    "section_id": row.section_id,
+                                    "heading_path": row.heading_path,
+                                    "part_index": row.part_index,
+                                    "part_total": row.part_total,
+                                    "doc_type": doc_type,
+                                    "campus": campus,
+                                    "academic_level": academic_level,
+                                    "doc_period": doc_period,
+                                    "page_updated_at": (
+                                        row.page_updated_at.isoformat()
+                                        if row.page_updated_at else None
+                                    ),
+                                },
+                            )
+                        )
+                        synced_q_ids.append(row.q_id)
+
+                    await vector_db.upsert_points(
+                        collection_name=target_collection, points=points_to_upsert
+                    )
+
+                    await session.execute(
+                        update(GeneratedQuestion)
+                        .where(GeneratedQuestion.id.in_(synced_q_ids))
+                        .values({
+                            sync_col.key: True,
+                            GeneratedQuestion.is_synced_qdrant: True,
+                        })
+                    )
+                    await session.commit()
+                    total_synced += len(points_to_upsert)
+                    consecutive_failures = 0
+
+                    await asyncio.sleep(0.3)
+
+                except Exception as e:
+                    await session.rollback()
+                    consecutive_failures += 1
+                    err_msg = str(e)
+                    logger.error(f"[Qdrant Sync Error] attempt {consecutive_failures}: {err_msg[:200]}")
+                    traceback.print_exc()
+
+                    if consecutive_failures >= SYNC_MAX_CONSECUTIVE_FAILURES:
+                        raise RuntimeError(
+                            f"Qdrant sync failed after {consecutive_failures} consecutive attempts."
+                        ) from e
+                    if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg:
+                        logger.warning("[Qdrant Sync Rate Limit] Sleeping 15s...")
+                        await asyncio.sleep(15.0)
+                    else:
+                        await asyncio.sleep(3.0)
+
+        except Exception as loop_e:
+            logger.error(f"[Qdrant Sync Worker Loop Exception]: {loop_e}")
+            traceback.print_exc()
+            if consecutive_failures >= SYNC_MAX_CONSECUTIVE_FAILURES:
+                raise RuntimeError(
+                    f"Qdrant sync worker stopped after {consecutive_failures} consecutive failures."
+                ) from loop_e
+            consecutive_failures += 1
+            if consecutive_failures >= SYNC_MAX_CONSECUTIVE_FAILURES:
+                raise RuntimeError(
+                    f"Qdrant sync worker stopped after {consecutive_failures} consecutive failures."
+                ) from loop_e
+            await asyncio.sleep(5.0)
+
+    return total_synced
+
+
+async def ingest_uploaded_document(page_id: int) -> None:
+    async with async_session() as session:
+        page = await session.get(ScrapedPage, page_id)
+        if page is None:
+            raise ValueError(f"Uploaded document page {page_id} not found")
+        website = await session.get(Website, page.web_id)
+        if website is None:
+            raise ValueError(f"Uploaded document website {page.web_id} not found")
+
+        org_id = page.org_id
+        web_id = page.web_id
+        page.status = PageProcessStatus.COMPLETED
+        page.last_scraped_at = datetime.now(timezone.utc)
+        await session.commit()
+
+    vector_sync_started = False
+    try:
+        created_chunks = 0
+        while True:
+            created = await process_and_chunk_pages(web_id=web_id, org_id=org_id)
+            created_chunks += created
+            if created == 0:
+                break
+        if created_chunks == 0:
+            raise ValueError("The uploaded document did not contain any indexable text.")
+
+        chunking_done = asyncio.Event()
+        chunking_done.set()
+        await qgen_worker(web_id=web_id, is_chunking_done=chunking_done)
+
+        async with async_session() as session:
+            chunk_count = await session.scalar(
+                select(func.count(Chunk.id))
+                .join(ScrapedPage, Chunk.page_id == ScrapedPage.id)
+                .where(ScrapedPage.id == page_id)
+            )
+            ungenerated_chunk_count = await session.scalar(
+                select(func.count(Chunk.id))
+                .join(ScrapedPage, Chunk.page_id == ScrapedPage.id)
+                .where(
+                    ScrapedPage.id == page_id,
+                    Chunk.has_qgen.is_(False),
+                )
+            )
+            question_count = await session.scalar(
+                select(func.count(GeneratedQuestion.id))
+                .join(Chunk, GeneratedQuestion.chunk_id == Chunk.id)
+                .where(Chunk.page_id == page_id)
+            )
+            questioned_chunk_count = await session.scalar(
+                select(func.count(func.distinct(GeneratedQuestion.chunk_id)))
+                .join(Chunk, GeneratedQuestion.chunk_id == Chunk.id)
+                .where(Chunk.page_id == page_id)
+            )
+
+        if (
+            not chunk_count
+            or ungenerated_chunk_count
+            or not question_count
+            or questioned_chunk_count != chunk_count
+        ):
+            raise RuntimeError("Question generation did not complete for every document chunk.")
+
+        qgen_done = asyncio.Event()
+        qgen_done.set()
+        vector_sync_started = True
+        synced_points = await qdrant_sync_worker(
+            org_id=org_id,
+            web_id=web_id,
+            is_qgen_done=qgen_done,
+        )
+
+        sync_col = get_active_sync_column()
+        async with async_session() as session:
+            total_questions = await session.scalar(
+                select(func.count(GeneratedQuestion.id))
+                .join(Chunk, GeneratedQuestion.chunk_id == Chunk.id)
+                .where(Chunk.page_id == page_id)
+            )
+            synced_questions = await session.scalar(
+                select(func.count(GeneratedQuestion.id))
+                .join(Chunk, GeneratedQuestion.chunk_id == Chunk.id)
+                .where(Chunk.page_id == page_id, sync_col.is_(True))
+            )
+
+        if not synced_points or synced_questions != total_questions:
+            raise RuntimeError(
+                "Not all generated document questions were confirmed in the vector database."
+            )
+
+        async with async_session() as session:
+            website = await session.get(Website, web_id)
+            if website is not None:
+                website.status = WebsiteScrapeStatus.COMPLETED
+                website.error_message = None
+                await session.commit()
+        try:
+            await _bump_content_version(org_id)
+        except Exception:
+            logger.exception("Failed to bump content_version for org %s", org_id)
+    except Exception as exc:
+        logger.exception("Uploaded document ingestion failed for page %s", page_id)
+        cleanup_error = None
+        if vector_sync_started:
+            try:
+                vector_db = get_vector_db()
+                await vector_db.delete_points(
+                    collection_name=settings.resolved_collection_name,
+                    filters={"group_id": str(org_id), "web_id": web_id},
+                )
+            except Exception as cleanup_exc:
+                cleanup_error = cleanup_exc
+                logger.exception(
+                    "Failed to remove partial document vectors for page %s", page_id
+                )
+
+        async with async_session() as session:
+            page = await session.get(ScrapedPage, page_id)
+            if page is not None:
+                page.status = PageProcessStatus.FAILED
+            website = await session.get(Website, web_id)
+            if website is not None:
+                website.status = WebsiteScrapeStatus.FAILED
+                error_message = f"{type(exc).__name__}: {exc}"
+                if cleanup_error is not None:
+                    error_message += f"; vector cleanup failed: {cleanup_error}"
+                website.error_message = error_message[:2000]
+            await session.commit()
+        raise
+
+
+async def reconcile_stale_points(org_id: int, web_id: int) -> int:
+    """Removes Qdrant points of re-chunked pages whose chunk_id no longer exists in SQL."""
+    async with async_session() as session:
+        page_ids = list(
+            (
+                await session.execute(
+                    select(ScrapedPage.id).where(
+                        ScrapedPage.web_id == web_id,
+                        ScrapedPage.qdrant_cleanup_pending.is_(True),
+                    )
+                )
+            ).scalars().all()
+        )
+    if not page_ids:
+        return 0
+
+    vector_db = get_vector_db()
+    try:
+        for page_id in page_ids:
+            async with async_session() as session:
+                live_chunk_ids = list(
+                    (
+                        await session.execute(select(Chunk.id).where(Chunk.page_id == page_id))
+                    ).scalars().all()
+                )
+
+            # Purge any points associated with this page that do not match active chunk IDs
+            await vector_db.delete_points(
+                collection_name=settings.resolved_collection_name,
+                filters={"group_id": str(org_id), "page_id": page_id},
+                must_not={"chunk_id": live_chunk_ids} if live_chunk_ids else None,
+            )
+
+            async with async_session() as session:
+                await session.execute(
+                    update(ScrapedPage)
+                    .where(ScrapedPage.id == page_id)
+                    .values(qdrant_cleanup_pending=False)
+                )
+                await session.commit()
+    finally:
+        await vector_db.close()
+
+    logger.info(f"[Reconcile] Swept stale points for {len(page_ids)} pages (web {web_id}).")
+    return len(page_ids)
+
+
+async def purge_missing_pages(
+    org_id: int, web_id: int, run_started_at: datetime, discovered_count: int
+) -> int:
+    """Removes pages (SQL rows + Qdrant points) that were dropped from the site."""
+    async with async_session() as session:
+        total = await session.scalar(
+            select(func.count(ScrapedPage.id)).where(ScrapedPage.web_id == web_id)
+        ) or 0
+        stale_ids = list(
+            (
+                await session.execute(
+                    select(ScrapedPage.id).where(
+                        ScrapedPage.web_id == web_id,
+                        or_(
+                            ScrapedPage.last_seen_at.is_(None),
+                            ScrapedPage.last_seen_at < run_started_at,
+                        ),
+                    )
+                )
+            ).scalars().all()
+        )
+
+    if not stale_ids:
+        return 0
+    if discovered_count <= 0 or len(stale_ids) > PURGE_MAX_FRACTION * max(total, 1):
+        logger.warning(
+            f"[Purge Guard] Skipped: {len(stale_ids)}/{total} missing, {discovered_count} discovered."
+        )
+        return 0
+
+    vector_db = get_vector_db()
+    try:
+        for page_id in stale_ids:
+            await vector_db.delete_points(
+                collection_name=settings.resolved_collection_name,
+                filters={"group_id": str(org_id), "page_id": page_id},
+            )
+    finally:
+        await vector_db.close()
+
+    async with async_session() as session:
+        await session.execute(delete(ScrapedPage).where(ScrapedPage.id.in_(stale_ids)))
+        await session.commit()
+
+    logger.info(f"[Purge] Purged {len(stale_ids)} pages no longer present on web {web_id}.")
+    return len(stale_ids)
+
+
+async def _bump_content_version(org_id: int) -> None:
+    async with async_session() as session:
+        await session.execute(
+            update(Org).where(Org.id == org_id).values(content_version=Org.content_version + 1)
+        )
+        await session.commit()
+
+
+async def run_full_pipeline(
+    website_id: int,
+    refresh_after_hours: Optional[float] = DEFAULT_REFRESH_AFTER_HOURS,
+    force_refresh: bool = False,
+) -> dict:
+    run_started_at = datetime.now(timezone.utc)
+
+    async with async_session() as session:
+        website = await session.get(Website, website_id)
+        if not website:
+            raise ValueError(f"Website with id {website_id} not found")
+
+        website.status = WebsiteScrapeStatus.IN_PROGRESS
+        website.error_message = None
+
+        await session.execute(
+            update(ScrapedPage)
+            .where(
+                ScrapedPage.web_id == website_id,
+                ScrapedPage.status == PageProcessStatus.IN_PROGRESS,
+            )
+            .values(status=PageProcessStatus.PENDING)
+        )
+
+        if force_refresh:
+            await session.execute(
+                update(ScrapedPage)
+                .where(ScrapedPage.web_id == website_id)
+                .values(status=PageProcessStatus.PENDING, retries=0)
+            )
+        elif refresh_after_hours is not None:
+            cutoff = run_started_at - timedelta(hours=refresh_after_hours)
+            await session.execute(
+                update(ScrapedPage)
+                .where(
+                    ScrapedPage.web_id == website_id,
+                    ScrapedPage.status.in_([PageProcessStatus.COMPLETED, PageProcessStatus.FAILED]),
+                    or_(
+                        ScrapedPage.last_scraped_at.is_(None),
+                        ScrapedPage.last_scraped_at < cutoff,
+                    ),
+                )
+                .values(status=PageProcessStatus.PENDING, retries=0)
+            )
+        await session.commit()
+
+        org_id = website.org_id
+        base_url = website.url
+
+    is_discovery_done = asyncio.Event()
+    is_scraping_done = asyncio.Event()
+    is_chunking_done = asyncio.Event()
+    is_qgen_done = asyncio.Event()
+
+    async def _discovery_task():
+        try:
+            return await run_discovery(org_id=org_id, web_id=website_id, base_url=base_url)
+        except Exception as e:
+            logger.error(f"Discovery stage failed: {e}")
+            raise
+        finally:
+            is_discovery_done.set()
+
+    async def _scraper_task():
+        try:
+            return await scraper_worker(web_id=website_id, is_discovery_done=is_discovery_done)
+        except Exception as e:
+            logger.error(f"Scraper stage failed: {e}")
+            raise
+        finally:
+            is_scraping_done.set()
+
+    async def _chunker_task():
+        try:
+            return await chunker_worker(web_id=website_id, is_scraping_done=is_scraping_done)
+        except Exception as e:
+            logger.error(f"Chunker stage failed: {e}")
+            raise
+        finally:
+            is_chunking_done.set()
+
+    async def _qgen_task():
+        try:
+            return await qgen_worker(web_id=website_id, is_chunking_done=is_chunking_done)
+        except Exception as e:
+            logger.error(f"QGen stage failed: {e}")
+            raise
+        finally:
+            is_qgen_done.set()
+
+    async def _sync_task():
+        try:
+            return await qdrant_sync_worker(org_id=org_id, web_id=website_id, is_qgen_done=is_qgen_done)
+        except Exception as e:
+            logger.error(f"Qdrant Sync stage failed: {e}")
+            raise
+
+    results = await asyncio.gather(
+        _discovery_task(),
+        _scraper_task(),
+        _chunker_task(),
+        _qgen_task(),
+        _sync_task(),
+        return_exceptions=True,
+    )
+
+    errors = [r for r in results if isinstance(r, BaseException)]
+
+    def _num(v) -> int:
+        return v if isinstance(v, int) else 0
+
+    cleaned_pages = purged_pages = 0
+    if not errors:
+        try:
+            cleaned_pages = await reconcile_stale_points(org_id, website_id)
+            purged_pages = await purge_missing_pages(
+                org_id, website_id, run_started_at, discovered_count=_num(results[0])
+            )
+        except Exception as e:
+            logger.error(f"Reconciliation error for website {website_id}: {e}")
+            traceback.print_exc()
+            errors.append(e)
+
+    if _num(results[2]) > 0 or cleaned_pages > 0 or purged_pages > 0:
+        try:
+            await _bump_content_version(org_id)
+        except Exception as e:
+            logger.error(f"Failed to bump content_version for org {org_id}: {e}")
+
+    async with async_session() as session:
+        website = await session.get(Website, website_id)
+        if website:
+            if errors:
+                website.status = WebsiteScrapeStatus.FAILED
+                err_strings = [f"{type(e).__name__}: {e}" for e in errors]
+                website.error_message = "; ".join(err_strings)[:2000]
+                logger.error(f"Pipeline failed for website {website_id}: {website.error_message}")
+            else:
+                website.status = WebsiteScrapeStatus.COMPLETED
+                website.error_message = None
+            await session.commit()
+
+    if errors:
+        raise errors[0]
+
+    discovered_urls, scraped_pages, created_chunks, generated_questions, synced_qdrant_points = results
+    return {
+        "discovered_urls": discovered_urls,
+        "scraped_pages": scraped_pages,
+        "created_chunks": created_chunks,
+        "generated_questions": generated_questions,
+        "synced_qdrant_points": synced_qdrant_points,
+        "swept_pages": cleaned_pages,
+        "purged_pages": purged_pages,
+    }
+
+schema.py:
+from typing import List, Optional
+from datetime import datetime
+from pydantic import BaseModel, HttpUrl, Field
+from app.models.scraped_page import PageProcessStatus
+
+
+class ScrapePageRequest(BaseModel):
+    """Input payload to trigger a scrape job."""
+    org_id: int
+    web_id: int
+    url: HttpUrl
+
+
+class ScrapeBatchRequest(BaseModel):
+    """Input payload to scrape multiple URLs under one tenant."""
+    org_id: int
+    web_id: int
+    urls: List[HttpUrl] = Field(..., min_length=1)
+
+
+class ScrapedPageResult(BaseModel):
+    """Data in transit returned after an operation or passed to downstream workers."""
+    id: int
+    org_id: int
+    web_id: int
+    url: str
+    status: PageProcessStatus
+    markdown_content: Optional[str] = None
+    retries: int = 0
+    chunked_at: Optional[datetime] = None
+    error: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+scraper.py:
+import asyncio
+from typing import Optional
+from crawl4ai import AsyncWebCrawler, CrawlerRunConfig, CacheMode
+from sqlalchemy import select
+from app.core.database import async_session_factory
+from app.models.scraped_page import ScrapedPage, PageProcessStatus
+
+CRAWL_CONFIG = CrawlerRunConfig(
+    cache_mode=CacheMode.BYPASS,
+    excluded_tags=["nav", "footer", "header", "script", "style", "noscript"],
+)
+
+
+async def scrape_single_page(
+    page_id: int,
+    crawler: Optional[AsyncWebCrawler] = None,
+) -> bool:
+    """
+    1. Marks record IN_PROGRESS.
+    2. Runs crawl4ai.
+    3. Checkpoints RAW markdown directly to DB as COMPLETED, or marks FAILED on error.
+    """
+    # 1. Reserve row
+    async with async_session_factory() as session:
+        page = await session.get(ScrapedPage, page_id)
+        if not page:
+            raise ValueError(f"ScrapedPage ID {page_id} does not exist.")
+
+        page.status = PageProcessStatus.IN_PROGRESS
+        await session.commit()
+        target_url = page.url
+
+    # 2. Scrape
+    async def _execute_scrape(active_crawler: AsyncWebCrawler) -> tuple[bool, Optional[str]]:
+        try:
+            result = await active_crawler.arun(url=target_url, config=CRAWL_CONFIG)
+            if result.success and result.markdown:
+                return True, result.markdown
+        except Exception:
+            pass
+        return False, None
+
+    if crawler:
+        success, raw_markdown = await _execute_scrape(crawler)
+    else:
+        async with AsyncWebCrawler() as local_crawler:
+            success, raw_markdown = await _execute_scrape(local_crawler)
+
+    # 3. Checkpoint raw markdown
+    async with async_session_factory() as session:
+        page = await session.get(ScrapedPage, page_id)
+        if page:
+            if success and raw_markdown:
+                page.markdown_content = raw_markdown
+                page.status = PageProcessStatus.COMPLETED
+            else:
+                page.status = PageProcessStatus.FAILED
+                page.retries += 1
+            await session.commit()
+
+    return bool(success and raw_markdown)
+
+
+async def scrape_pending_pages(
+    org_id: int,
+    web_id: int,
+    batch_size: int = 50,
+    concurrency_limit: int = 5,
+) -> int:
+    """Finds PENDING pages and scrapes them concurrently using one shared browser context."""
+    async with async_session_factory() as session:
+        stmt = (
+            select(ScrapedPage.id)
+            .where(
+                ScrapedPage.org_id == org_id,
+                ScrapedPage.web_id == web_id,
+                ScrapedPage.status == PageProcessStatus.PENDING,
+            )
+            .limit(batch_size)
+        )
+        res = await session.execute(stmt)
+        page_ids = list(res.scalars().all())
+
+    if not page_ids:
+        return 0
+
+    semaphore = asyncio.Semaphore(concurrency_limit)
+
+    async with AsyncWebCrawler() as shared_crawler:
+        async def _bounded_scrape(pid: int):
+            async with semaphore:
+                return await scrape_single_page(page_id=pid, crawler=shared_crawler)
+
+        tasks = [_bounded_scrape(pid) for pid in page_ids]
+        await asyncio.gather(*tasks)
+
+    return len(page_ids)
+

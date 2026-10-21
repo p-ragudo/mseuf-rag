@@ -30,3 +30,8 @@ openai
 redis
 redisvl
 fastembed
+
+# --- RAG Evaluation Metrics ----
+ragas
+langchain-google-genai
+pandas

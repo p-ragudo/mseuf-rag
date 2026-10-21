@@ -1,4 +1,4 @@
-from app/services/semantic_cache/
+from backend/app/services/semantic_cache/
 
 base.py:
 from abc import ABC, abstractmethod
@@ -35,10 +35,6 @@ class BaseSemanticCache(ABC):
         """Clears all records in the cache index."""
         pass
 
-
-
-
-
 factory.py:
 from .base import BaseSemanticCache
 from .redis_cache import RedisSemanticCache
@@ -66,7 +62,12 @@ def get_semantic_cache() -> BaseSemanticCache:
         if not ttl:
             raise ValueError("SEMANTIC_CACHE_TTL_SECONDS environment variable is required.")
 
-        index_name = settings.semantic_cache_index_name
+
+        index_name = (
+            settings.semantic_cache_index_name
+            if settings.semantic_cache_index_name_use_prod
+            else settings.semantic_cache_index_name_not_prod
+        )
         if not index_name:
             raise ValueError("SEMANTIC_CACHE_INDEX_NAME environment variable is required.")
 
@@ -89,9 +90,37 @@ def get_semantic_cache() -> BaseSemanticCache:
     else:
         raise ValueError(f"Unknown SEMANTIC_CACHE_PROVIDER: '{provider}'")
 
+in_memory_cache.py:
+from typing import Dict, Optional
+from .base import BaseSemanticCache
+from .schemas import CacheEntry, CacheMetadata
 
 
+class InMemorySemanticCache(BaseSemanticCache):
+    """Zero-dependency cache for fast unit tests without needing a running Redis server."""
 
+    def __init__(self):
+        self._store: Dict[str, CacheEntry] = {}
+
+    async def get(self, query: str) -> Optional[CacheEntry]:
+        normalized = query.strip().lower()
+        return self._store.get(normalized)
+
+    async def set(
+        self,
+        query: str,
+        response: str,
+        metadata: Optional[CacheMetadata] = None,
+    ) -> None:
+        normalized = query.strip().lower()
+        self._store[normalized] = CacheEntry(
+            query=query,
+            response=response,
+            metadata=metadata or CacheMetadata(),
+        )
+
+    async def clear(self) -> None:
+        self._store.clear()
 
 redis_cache.py:
 from typing import List, Optional
@@ -203,10 +232,6 @@ class RedisSemanticCache(BaseSemanticCache):
         except Exception as e:
             print(f"[Redis Cache] Clear exception: {e}")
 
-
-
-
-
 schemas.py:
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -237,3 +262,4 @@ class ChatQueryResponse(BaseModel):
     answer: str
     is_cached: bool = False
     source_chunks: List[str] = Field(default_factory=list)
+

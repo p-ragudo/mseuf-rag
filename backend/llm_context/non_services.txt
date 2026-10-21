@@ -20,6 +20,7 @@ from typing import Optional
 from pydantic import HttpUrl, computed_field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+
 class Settings(BaseSettings):
     # App & Server Configuration
     development: bool = True
@@ -43,22 +44,30 @@ class Settings(BaseSettings):
     # --- Database ---
     DATABASE_URL: str | None = None
     DATABASE_URL_NOT_PROD: str | None = None
-    DATABASE_URL_USE_PROD: bool
-    
+    DATABASE_URL_USE_PROD: bool = False
+
+    @computed_field
+    @property
+    def resolved_database_url(self) -> str:
+        if self.DATABASE_URL_USE_PROD:
+            return self.DATABASE_URL or ""
+        return self.DATABASE_URL_NOT_PROD or self.DATABASE_URL or ""
+
     # --- Auth ---
     SECRET_KEY: str
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
-    
+
     @property
     def SERVER_BIND_HOST(self) -> str:
         """Strips protocol prefixes for Uvicorn binding."""
         return (
-            self.HOST
+            self.host
             .replace("http://", "")
             .replace("https://", "")
             .split(":")[0]
             .split("/")[0]
         )
+
     # Test Qdrant
     test_qdrant_api_key: Optional[str] = None
     test_qdrant_cluster_endpoint: Optional[str] = None
@@ -70,7 +79,7 @@ class Settings(BaseSettings):
 
     collection_name: str
     collection_name_not_prod: str
-    collection_name_use_prod: bool
+    collection_name_use_prod: bool = False
 
     @computed_field
     @property
@@ -119,11 +128,16 @@ class Settings(BaseSettings):
     semantic_cache_ttl_seconds: int = 604800
     semantic_cache_index_name: str = "thesis_semantic_cache"
     semantic_cache_index_name_not_prod: str
-    semantic_cache_index_name_use_prod: bool
+    semantic_cache_index_name_use_prod: bool = False
 
-    database_url: str
-    database_url_not_prod: str
-    database_url_use_prod: bool
+    @computed_field
+    @property
+    def resolved_semantic_cache_name(self) -> str:
+        return (
+            self.semantic_cache_index_name
+            if self.semantic_cache_index_name_use_prod
+            else self.semantic_cache_index_name_not_prod
+        )
 
     # Question Generation Script Settings
     script_qgen_use_real_data: bool = False
@@ -131,22 +145,31 @@ class Settings(BaseSettings):
 
     telegram_bot_token: str
     telegram_bot_fastapi_key: str
-    telegram_bot_token_not_prod: Optional[str]
+    telegram_bot_token_not_prod: Optional[str] = None
     telegram_bot_token_fastapi_key_not_prod: Optional[str] = ""
-    telegram_bot_use_prod: bool
+    telegram_bot_use_prod: bool = False
+
+    @computed_field
+    @property
+    def resolved_telegram_token(self) -> Optional[str]:
+        return (
+            self.telegram_bot_token
+            if self.telegram_bot_use_prod
+            else self.telegram_bot_token_not_prod
+        )
 
     model_config = SettingsConfigDict(
-        env_file=None,
+        env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
-        case_sensitive=False,  # Reads uppercase .env keys into lowercase attributes
+        case_sensitive=False,
     )
 
     # Reranker Settings
     reranker_provider: str = "fastembed"
     reranker_model_name: str = "Xenova/ms-marco-MiniLM-L-12-v2"
     reranker_top_k: int = 5
-    reranker_score_threshold: Optional[float] = None  # e.g., 0.05 or 0.1 for out-of-scope gating
+    reranker_score_threshold: Optional[float] = None
     reranker_batch_size: int = 16
     reranker_max_length: int = 512
 
@@ -156,7 +179,6 @@ class Settings(BaseSettings):
     @computed_field
     @property
     def active_qdrant_endpoint(self) -> Optional[str]:
-        """Dynamically returns test or production endpoint based on USE_TEST_QDRANT_DB."""
         return (
             self.test_qdrant_cluster_endpoint
             if self.use_test_qdrant_db
@@ -166,7 +188,6 @@ class Settings(BaseSettings):
     @computed_field
     @property
     def active_qdrant_api_key(self) -> Optional[str]:
-        """Dynamically returns test or production API key based on USE_TEST_QDRANT_DB."""
         return (
             self.test_qdrant_api_key
             if self.use_test_qdrant_db
@@ -176,11 +197,12 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
-    """Cached singleton instance of the settings."""
     return Settings()
 
 
 settings = get_settings()
+
+
 
 
 
@@ -195,7 +217,9 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sess
 from sqlalchemy.orm import DeclarativeBase
 from app.core.config import settings
 
-engine = create_async_engine(settings.DATABASE_URL, echo=False)
+DATABSE_URL = settings.resolved_database_url
+
+engine = create_async_engine(DATABSE_URL, echo=False)
 async_session = async_sessionmaker(engine, expire_on_commit=False)
 
 class Base(DeclarativeBase):
@@ -204,6 +228,10 @@ class Base(DeclarativeBase):
 async def get_db():
     async with async_session() as session:
         yield session
+
+
+
+
 
 
 
@@ -270,6 +298,9 @@ def decode_access_token(token: str) -> dict | None:
 
 
 
+
+
+
 from app/models/
 
 __init__.py:
@@ -281,6 +312,9 @@ from app.models.website_schedule import WebsiteScrapeSchedule
 from app.models.scraped_page import ScrapedPage
 from app.models.chunk import Chunk
 from app.models.generated_question import GeneratedQuestion
+
+
+
 
 
 
@@ -337,6 +371,8 @@ class Chunk(Base):
 
 
 
+
+
 generated_question.py:
 from typing import TYPE_CHECKING
 from sqlalchemy import Boolean, ForeignKey, Index, Integer, Text
@@ -380,6 +416,86 @@ class GeneratedQuestion(Base):
 
 
 
+
+
+org_branding.py:
+# app/models/org_branding.py
+from datetime import datetime
+
+from sqlalchemy import DateTime, ForeignKey, LargeBinary, String
+from sqlalchemy.orm import Mapped, mapped_column
+
+from app.core.database import Base
+
+
+class OrgBranding(Base):
+    __tablename__ = "org_branding"
+
+    # one row per organization
+    org_id: Mapped[int] = mapped_column(
+        ForeignKey("orgs.id", ondelete="CASCADE"), primary_key=True
+    )
+    color: Mapped[str] = mapped_column(String(7), default="#7A1F2B", nullable=False)
+
+    # deferred: the image bytes are only loaded when explicitly asked for,
+    # so reading the color never drags a PNG out of the database
+    mascot_png: Mapped[bytes | None] = mapped_column(
+        LargeBinary, nullable=True, deferred=True
+    )
+    # NULL means "no mascot". Also used as the cache-busting version in the URL.
+    mascot_updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True
+    )
+
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
+    )
+
+
+class OrgChatSettings(Base):
+    __tablename__ = "org_chat_settings"
+
+    org_id: Mapped[int] = mapped_column(
+        ForeignKey("orgs.id", ondelete="CASCADE"), primary_key=True
+    )
+    assistant_name: Mapped[str] = mapped_column(
+        String(50), default="Chat Assistant", nullable=False
+    )
+
+
+class OrgChatHeader(Base):
+    __tablename__ = "org_chat_headers"
+
+    org_id: Mapped[int] = mapped_column(
+        ForeignKey("orgs.id", ondelete="CASCADE"), primary_key=True
+    )
+    header_tagline: Mapped[str] = mapped_column(
+        String(80), default="Admissions Intelligence Hub", nullable=False
+    )
+
+
+class OrgChatFont(Base):
+    __tablename__ = "org_chat_fonts"
+
+    org_id: Mapped[int] = mapped_column(
+        ForeignKey("orgs.id", ondelete="CASCADE"), primary_key=True
+    )
+    font_family: Mapped[str] = mapped_column(
+        String(30), default="system", nullable=False
+    )
+
+
+
+
+
+
+
+
+
+
+
+
+
 org_member.py:
 from sqlalchemy import String, ForeignKey
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -394,6 +510,9 @@ class OrgMember(Base):
 
     user: Mapped["User"] = relationship(back_populates="memberships")
     org: Mapped["Org"] = relationship(back_populates="members")
+
+
+
 
 
 
@@ -439,6 +558,84 @@ class Org(Base):
 
 
 
+
+org.py:
+from typing import TYPE_CHECKING
+
+from sqlalchemy import Integer, String, ForeignKey
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+from app.core.database import Base
+
+if TYPE_CHECKING:
+    from app.models.org_member import OrgMember
+    from app.models.website import Website
+
+
+class Org(Base):
+    __tablename__ = "orgs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    creator_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    name: Mapped[str] = mapped_column(String(255))
+    # Bumped whenever indexed content changes. Part of the semantic-cache scope,
+    # so old cached answers become unreachable instantly (and expire via TTL).
+    content_version: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+
+    members: Mapped[list["OrgMember"]] = relationship(back_populates="org")
+    websites: Mapped[list["Website"]] = relationship(
+        back_populates="org", cascade="all, delete-orphan"
+    )
+
+
+
+
+
+
+
+
+
+
+
+
+
+response.py:
+from datetime import datetime
+
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String
+from sqlalchemy.dialects.postgresql import ARRAY
+from sqlalchemy.orm import Mapped, mapped_column
+
+from app.core.database import Base
+
+class Response(Base):
+    __tablename__ = "responses"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    org_id: Mapped[int] = mapped_column(ForeignKey("orgs.id"), index=True)
+    satisfied: Mapped[bool | None] = mapped_column(
+        Boolean, default=None, nullable=True
+    )
+    latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, nullable=False
+    )
+
+    accessed_chunks: Mapped[list[str]] = mapped_column(ARRAY(String), default=list)
+    accessed_generated_questions: Mapped[list[str]] = mapped_column(
+        ARRAY(String), default=list
+    )
+
+
+
+
+
+
+
+
+
+
+
+
 scraped_page.py:
 import enum
 from datetime import datetime
@@ -456,10 +653,10 @@ if TYPE_CHECKING:
 
 
 class PageProcessStatus(str, enum.Enum):
-    PENDING = "pending"
-    IN_PROGRESS = "in_progress"
-    COMPLETED = "completed"
-    FAILED = "failed"
+    PENDING = "PENDING"
+    IN_PROGRESS = "IN_PROGRESS"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
 
 
 class ScrapedPage(Base):
@@ -513,6 +710,53 @@ class ScrapedPage(Base):
 
 
 
+session_message.py:
+# app/models/session_message.py
+from datetime import datetime
+
+from sqlalchemy import DateTime, ForeignKey, Index, String, Text
+from sqlalchemy.orm import Mapped, mapped_column
+
+from app.core.database import Base
+
+
+class SessionMessage(Base):
+    """One turn (user question or assistant answer) of a chat session.
+
+    Rows expire: they are ignored once older than SESSION_TTL and deleted
+    shortly after (see session_context.py).
+    """
+
+    __tablename__ = "session_messages"
+    __table_args__ = (
+        # "latest messages of this session in this org"
+        Index("ix_session_messages_lookup", "org_id", "session_id", "id"),
+        # lets the expiry cleanup find old rows without scanning the table
+        Index("ix_session_messages_created_at", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    org_id: Mapped[int] = mapped_column(
+        ForeignKey("orgs.id", ondelete="CASCADE"), nullable=False
+    )
+    session_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    role: Mapped[str] = mapped_column(String(16), nullable=False)  # "user" | "assistant"
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, nullable=False
+    )
+
+
+
+
+
+
+
+
+
+
+
+
 user.py:
 from sqlalchemy import String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -528,8 +772,6 @@ class User(Base):
     last_name: Mapped[str] = mapped_column(String(100))
 
     memberships: Mapped[list["OrgMember"]] = relationship(back_populates="user")
-
-
 
 
 
@@ -570,6 +812,8 @@ class WebsiteScrapeSchedule(Base):
 
     # Relationships
     website: Mapped["Website"] = relationship(back_populates="schedule")
+
+
 
 
 
@@ -629,12 +873,6 @@ class Website(Base):
 
 
 
-
-
-
-
-
-
 from app/routes/
 
 auth.py:
@@ -658,6 +896,11 @@ class RegisterRequest(BaseModel):
 class LoginRequest(BaseModel):
     email: EmailStr
     password: str
+
+class MeResponse(BaseModel):
+    email: EmailStr
+    first_name: str
+    last_name: str
 
 @router.post("/register")
 async def register(payload: RegisterRequest, db: AsyncSession = Depends(get_db)):
@@ -722,14 +965,331 @@ async def get_current_user(
 
     return user
 
+@router.get("/me", response_model=MeResponse)
+async def get_current_user_profile(
+    current_user: User = Depends(get_current_user)
+):
+    return MeResponse(
+        email=current_user.email,
+        first_name=current_user.first_name,
+        last_name=current_user.last_name
+    )
+
+branding.py:
+# app/routes/branding.py
+import re
+from datetime import datetime
+
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Response,
+    UploadFile,
+    status,
+)
+from pydantic import BaseModel
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.database import get_db
+from app.models.org import Org
+from app.models.org_branding import (
+    OrgBranding,
+    OrgChatFont,
+    OrgChatHeader,
+    OrgChatSettings,
+)
+from app.models.user import User
+from app.routes.auth import get_current_user
+from app.utils.org_roles import BRANDING_MANAGER_ROLES, require_org_role
+
+router = APIRouter(prefix="/branding", tags=["branding"])
+
+DEFAULT_COLOR = "#7A1F2B"
+DEFAULT_ASSISTANT_NAME = "Chat Assistant"
+DEFAULT_HEADER_TAGLINE = "Admissions Intelligence Hub"
+DEFAULT_FONT_FAMILY = "system"
+SUPPORTED_FONT_FAMILIES = {
+    DEFAULT_FONT_FAMILY,
+    "arial",
+    "georgia",
+    "verdana",
+    "trebuchet",
+    "courier",
+}
+MAX_ASSISTANT_NAME_LENGTH = 50
+MAX_HEADER_TAGLINE_LENGTH = 80
+MAX_MASCOT_BYTES = 512 * 1024  # 512 KB
+PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+HEX_COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
+
+
+class BrandingOut(BaseModel):
+    color: str
+    mascot_url: str | None  # relative path, e.g. "/branding/1/mascot?v=1760400000"
+    assistant_name: str
+    header_tagline: str
+    font_family: str
+
+
+def to_out(
+    org_id: int,
+    color: str,
+    mascot_updated_at: datetime | None,
+    assistant_name: str = DEFAULT_ASSISTANT_NAME,
+    header_tagline: str = DEFAULT_HEADER_TAGLINE,
+    font_family: str = DEFAULT_FONT_FAMILY,
+) -> BrandingOut:
+    url = None
+    if mascot_updated_at is not None:
+        # the version changes on every upload, so browsers can cache the image forever
+        url = f"/branding/{org_id}/mascot?v={int(mascot_updated_at.timestamp())}"
+    return BrandingOut(
+        color=color,
+        mascot_url=url,
+        assistant_name=assistant_name,
+        header_tagline=header_tagline,
+        font_family=font_family,
+    )
+
+
+async def require_branding_editor(db: AsyncSession, org_id: int, user: User) -> None:
+    await require_org_role(
+        db,
+        org_id,
+        user,
+        BRANDING_MANAGER_ROLES,
+        "Only organization administrators and designers can update chat branding.",
+    )
+
+
+# ---- public: the chat page has no logged-in user ----
+
+
+@router.get("/{org_id}", response_model=BrandingOut)
+async def get_branding(org_id: int, db: AsyncSession = Depends(get_db)):
+    # Select only the small columns so the image bytes are never loaded here
+    row = (
+        await db.execute(
+            select(OrgBranding.color, OrgBranding.mascot_updated_at).where(
+                OrgBranding.org_id == org_id
+            )
+        )
+    ).first()
+
+    exists = await db.scalar(select(Org.id).where(Org.id == org_id))
+    if exists is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Organization not found"
+        )
+
+    assistant_name = await db.scalar(
+        select(OrgChatSettings.assistant_name).where(
+            OrgChatSettings.org_id == org_id
+        )
+    )
+    header_tagline = await db.scalar(
+        select(OrgChatHeader.header_tagline).where(OrgChatHeader.org_id == org_id)
+    )
+    font_family = await db.scalar(
+        select(OrgChatFont.font_family).where(OrgChatFont.org_id == org_id)
+    )
+    if row is None:
+        return BrandingOut(
+            color=DEFAULT_COLOR,
+            mascot_url=None,
+            assistant_name=assistant_name or DEFAULT_ASSISTANT_NAME,
+            header_tagline=header_tagline or DEFAULT_HEADER_TAGLINE,
+            font_family=font_family or DEFAULT_FONT_FAMILY,
+        )
+
+    return to_out(
+        org_id,
+        row.color,
+        row.mascot_updated_at,
+        assistant_name or DEFAULT_ASSISTANT_NAME,
+        header_tagline or DEFAULT_HEADER_TAGLINE,
+        font_family or DEFAULT_FONT_FAMILY,
+    )
+
+
+@router.get("/{org_id}/mascot")
+async def get_mascot(org_id: int, db: AsyncSession = Depends(get_db)):
+    data = await db.scalar(
+        select(OrgBranding.mascot_png).where(OrgBranding.org_id == org_id)
+    )
+    if not data:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No mascot")
+
+    return Response(
+        content=data,
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=31536000, immutable"},
+    )
+
+
+# ---- authenticated: used by the Mascot page ----
+
+
+@router.put("/{org_id}", response_model=BrandingOut)
+async def update_branding(
+    org_id: int,
+    color: str = Form(...),
+    assistant_name: str | None = Form(None),
+    header_tagline: str | None = Form(None),
+    font_family: str | None = Form(None),
+    mascot: UploadFile | None = File(None),
+    remove_mascot: bool = Form(False),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    await require_branding_editor(db, org_id, current_user)
+
+    if not HEX_COLOR.match(color):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Color must look like #7A1F2B.",
+        )
+
+    normalized_name = assistant_name.strip() if assistant_name is not None else None
+    if normalized_name is not None and not normalized_name:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Assistant name cannot be empty.",
+        )
+    if normalized_name is not None and len(normalized_name) > MAX_ASSISTANT_NAME_LENGTH:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Assistant name must be {MAX_ASSISTANT_NAME_LENGTH} characters or fewer.",
+        )
+
+    normalized_tagline = (
+        header_tagline.strip() if header_tagline is not None else None
+    )
+    if normalized_tagline is not None and not normalized_tagline:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Header tagline cannot be empty.",
+        )
+    if (
+        normalized_tagline is not None
+        and len(normalized_tagline) > MAX_HEADER_TAGLINE_LENGTH
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Header tagline must be {MAX_HEADER_TAGLINE_LENGTH} characters or fewer.",
+        )
+
+    normalized_font_family = (
+        font_family.strip().lower() if font_family is not None else None
+    )
+    if (
+        normalized_font_family is not None
+        and normalized_font_family not in SUPPORTED_FONT_FAMILIES
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Choose a supported chat font.",
+        )
+
+    branding = await db.get(OrgBranding, org_id)
+    if branding is None:
+        branding = OrgBranding(org_id=org_id, color=color.upper())
+        db.add(branding)
+    branding.color = color.upper()
+
+    chat_settings = await db.get(OrgChatSettings, org_id)
+    if normalized_name is not None:
+        if chat_settings is None:
+            chat_settings = OrgChatSettings(
+                org_id=org_id, assistant_name=normalized_name
+            )
+            db.add(chat_settings)
+        else:
+            chat_settings.assistant_name = normalized_name
+
+    chat_header = await db.get(OrgChatHeader, org_id)
+    if normalized_tagline is not None:
+        if chat_header is None:
+            chat_header = OrgChatHeader(
+                org_id=org_id, header_tagline=normalized_tagline
+            )
+            db.add(chat_header)
+        else:
+            chat_header.header_tagline = normalized_tagline
+
+    chat_font = await db.get(OrgChatFont, org_id)
+    if normalized_font_family is not None:
+        if chat_font is None:
+            chat_font = OrgChatFont(
+                org_id=org_id, font_family=normalized_font_family
+            )
+            db.add(chat_font)
+        else:
+            chat_font.font_family = normalized_font_family
+
+    if mascot is not None and mascot.filename:
+        data = await mascot.read(MAX_MASCOT_BYTES + 1)
+        if len(data) > MAX_MASCOT_BYTES:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail="The mascot image must be 512 KB or smaller.",
+            )
+        # Check the file's real signature, not just the name or content type
+        if not data.startswith(PNG_MAGIC):
+            raise HTTPException(
+                status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+                detail="The mascot must be a PNG image.",
+            )
+        branding.mascot_png = data
+        branding.mascot_updated_at = datetime.utcnow()
+    elif remove_mascot:
+        branding.mascot_png = None
+        branding.mascot_updated_at = None
+
+    # Build the response before commit(): commit expires the object's attributes
+    result = to_out(
+        org_id,
+        branding.color,
+        branding.mascot_updated_at,
+        normalized_name
+        or (chat_settings.assistant_name if chat_settings else DEFAULT_ASSISTANT_NAME),
+        normalized_tagline
+        or (chat_header.header_tagline if chat_header else DEFAULT_HEADER_TAGLINE),
+        normalized_font_family
+        or (chat_font.font_family if chat_font else DEFAULT_FONT_FAMILY),
+    )
+    await db.commit()
+    return result
 
 
 
 
 ingest.py:
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
+import asyncio
+import hashlib
+import logging
+from datetime import datetime, timezone
+from pathlib import Path
+from urllib.parse import quote, unquote
+from uuid import uuid4
+
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    UploadFile,
+    status,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
+from sqlalchemy import delete, func, select
 
 from app.core.config import settings
 from app.core.database import get_db
@@ -739,10 +1299,128 @@ from app.models.website import Website, WebsiteScrapeStatus
 from app.models.scraped_page import ScrapedPage, PageProcessStatus
 from app.models.chunk import Chunk
 from app.models.generated_question import GeneratedQuestion
-from app.services.ingest_pipeline.orchestrator import run_full_pipeline, get_active_sync_column
+from app.services.ingest_pipeline.document_parser import (
+    DocumentExtractionError,
+    DocumentParserUnavailableError,
+    extract_document_text,
+)
+from app.services.ingest_pipeline.orchestrator import (
+    _bump_content_version,
+    get_active_sync_column,
+    ingest_uploaded_document,
+    run_full_pipeline,
+)
+from app.services.vector_db.factory import get_vector_db
 from app.routes.auth import get_current_user
+from app.utils.org_roles import CONTENT_MANAGER_ROLES, require_org_role
 
 router = APIRouter(prefix="/ingest", tags=["Ingest Pipeline"])
+logger = logging.getLogger(__name__)
+
+MAX_DOCUMENT_UPLOAD_BYTES = 25 * 1024 * 1024
+DOCUMENT_URL_SCHEME = "document://"
+
+
+def _document_filename(page: ScrapedPage) -> str:
+    return unquote(page.url.rsplit("/", 1)[-1])
+
+
+def _document_status(page: ScrapedPage, website: Website, total_questions: int, synced_questions: int):
+    if page.status == PageProcessStatus.FAILED or website.status == WebsiteScrapeStatus.FAILED:
+        return PageProcessStatus.FAILED
+    if page.status == PageProcessStatus.PENDING:
+        return PageProcessStatus.PENDING
+    if total_questions and synced_questions == total_questions:
+        return PageProcessStatus.COMPLETED
+    return PageProcessStatus.IN_PROGRESS
+
+
+async def _delete_document_vectors(org_id: int, web_id: int) -> None:
+    vector_db = get_vector_db()
+    try:
+        await vector_db.delete_points(
+            collection_name=settings.resolved_collection_name,
+            filters={"group_id": str(org_id), "web_id": web_id},
+        )
+    finally:
+        await vector_db.close()
+
+
+async def _get_document_for_member(
+    document_id: int,
+    current_user: User,
+    db: AsyncSession,
+) -> tuple[ScrapedPage, Website]:
+    result = await db.execute(
+        select(ScrapedPage, Website)
+        .join(Website, ScrapedPage.web_id == Website.id)
+        .join(OrgMember, Website.org_id == OrgMember.org_id)
+        .where(
+            ScrapedPage.id == document_id,
+            ScrapedPage.url.startswith(DOCUMENT_URL_SCHEME),
+            OrgMember.user_id == current_user.id,
+        )
+    )
+    row = result.one_or_none()
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document not found or you lack access permissions.",
+        )
+    return row
+
+
+async def _extract_uploaded_file(file: UploadFile) -> tuple[str, str]:
+    filename = " ".join(
+        Path((file.filename or "").replace("\\", "/")).name.split()
+    )
+    extension = Path(filename).suffix.lower()
+    if extension not in {".pdf", ".doc", ".docx", ".xls", ".xlsx"}:
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail="Only PDF, DOC, DOCX, XLS, and XLSX files are supported.",
+        )
+    if not filename or len(filename) > 255:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="The document filename must be between 1 and 255 characters.",
+        )
+
+    try:
+        content = await file.read(MAX_DOCUMENT_UPLOAD_BYTES + 1)
+    finally:
+        await file.close()
+    if len(content) > MAX_DOCUMENT_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail="Documents must be no larger than 25 MB.",
+        )
+    if not content:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="The uploaded document is empty.",
+        )
+
+    try:
+        text = await asyncio.to_thread(extract_document_text, filename, content)
+    except DocumentExtractionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    except DocumentParserUnavailableError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
+    return filename, text
+
+
+def _document_markdown(filename: str, category: str, extracted_text: str) -> str:
+    escaped_filename = filename.replace("\r", " ").replace("\n", " ")
+    escaped_filename = escaped_filename.replace("#", "\\#")
+    return f"# {escaped_filename}\n\nCategory: {category}\n\n{extracted_text}"
+
 
 @router.post("/run/{website_id}", status_code=status.HTTP_202_ACCEPTED)
 async def trigger_ingestion(
@@ -770,6 +1448,13 @@ async def trigger_ingestion(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Website {website_id} not found or you lack access permissions.",
         )
+    await require_org_role(
+        db,
+        website.org_id,
+        current_user,
+        CONTENT_MANAGER_ROLES,
+        "Only organization administrators and ingesters can manage knowledge ingestion.",
+    )
 
     if website.status == WebsiteScrapeStatus.IN_PROGRESS:
         raise HTTPException(
@@ -785,6 +1470,274 @@ async def trigger_ingestion(
         "message": f"Pipeline triggered for {website.url} (force_refresh={force_refresh})",
         "website_id": website.id,
         "status": WebsiteScrapeStatus.IN_PROGRESS,
+    }
+
+
+@router.post("/documents", status_code=status.HTTP_202_ACCEPTED)
+async def upload_document(
+    background_tasks: BackgroundTasks,
+    org_id: int = Form(...),
+    category: str = Form(...),
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    category = " ".join(category.split())
+    if not category or len(category) > 100:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="The category must be between 1 and 100 characters.",
+        )
+
+    await require_org_role(
+        db,
+        org_id,
+        current_user,
+        CONTENT_MANAGER_ROLES,
+        "Only organization administrators and ingesters can manage knowledge ingestion.",
+    )
+
+    filename, extracted_text = await _extract_uploaded_file(file)
+
+    document_id = uuid4().hex
+    markdown_content = _document_markdown(filename, category, extracted_text)
+    now = datetime.now(timezone.utc)
+    website = Website(
+        org_id=org_id,
+        url=f"{DOCUMENT_URL_SCHEME}{document_id}",
+        status=WebsiteScrapeStatus.IN_PROGRESS,
+    )
+    db.add(website)
+    await db.flush()
+
+    page = ScrapedPage(
+        org_id=org_id,
+        web_id=website.id,
+        url=f"{DOCUMENT_URL_SCHEME}{document_id}/{quote(filename, safe='')}",
+        markdown_content=markdown_content,
+        status=PageProcessStatus.PENDING,
+        content_hash=hashlib.sha256(markdown_content.encode("utf-8")).hexdigest(),
+        content_changed_at=now,
+        last_seen_at=now,
+    )
+    db.add(page)
+    await db.commit()
+    await db.refresh(page)
+
+    background_tasks.add_task(ingest_uploaded_document, page_id=page.id)
+    return {
+        "document_id": page.id,
+        "filename": filename,
+        "status": PageProcessStatus.PENDING,
+        "message": "Document accepted for indexing.",
+    }
+
+
+@router.get("/documents")
+async def list_documents(
+    org_id: int = Query(...),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    membership = await db.execute(
+        select(OrgMember).where(
+            OrgMember.org_id == org_id,
+            OrgMember.user_id == current_user.id,
+        )
+    )
+    if membership.scalar_one_or_none() is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have access to this organization.",
+        )
+
+    pages_result = await db.execute(
+        select(ScrapedPage, Website)
+        .join(Website, ScrapedPage.web_id == Website.id)
+        .where(
+            Website.org_id == org_id,
+            Website.url.startswith(DOCUMENT_URL_SCHEME),
+        )
+        .order_by(ScrapedPage.id.desc())
+    )
+    pages = pages_result.all()
+    if not pages:
+        return []
+
+    page_ids = [page.id for page, _website in pages]
+    sync_col = get_active_sync_column()
+    count_rows = await db.execute(
+        select(
+            ScrapedPage.id,
+            func.count(func.distinct(Chunk.id)),
+            func.count(func.distinct(GeneratedQuestion.id)),
+            func.count(func.distinct(GeneratedQuestion.id)).filter(sync_col.is_(True)),
+        )
+        .select_from(ScrapedPage)
+        .outerjoin(Chunk, Chunk.page_id == ScrapedPage.id)
+        .outerjoin(GeneratedQuestion, GeneratedQuestion.chunk_id == Chunk.id)
+        .where(ScrapedPage.id.in_(page_ids))
+        .group_by(ScrapedPage.id)
+    )
+    counts_by_id = {
+        page_id: (chunks or 0, questions or 0, synced or 0)
+        for page_id, chunks, questions, synced in count_rows.all()
+    }
+
+    documents = []
+    for page, website in pages:
+        chunks, questions, synced = counts_by_id.get(page.id, (0, 0, 0))
+        category = ""
+        for line in (page.markdown_content or "").splitlines():
+            if line.startswith("Category: "):
+                category = line.removeprefix("Category: ").strip()
+                break
+        documents.append(
+            {
+                "document_id": page.id,
+                "filename": _document_filename(page),
+                "category": category,
+                "status": _document_status(page, website, questions, synced),
+                "error_message": website.error_message,
+                "chunks": chunks,
+                "questions": questions,
+                "synced_questions": synced,
+            }
+        )
+    return documents
+
+
+@router.put("/documents/{document_id}", status_code=status.HTTP_202_ACCEPTED)
+async def replace_document(
+    document_id: int,
+    background_tasks: BackgroundTasks,
+    category: str = Form(...),
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    page, website = await _get_document_for_member(document_id, current_user, db)
+    await require_org_role(
+        db,
+        website.org_id,
+        current_user,
+        CONTENT_MANAGER_ROLES,
+        "Only organization administrators and ingesters can manage knowledge ingestion.",
+    )
+    if website.status == WebsiteScrapeStatus.IN_PROGRESS:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This document is currently being ingested.",
+        )
+
+    category = " ".join(category.split())
+    if not category or len(category) > 100:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="The category must be between 1 and 100 characters.",
+        )
+    filename, extracted_text = await _extract_uploaded_file(file)
+
+    try:
+        await _delete_document_vectors(page.org_id, website.id)
+    except Exception as exc:
+        logger.exception("Could not clear old vectors for document %s", document_id)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Could not safely replace the document because its existing vectors could not be removed.",
+        ) from exc
+
+    page.url = f"{website.url}/{quote(filename, safe='')}"
+    page.markdown_content = _document_markdown(filename, category, extracted_text)
+    page.content_hash = hashlib.sha256(page.markdown_content.encode("utf-8")).hexdigest()
+    page.status = PageProcessStatus.PENDING
+    page.chunked_at = None
+    page.content_changed_at = datetime.now(timezone.utc)
+    page.last_scraped_at = None
+    page.qdrant_cleanup_pending = False
+    website.status = WebsiteScrapeStatus.IN_PROGRESS
+    website.error_message = None
+    await db.execute(delete(Chunk).where(Chunk.page_id == page.id))
+    await db.commit()
+    background_tasks.add_task(ingest_uploaded_document, page_id=page.id)
+    return {
+        "document_id": page.id,
+        "filename": filename,
+        "status": PageProcessStatus.PENDING,
+        "message": "Replacement document accepted for indexing.",
+    }
+
+
+@router.delete("/documents/{document_id}")
+async def delete_document(
+    document_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    page, website = await _get_document_for_member(document_id, current_user, db)
+    await require_org_role(
+        db,
+        website.org_id,
+        current_user,
+        CONTENT_MANAGER_ROLES,
+        "Only organization administrators and ingesters can manage knowledge ingestion.",
+    )
+    if website.status == WebsiteScrapeStatus.IN_PROGRESS:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This document is currently being ingested.",
+        )
+
+    try:
+        await _delete_document_vectors(page.org_id, website.id)
+    except Exception as exc:
+        logger.exception("Could not clear vectors for document %s", document_id)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Could not safely delete the document because its vectors could not be removed.",
+        ) from exc
+
+    await db.delete(website)
+    await db.commit()
+    try:
+        await _bump_content_version(page.org_id)
+    except Exception:
+        logger.exception("Failed to bump content_version after deleting document %s", document_id)
+    return {"message": f"Document {document_id} and its indexed vectors were deleted."}
+
+
+@router.get("/documents/{document_id}/status")
+async def get_document_ingestion_status(
+    document_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    page, website = await _get_document_for_member(document_id, current_user, db)
+    sync_col = get_active_sync_column()
+    counts = await db.execute(
+        select(
+            func.count(func.distinct(Chunk.id)),
+            func.count(func.distinct(GeneratedQuestion.id)),
+            func.count(func.distinct(GeneratedQuestion.id)).filter(sync_col.is_(True)),
+        )
+        .select_from(ScrapedPage)
+        .outerjoin(Chunk, Chunk.page_id == ScrapedPage.id)
+        .outerjoin(GeneratedQuestion, GeneratedQuestion.chunk_id == Chunk.id)
+        .where(ScrapedPage.id == page.id)
+    )
+    total_chunks, total_questions, synced_questions = counts.one()
+
+    document_status = _document_status(page, website, total_questions, synced_questions)
+
+    filename = _document_filename(page)
+    return {
+        "document_id": page.id,
+        "filename": filename,
+        "status": document_status,
+        "error_message": website.error_message,
+        "chunks": total_chunks or 0,
+        "questions": total_questions or 0,
+        "synced_questions": synced_questions or 0,
     }
 
 
@@ -869,28 +1822,44 @@ async def get_ingestion_status(
     }
 
 
-
-
-
-
-
-
-
-
-
 orgs.py:
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.core.database import get_db
 from app.models.org import Org
 from app.models.org_member import OrgMember
 from app.models.user import User
-from app.schemas.tenant import OrgCreate, OrgResponse, PublicOrgResponse
+from app.schemas.tenant import (
+    OrgCreate,
+    OrgMemberCreate,
+    OrgMemberSummary,
+    OrgMemberUpdate,
+    OrgMembersResponse,
+    OrgResponse,
+    PublicOrgResponse,
+)
 from app.routes.auth import get_current_user
 
 router = APIRouter(prefix="/orgs", tags=["Organizations"])
+
+
+async def get_org_admin_status(
+    db: AsyncSession, org: Org, current_user: User
+) -> tuple[bool, bool]:
+    """Returns (is_member, can_manage_members) for an organization."""
+    membership = await db.scalar(
+        select(OrgMember).where(
+            OrgMember.org_id == org.id,
+            OrgMember.user_id == current_user.id,
+        )
+    )
+    is_member = org.creator_id == current_user.id or membership is not None
+    can_manage = org.creator_id == current_user.id or (
+        membership is not None and membership.roles == "admin"
+    )
+    return is_member, can_manage
 
 
 @router.get("/public/{org_id}", response_model=PublicOrgResponse)
@@ -962,19 +1931,289 @@ async def list_user_organizations(
     return res.scalars().all()
 
 
+@router.get("/{org_id}/members", response_model=OrgMembersResponse)
+async def list_organization_members(
+    org_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    org = await db.get(Org, org_id)
+    if not org:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Organization not found."
+        )
+
+    is_member, can_manage = await get_org_admin_status(db, org, current_user)
+    if not is_member:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You are not a member of this organization.",
+        )
+
+    rows = await db.execute(
+        select(User, OrgMember.roles)
+        .join(OrgMember, OrgMember.user_id == User.id)
+        .where(OrgMember.org_id == org_id)
+        .order_by(User.first_name, User.last_name, User.email)
+    )
+    members = [
+        OrgMemberSummary(
+            user_id=user.id,
+            email=user.email,
+            first_name=user.first_name,
+            last_name=user.last_name,
+            role=role,
+        )
+        for user, role in rows.all()
+    ]
+    current_role = (
+        "admin"
+        if org.creator_id == current_user.id
+        else await db.scalar(
+            select(OrgMember.roles).where(
+                OrgMember.org_id == org_id,
+                OrgMember.user_id == current_user.id,
+            )
+        )
+    )
+    if current_role is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You are not a member of this organization.",
+        )
+
+    return OrgMembersResponse(
+        members=members,
+        can_manage=can_manage,
+        owner_id=org.creator_id,
+        current_user_id=current_user.id,
+        current_role=current_role,
+    )
 
 
+@router.post(
+    "/{org_id}/members",
+    response_model=OrgMemberSummary,
+    status_code=status.HTTP_201_CREATED,
+)
+async def add_organization_member(
+    org_id: int,
+    payload: OrgMemberCreate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    org = await db.get(Org, org_id)
+    if not org:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Organization not found."
+        )
+
+    _, can_manage = await get_org_admin_status(db, org, current_user)
+    if not can_manage:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only organization administrators can add members.",
+        )
+
+    email = payload.email.strip().lower()
+    if not email:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Email is required.",
+        )
+
+    user = await db.scalar(select(User).where(func.lower(User.email) == email))
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No registered account was found for that email.",
+        )
+
+    existing_membership = await db.get(OrgMember, (user.id, org_id))
+    if existing_membership is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This user is already a member of the organization.",
+        )
+
+    membership = OrgMember(user_id=user.id, org_id=org_id, roles="member")
+    db.add(membership)
+    await db.commit()
+
+    return OrgMemberSummary(
+        user_id=user.id,
+        email=user.email,
+        first_name=user.first_name,
+        last_name=user.last_name,
+        role=membership.roles,
+    )
 
 
+@router.patch(
+    "/{org_id}/members/{user_id}",
+    response_model=OrgMemberSummary,
+)
+async def update_organization_member_role(
+    org_id: int,
+    user_id: int,
+    payload: OrgMemberUpdate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    org = await db.scalar(
+        select(Org).where(Org.id == org_id).with_for_update()
+    )
+    if not org:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Organization not found."
+        )
+
+    _, can_manage = await get_org_admin_status(db, org, current_user)
+    if not can_manage:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only organization administrators can change member roles.",
+        )
+    if user_id == org.creator_id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="The organization owner must remain an administrator.",
+        )
+    if user_id == current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="You cannot change your own role.",
+        )
+
+    membership = await db.get(OrgMember, (user_id, org_id))
+    if membership is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="The selected user is not a member of this organization.",
+        )
+
+    membership.roles = payload.role
+    await db.commit()
+    user = await db.get(User, user_id)
+    return OrgMemberSummary(
+        user_id=user.id,
+        email=user.email,
+        first_name=user.first_name,
+        last_name=user.last_name,
+        role=membership.roles,
+    )
+
+
+@router.post("/{org_id}/members/{user_id}/transfer-admin")
+async def transfer_organization_admin(
+    org_id: int,
+    user_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    org = await db.scalar(
+        select(Org).where(Org.id == org_id).with_for_update()
+    )
+    if not org:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Organization not found."
+        )
+
+    _, can_manage = await get_org_admin_status(db, org, current_user)
+    if not can_manage:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only organization administrators can transfer adminship.",
+        )
+    if user_id == current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Choose another member to receive adminship.",
+        )
+    if user_id == org.creator_id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="The organization owner already has permanent admin access.",
+        )
+
+    target_membership = await db.get(OrgMember, (user_id, org_id))
+    if target_membership is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="The selected user is not a member of this organization.",
+        )
+
+    target_membership.roles = "admin"
+    current_membership = await db.get(OrgMember, (current_user.id, org_id))
+    if current_user.id != org.creator_id and current_membership is not None:
+        current_membership.roles = "member"
+
+    await db.commit()
+    return {
+        "message": "Adminship transferred.",
+        "admin_user_id": user_id,
+        "previous_admin_user_id": (
+            current_user.id if current_user.id != org.creator_id else None
+        ),
+    }
+
+
+@router.delete("/{org_id}/members/{user_id}")
+async def remove_organization_member(
+    org_id: int,
+    user_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    org = await db.scalar(
+        select(Org).where(Org.id == org_id).with_for_update()
+    )
+    if not org:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Organization not found."
+        )
+
+    _, can_manage = await get_org_admin_status(db, org, current_user)
+    if not can_manage:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only organization administrators can remove members.",
+        )
+    if user_id == org.creator_id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="The organization owner cannot be removed from the organization.",
+        )
+    if user_id == current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="You cannot remove yourself. Ask another administrator to remove you.",
+        )
+
+    membership = await db.get(OrgMember, (user_id, org_id))
+    if membership is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="The selected user is not a member of this organization.",
+        )
+
+    await db.delete(membership)
+    await db.commit()
+    return {"message": "Member removed from the organization.", "user_id": user_id}
 
 
 
 query.py:
+# app/routes/query.py
+import logging
+import time
 from functools import lru_cache
+
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.ext.asyncio import AsyncSession # type: ignore
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
+from app.models.response import Response as ResponseLog
 from app.models.org import Org
 from app.services.query_pipeline.schema import (
     QueryBodyRequest,
@@ -982,7 +2221,15 @@ from app.services.query_pipeline.schema import (
     PipelineQueryResponse,
 )
 from app.services.query_pipeline.query_pipeline import QueryPipeline
+from app.services.query_pipeline.session_context import (
+    load_history,
+    purge_expired,
+    save_turns,
+)
+from app.services.query_pipeline.pii_filter import redact_personal_information
+from app.schemas.tenant import FeedbackBodyRequest
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/query", tags=["Query Pipeline"])
 
 
@@ -991,7 +2238,38 @@ def get_query_pipeline() -> QueryPipeline:
     return QueryPipeline()
 
 
-@router.post("/{org_id}/", response_model=PipelineQueryResponse)
+@router.get("/{org_id}/readiness")
+async def get_query_readiness(
+    org_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    org = await db.get(Org, org_id)
+    if not org:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Organization {org_id} not found.",
+        )
+
+    return {
+        "has_indexed_content": await QueryPipeline.has_indexed_content(org_id)
+    }
+
+
+def _collect_titles(result: PipelineQueryResponse) -> tuple[list[str], list[str]]:
+    chunk_titles: dict[str, None] = {}  # dict keeps order and removes duplicates
+    questions: dict[str, None] = {}
+
+    for ctx in result.contexts or []:
+        if ctx.title:
+            chunk_titles[ctx.title] = None
+        for mq in ctx.matched_questions or []:
+            if mq.question:
+                questions[mq.question] = None
+
+    return list(chunk_titles), list(questions)
+
+
+@router.post("/{org_id}", response_model=PipelineQueryResponse)
 async def execute_query(
     org_id: int,
     body: QueryBodyRequest,
@@ -1005,19 +2283,292 @@ async def execute_query(
             detail=f"Organization {org_id} not found.",
         )
 
+    # Earlier, unexpired turns of this chat session (empty for the first message)
+    history = await load_history(db, org_id, body.session_id)
+    history = [
+        turn.model_copy(
+            update={"content": redact_personal_information(turn.content)}
+        )
+        for turn in history
+    ]
+    sanitized_query = redact_personal_information(body.query)
+
     pipeline_req = PipelineQueryRequest(
         org_id=org_id,
-        query=body.query,
+        query=sanitized_query,
         session_id=body.session_id,
+        history=history,
     )
 
-    return await pipeline.execute(pipeline_req)
+    started = time.perf_counter()
+    result = await pipeline.execute(pipeline_req)  # raises -> nothing below runs
+    latency_ms = int((time.perf_counter() - started) * 1000)
+
+    titles, questions = _collect_titles(result)
+
+    try:
+        log = ResponseLog(
+            org_id=org_id,
+            latency_ms=latency_ms,
+            accessed_chunks=titles,
+            accessed_generated_questions=questions,
+            satisfied=None,
+        )
+        db.add(log)
+
+        # Remember this turn for the next question. "No result" answers are
+        # skipped so they don't skew what a follow-up is taken to refer to.
+        if result.source != "fallback":
+            save_turns(db, org_id, body.session_id, sanitized_query, result.answer)
+
+        await db.flush()
+        new_id = log.id
+        await db.commit()
+        result.response_id = new_id
+    except Exception as e:
+        await db.rollback()
+        logger.exception("Failed to record response for org %s", org_id)
+
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to save response log; feedback is unavailable.\n error: " + str(e),
+        )
+
+    # Housekeeping: delete messages past their expiry (throttled, never raises)
+    await purge_expired(db)
+
+    return result
+
+
+@router.post(
+    "/{response_id}/feedback",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def record_feedback(
+    response_id: int,
+    feedback: FeedbackBodyRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    response_log = await db.get(ResponseLog, response_id)
+
+    if not response_log:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Response log {response_id} not found.",
+        )
+
+    response_log.satisfied = feedback.satisfied
+    await db.commit()
 
 
 
 
+stats.py:
+from collections import Counter
+from datetime import datetime, timedelta, timezone
+
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import func, literal_column, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.database import get_db
+from app.models.org import Org
+from app.models.org_member import OrgMember
+from app.models.response import Response
+from app.models.user import User
+from app.routes.auth import get_current_user
+from app.schemas.tenant import ChartPoint, StatsRequest, StatsResponse
+
+router = APIRouter(prefix="/stats", tags=["stats"])
+
+RANGE_DAYS = {
+    "last_7_days": 7,
+    "last_30_days": 30,
+    "last_90_days": 90,
+    "last_year": 365,
+}
+
+# The Philippines is UTC+8 with no daylight saving, so a fixed offset is enough
+# and avoids needing the tzdata package on Windows.
+LOCAL_OFFSET = timedelta(hours=8)
 
 
+def granularity_for(range_key: str) -> str:
+    """Bucket size for the chart: keeps the number of points readable."""
+    if range_key == "all_time":
+        return "month"
+    if range_key == "last_year":
+        return "week"
+    return "day"
+
+
+def bucket_floor(dt: datetime, granularity: str) -> datetime:
+    dt = dt.replace(hour=0, minute=0, second=0, microsecond=0)
+    if granularity == "week":
+        return dt - timedelta(days=dt.weekday())  # weeks start on Monday
+    if granularity == "month":
+        return dt.replace(day=1)
+    return dt
+
+
+def bucket_next(dt: datetime, granularity: str) -> datetime:
+    if granularity == "week":
+        return dt + timedelta(days=7)
+    if granularity == "month":
+        if dt.month == 12:
+            return dt.replace(year=dt.year + 1, month=1)
+        return dt.replace(month=dt.month + 1)
+    return dt + timedelta(days=1)
+
+
+def range_start(range_key: str) -> datetime | None:
+    days = RANGE_DAYS.get(range_key)
+    if days is None:  # "all_time"
+        return None
+    # naive UTC, to match datetime.utcnow() in the model
+    return datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=days)
+
+
+@router.post("", response_model=StatsResponse)  # final URL: POST /stats
+async def get_stats(
+    body: StatsRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    # --- access control ---
+    org = await db.scalar(select(Org).where(Org.id == body.org_id))
+    if not org:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Organization not found"
+        )
+
+    org_member = await db.scalar(
+        select(OrgMember).where(
+            OrgMember.org_id == body.org_id,
+            OrgMember.user_id == current_user.id,
+        )
+    )
+    # Deny only if the user is neither the creator nor a member
+    if org.creator_id != current_user.id and not org_member:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You are not a member of this organization",
+        )
+
+    # --- shared filter for the selected range ---
+    conditions = [Response.org_id == body.org_id]
+    start = range_start(body.range)
+    if start is not None:
+        conditions.append(Response.created_at >= start)
+
+    # --- aggregates, computed by the database ---
+    inquiry_count = (
+        await db.scalar(select(func.count()).select_from(Response).where(*conditions))
+        or 0
+    )
+
+    average_response_time = float(
+        await db.scalar(select(func.avg(Response.latency_ms)).where(*conditions))
+        or 0.0
+    )
+
+    # Only rated answers count: satisfied is NULL until someone rates it
+    rated = (
+        await db.scalar(
+            select(func.count())
+            .select_from(Response)
+            .where(*conditions, Response.satisfied.is_not(None))
+        )
+        or 0
+    )
+    liked = (
+        await db.scalar(
+            select(func.count())
+            .select_from(Response)
+            .where(*conditions, Response.satisfied.is_(True))
+        )
+        or 0
+    )
+    satisfaction_rate = round(liked / rated * 100, 1) if rated else 0.0  # percent
+
+    # --- top-10 lists, counted in Python from only the columns we need ---
+    chunk_rows = await db.execute(
+        select(Response.accessed_chunks, Response.created_at).where(*conditions)
+    )
+    chunk_counts: Counter[str] = Counter()
+    chunk_last_accessed: dict[str, datetime] = {}
+    for titles, created_at in chunk_rows:
+        for title in titles or []:
+            chunk_counts[title] += 1
+            if title not in chunk_last_accessed or created_at > chunk_last_accessed[title]:
+                chunk_last_accessed[title] = created_at
+
+    # Needs a `query` text column on Response; returns {} until you add it
+    inquiry_counts: Counter[str] = Counter()
+    query_col = getattr(Response, "query", None)
+    if query_col is not None:
+        query_rows = await db.scalars(select(query_col).where(*conditions))
+        for text in query_rows:
+            normalized = (text or "").strip()
+            if normalized:
+                inquiry_counts[normalized.lower()] += 1
+
+    top_chunks = dict(chunk_counts.most_common(10))
+
+    # --- chart: responses per day/week/month, gaps filled with zeros ---
+    granularity = granularity_for(body.range)
+    # Inline literals (not bind parameters): Postgres treats the same expression
+    # with different parameters as different, which breaks GROUP BY under asyncpg.
+    # `granularity` only ever comes from granularity_for(), never from user input.
+    bucket = func.date_trunc(
+        literal_column(f"'{granularity}'"),
+        Response.created_at + literal_column("interval '8 hours'"),  # = LOCAL_OFFSET
+    )
+    chart_rows = (
+        await db.execute(
+            select(bucket, func.count())
+            .where(*conditions)
+            .group_by(literal_column("1"))
+            .order_by(literal_column("1"))
+        )
+    ).all()
+    bucket_counts = {row[0].date(): row[1] for row in chart_rows}
+
+    chart_data: list[ChartPoint] = []
+    if bucket_counts:
+        if start is not None:
+            first = bucket_floor(start + LOCAL_OFFSET, granularity)
+        else:  # all_time: begin at the first bucket that has data
+            first = bucket_floor(
+                datetime.combine(min(bucket_counts), datetime.min.time()), granularity
+            )
+        now_local = datetime.now(timezone.utc).replace(tzinfo=None) + LOCAL_OFFSET
+        last = bucket_floor(now_local, granularity)
+
+        current = first
+        while current <= last:
+            chart_data.append(
+                ChartPoint(
+                    date=current.date().isoformat(),
+                    count=bucket_counts.get(current.date(), 0),
+                )
+            )
+            current = bucket_next(current, granularity)
+
+    return StatsResponse(
+        inquiry_count=inquiry_count,
+        satisfaction_rate=satisfaction_rate,
+        average_response_time=average_response_time,
+        top_10_inquiries=dict(inquiry_counts.most_common(10)),
+        top_10_chunks=top_chunks,
+        chart_data=chart_data,
+        top_10_chunks_access_time={
+            title: accessed_at.replace(tzinfo=timezone.utc)
+            for title, accessed_at in sorted(
+                chunk_last_accessed.items(), key=lambda item: item[1], reverse=True
+            )[:10]
+        },
+    )
 
 
 
@@ -1036,6 +2587,7 @@ from app.models.scraped_page import ScrapedPage
 from app.schemas.tenant import WebsiteCreate, WebsiteResponse
 from app.services.vector_db.factory import get_vector_db
 from app.routes.auth import get_current_user
+from app.utils.org_roles import CONTENT_MANAGER_ROLES, require_org_role
 
 router = APIRouter(prefix="/websites", tags=["Websites"])
 
@@ -1046,17 +2598,13 @@ async def create_website(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    membership_res = await db.execute(
-        select(OrgMember).where(
-            OrgMember.org_id == payload.org_id,
-            OrgMember.user_id == current_user.id,
-        )
+    await require_org_role(
+        db,
+        payload.org_id,
+        current_user,
+        CONTENT_MANAGER_ROLES,
+        "Only organization administrators and ingesters can manage websites.",
     )
-    if not membership_res.scalar_one_or_none():
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="You do not have access to this organization.",
-        )
 
     clean_url = str(payload.url).rstrip("/")
     existing_site = await db.execute(
@@ -1113,7 +2661,10 @@ async def list_websites_by_org(
             detail="You do not have access to this organization.",
         )
 
-    stmt = select(Website).where(Website.org_id == org_id)
+    stmt = select(Website).where(
+        Website.org_id == org_id,
+        ~Website.url.startswith("document://"),
+    )
     res = await db.execute(stmt)
     return res.scalars().all()
 
@@ -1144,6 +2695,13 @@ async def delete_website(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Website not found or unauthorized.",
         )
+    await require_org_role(
+        db,
+        website.org_id,
+        current_user,
+        CONTENT_MANAGER_ROLES,
+        "Only organization administrators and ingesters can manage websites.",
+    )
 
     # Clean up Qdrant points across all pages for this website
     vector_db = get_vector_db()
@@ -1168,20 +2726,12 @@ async def delete_website(
 
 
 
-
-
-
-
-
-
-
-
 from app/schemas/
 
 tenant.py:
 from datetime import datetime, time
-from typing import Optional
-from pydantic import BaseModel, HttpUrl
+from typing import Literal, Optional
+from pydantic import BaseModel, EmailStr, HttpUrl
 
 from app.models.website import WebsiteScrapeStatus
 
@@ -1189,6 +2739,17 @@ from app.models.website import WebsiteScrapeStatus
 # --- Org Schemas ---
 class OrgCreate(BaseModel):
     name: str
+
+
+class OrgMemberCreate(BaseModel):
+    email: EmailStr
+
+
+OrgRole = Literal["admin", "designer", "ingester", "member"]
+
+
+class OrgMemberUpdate(BaseModel):
+    role: OrgRole
 
 
 class OrgResponse(BaseModel):
@@ -1207,6 +2768,22 @@ class PublicOrgResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class OrgMemberSummary(BaseModel):
+    user_id: int
+    email: str
+    first_name: str
+    last_name: str
+    role: OrgRole
+
+
+class OrgMembersResponse(BaseModel):
+    members: list[OrgMemberSummary]
+    can_manage: bool
+    owner_id: int
+    current_user_id: int
+    current_role: OrgRole
 
 
 # --- Website Schemas ---
@@ -1240,24 +2817,96 @@ class WebsiteScrapeSchedulesResponse(BaseModel):
     class Config:
         from_attributes = True
 
+class FeedbackBodyRequest(BaseModel):
+    satisfied: bool | None    
 
+class ChartPoint(BaseModel):
+    date: str   # start of the bucket, e.g. "2026-10-13"
+    count: int
 
+class StatsRequest(BaseModel):
+    org_id: int
+    range: Literal["last_7_days", "last_30_days", "last_90_days", "last_year", "all_time"]
 
+class StatsResponse(BaseModel):
+    inquiry_count: int
+    satisfaction_rate: float
+    average_response_time: float  # in milliseconds
+    top_10_inquiries: dict[str, int]  # Dictionary of inquiry text and their counts
+    top_10_chunks: dict[str, int]  # Dictionary of chunk text and their counts
+    top_10_chunks_access_time: dict[str, datetime]  # Dictionary of chunk text and their access times
+    chart_data: list[ChartPoint]  # List of chart points
 
-
-
-
-
+class ChatTurn(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str
 
 
 
 from app/utils/
 
+org_roles.py:
+from collections.abc import Collection
+
+from fastapi import HTTPException, status
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models.org import Org
+from app.models.org_member import OrgMember
+from app.models.user import User
+
+CONTENT_MANAGER_ROLES = ("admin", "ingester")
+BRANDING_MANAGER_ROLES = ("admin", "designer")
+
+
+async def get_org_role(db: AsyncSession, org_id: int, user: User) -> str:
+    org = await db.get(Org, org_id)
+    if org is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Organization not found.",
+        )
+
+    if org.creator_id == user.id:
+        return "admin"
+
+    membership = await db.scalar(
+        select(OrgMember).where(
+            OrgMember.org_id == org_id,
+            OrgMember.user_id == user.id,
+        )
+    )
+    if membership is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You are not a member of this organization.",
+        )
+    return membership.roles
+
+
+async def require_org_role(
+    db: AsyncSession,
+    org_id: int,
+    user: User,
+    allowed_roles: Collection[str],
+    detail: str,
+) -> str:
+    role = await get_org_role(db, org_id, user)
+    if role not in allowed_roles:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=detail,
+        )
+    return role
+
+
+
 telegram_bot.py:
 import asyncio
 import httpx
 from typing import Optional
-from sqlalchemy import select, func
+from sqlalchemy import select, func, case
 
 from app.core.config import settings
 from app.core.database import async_session
@@ -1265,28 +2914,57 @@ from app.models.website import Website, WebsiteScrapeStatus
 from app.models.scraped_page import ScrapedPage, PageProcessStatus
 from app.models.chunk import Chunk
 from app.models.generated_question import GeneratedQuestion
-from app.services.ingest_pipeline.orchestrator import run_full_pipeline
+from app.services.ingest_pipeline.orchestrator import run_full_pipeline, get_active_sync_column
+
+TELEGRAM_BOT_TOKEN = settings.resolved_telegram_token
+COLLECTION_NAME = settings.resolved_collection_name
 
 
-async def send_reply(chat_id: int | str, text: str):
-    if not settings.telegram_bot_token:
+def _build_progress_bar(current: int, total: int, length: int = 10) -> str:
+    if total <= 0:
+        return "░" * length + " (0%)"
+    pct = min(max(current / total, 0.0), 1.0)
+    filled = int(round(length * pct))
+    bar = "█" * filled + "░" * (length - filled)
+    return f"{bar} ({int(pct * 100)}%)"
+
+
+async def send_reply(chat_id: int | str, text: str, parse_mode: Optional[str] = "Markdown"):
+    if not TELEGRAM_BOT_TOKEN:
         return
 
-    url = f"https://api.telegram.org/bot{settings.telegram_bot_token}/sendMessage"
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": chat_id,
         "text": text,
-        "parse_mode": "Markdown",
         "disable_web_page_preview": True,
     }
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
+
     async with httpx.AsyncClient() as client:
         try:
-            await client.post(url, json=payload, timeout=10.0)
+            resp = await client.post(url, json=payload, timeout=10.0)
+            if resp.status_code == 400 and parse_mode:
+                payload.pop("parse_mode", None)
+                await client.post(url, json=payload, timeout=10.0)
         except Exception as e:
             print(f"[Telegram] Failed to send message to {chat_id}: {e}")
 
 
-async def run_pipeline_with_notifications(website_id: int, chat_id: Optional[int | str] = None):
+def _get_model_telemetry():
+    sync_col = get_active_sync_column()
+    dim = getattr(settings, "embedding_dimension", None) or getattr(settings, "vector_dim", 768)
+    dense_model = f"{settings.embedding_provider} / {settings.embedding_model} ({dim}d)"
+    sparse_model = "fastembed / Qdrant/bm25"
+    return sync_col, dense_model, sparse_model
+
+
+async def run_pipeline_with_notifications(
+    website_id: int,
+    chat_id: Optional[int | str] = None,
+    force_refresh: bool = False,
+):
     async with async_session() as session:
         website = await session.get(Website, website_id)
         if not website:
@@ -1296,26 +2974,36 @@ async def run_pipeline_with_notifications(website_id: int, chat_id: Optional[int
         target_url = website.url
         org_id = website.org_id
 
+    sync_col, dense_info, sparse_info = _get_model_telemetry()
+
     if chat_id:
+        force_tag = " *(FORCED RE-SCRAPE)*" if force_refresh else ""
         await send_reply(
             chat_id,
-            f"🚀 *Ingestion Started*\n"
+            f"🚀 *Ingestion Started*{force_tag}\n"
             f"• *Website ID:* `{website_id}`\n"
             f"• *Org ID:* `{org_id}`\n"
-            f"• *Target URL:* {target_url}",
+            f"• *Target URL:* {target_url}\n"
+            f"• *Target Collection:* `{COLLECTION_NAME}`\n"
+            f"• *Dense Model:* `{dense_info}`\n"
+            f"• *Sparse Model:* `{sparse_info}`\n"
+            f"• *Active Sync Flag:* `{sync_col.key}`",
         )
 
     try:
-        results = await run_full_pipeline(website_id=website_id)
+        results = await run_full_pipeline(website_id=website_id, force_refresh=force_refresh)
         if chat_id:
             await send_reply(
                 chat_id,
                 f"✅ *Pipeline Completed Successfully!*\n"
+                f"• *Target Collection:* `{COLLECTION_NAME}`\n"
                 f"• *URLs Discovered:* `{results['discovered_urls']}`\n"
                 f"• *Pages Scraped:* `{results['scraped_pages']}`\n"
                 f"• *Chunks Created:* `{results['created_chunks']}`\n"
                 f"• *Questions Generated:* `{results['generated_questions']}`\n"
-                f"• *Qdrant Points Synced:* `{results['synced_qdrant_points']}`",
+                f"• *Points Synced ({sync_col.key}):* `{results['synced_qdrant_points']}`\n"
+                f"• *Swept Pages:* `{results['swept_pages']}`\n"
+                f"• *Purged Pages:* `{results['purged_pages']}`",
             )
     except Exception as e:
         print(f"[Website {website_id}] Pipeline error: {e}")
@@ -1327,40 +3015,105 @@ async def handle_status_command(chat_id: int | str, website_id: int):
     async with async_session() as session:
         website = await session.get(Website, website_id)
         if not website:
-            await send_reply(chat_id, f"⚠️ Website `{website_id}` not found.")
+            await send_reply(chat_id, f"⚠️ Website ID `{website_id}` not found.")
             return
 
-        pages_count = await session.scalar(
-            select(func.count(ScrapedPage.id)).where(ScrapedPage.web_id == website_id)
+        page_stats = await session.execute(
+            select(
+                func.count(ScrapedPage.id).label("total"),
+                func.count(case((ScrapedPage.status == PageProcessStatus.COMPLETED, 1))).label("completed"),
+                func.count(case((ScrapedPage.status == PageProcessStatus.IN_PROGRESS, 1))).label("in_progress"),
+                func.count(case((ScrapedPage.status == PageProcessStatus.PENDING, 1))).label("pending"),
+                func.count(case((ScrapedPage.status == PageProcessStatus.FAILED, 1))).label("failed"),
+            ).where(ScrapedPage.web_id == website_id)
         )
-        chunks_count = await session.scalar(
-            select(func.count(Chunk.id))
+        p = page_stats.one()
+        total_pages = p.total or 0
+        pages_done = p.completed or 0
+        pages_crawling = p.in_progress or 0
+        pages_pending = p.pending or 0
+        pages_failed = p.failed or 0
+
+        chunk_stats = await session.execute(
+            select(
+                func.count(Chunk.id).label("total_chunks"),
+                func.coalesce(func.sum(Chunk.token_count), 0).label("total_tokens"),
+                func.count(case((Chunk.has_qgen.is_(True), 1))).label("qgen_processed_chunks"),
+            )
             .join(ScrapedPage, Chunk.page_id == ScrapedPage.id)
             .where(ScrapedPage.web_id == website_id)
         )
-        questions_count = await session.scalar(
-            select(func.count(GeneratedQuestion.id))
+        c = chunk_stats.one()
+        total_chunks = c.total_chunks or 0
+        total_tokens = c.total_tokens or 0
+        chunks_qgen_done = c.qgen_processed_chunks or 0
+
+        sync_col, dense_info, sparse_info = _get_model_telemetry()
+
+        q_stats = await session.execute(
+            select(
+                func.count(GeneratedQuestion.id).label("total_q"),
+                func.count(case((sync_col.is_(True), 1))).label("synced_q"),
+            )
             .join(Chunk, GeneratedQuestion.chunk_id == Chunk.id)
             .join(ScrapedPage, Chunk.page_id == ScrapedPage.id)
             .where(ScrapedPage.web_id == website_id)
         )
+        q = q_stats.one()
+        total_questions = q.total_q or 0
+        synced_active = q.synced_q or 0
 
-        await send_reply(
-            chat_id,
-            f"📊 *Status for Website `{website_id}` ({website.url})*\n"
-            f"• *Status:* `{website.status}`\n"
-            f"• *Pages Discovered:* `{pages_count}`\n"
-            f"• *Chunks Stored:* `{chunks_count}`\n"
-            f"• *Questions Generated:* `{questions_count}`",
+        status_icons = {
+            WebsiteScrapeStatus.PENDING: "⏳ PENDING",
+            WebsiteScrapeStatus.IN_PROGRESS: "🔄 IN PROGRESS",
+            WebsiteScrapeStatus.COMPLETED: "✅ COMPLETED",
+            WebsiteScrapeStatus.FAILED: "❌ FAILED",
+        }
+        status_label = status_icons.get(website.status, str(website.status))
+
+        page_bar = _build_progress_bar(pages_done, total_pages)
+        qgen_bar = _build_progress_bar(chunks_qgen_done, total_chunks)
+        sync_bar = _build_progress_bar(synced_active, total_questions)
+
+        msg = (
+            f"📊 *Ingestion Status — Site #{website_id}*\n"
+            f"🌐 `{website.url}`\n"
+            f"• *Status:* {status_label}\n"
+            f"• *Target Collection:* `{COLLECTION_NAME}`\n"
+            f"• *Dense Embedder:* `{dense_info}`\n"
+            f"• *Sparse Embedder:* `{sparse_info}`\n"
+            f"• *Tracking Column:* `{sync_col.key}`\n"
         )
+        if website.error_message:
+            msg += f"• *Error:* `{website.error_message[:200]}`\n"
+
+        msg += (
+            f"\n📄 *Stage 1: Web Crawling*\n"
+            f"{page_bar}\n"
+            f"• Total Discovered: `{total_pages}`\n"
+            f"• Scraped: `{pages_done}` | Crawling: `{pages_crawling}`\n"
+            f"• Pending: `{pages_pending}` | Failed: `{pages_failed}`\n"
+            f"\n🧩 *Stage 2: Chunking & Tokenization*\n"
+            f"• Substantive Chunks: `{total_chunks}`\n"
+            f"• Est. Tokens: `{total_tokens:,}`\n"
+            f"\n🤖 *Stage 3: Question Generation (QGen)*\n"
+            f"{qgen_bar}\n"
+            f"• Chunks Processed: `{chunks_qgen_done}/{total_chunks}`\n"
+            f"• Synthetic Qs Created: `{total_questions}`\n"
+            f"\n⚡ *Stage 4: Vector Indexing (Qdrant)*\n"
+            f"{sync_bar}\n"
+            f"• Active Model Synced: `{synced_active}/{total_questions}`\n"
+        )
+
+        await send_reply(chat_id, msg)
 
 
 async def start_telegram_bot_listener():
-    if not settings.telegram_bot_token:
+    if not TELEGRAM_BOT_TOKEN:
         print("[Telegram] TELEGRAM_BOT_TOKEN not configured. Skipping listener.")
         return
 
-    url = f"https://api.telegram.org/bot{settings.telegram_bot_token}/getUpdates"
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
     offset = None
     print("[Telegram] Poller active. Listening for commands...")
 
@@ -1377,9 +3130,9 @@ async def start_telegram_bot_listener():
                     continue
 
                 data = resp.json()
-                for update in data.get("result", []):
-                    offset = update["update_id"] + 1
-                    message = update.get("message", {})
+                for update_obj in data.get("result", []):
+                    offset = update_obj["update_id"] + 1
+                    message = update_obj.get("message", {})
                     chat_id = message.get("chat", {}).get("id")
                     text = message.get("text", "").strip()
 
@@ -1394,14 +3147,17 @@ async def start_telegram_bot_listener():
                             await send_reply(
                                 chat_id,
                                 "⚠️ *Invalid Format!*\n"
-                                "Usage: `/scrape <website_id>`\n"
-                                "Example: `/scrape 1`",
+                                "Usage: `/scrape <website_id> [force]`\n"
+                                "Examples:\n"
+                                "• `/scrape 1` (Standard refresh check)\n"
+                                "• `/scrape 1 force` (Force re-crawl & re-chunk all pages)",
                             )
                             continue
 
                         web_id = int(cmd_parts[1])
+                        force = len(cmd_parts) >= 3 and cmd_parts[2].lower() in ("force", "true", "yes", "1")
                         asyncio.create_task(
-                            run_pipeline_with_notifications(website_id=web_id, chat_id=chat_id)
+                            run_pipeline_with_notifications(website_id=web_id, chat_id=chat_id, force_refresh=force)
                         )
 
                     elif command == "/status":
@@ -1418,10 +3174,10 @@ async def start_telegram_bot_listener():
                     elif command in ["/help", "/start"]:
                         await send_reply(
                             chat_id,
-                            "🤖 *Knowledge Base Ingestion Bot*\n\n"
+                            "🤖 *Knowledge Base Assistant Bot*\n\n"
                             "*Commands:*\n"
-                            "• `/scrape <website_id>` - Runs discovery, scraping, chunking, and Qdrant sync\n"
-                            "• `/status <website_id>` - Check checkpoint progress in PostgreSQL\n"
+                            "• `/scrape <id> [force]` - Run ingestion (add `force` to bypass 12h cooldown)\n"
+                            "• `/status <id>` - Check pipeline progress\n"
                             "• `/help` - Show instructions",
                         )
 
@@ -1433,68 +3189,7 @@ async def start_telegram_bot_listener():
 
 
 
-
-
-uuid_generator.py:
-import uuid
-from typing import Optional
-
-KB_NAMESPACE: uuid.UUID = uuid.UUID("a3bb189e-8bf9-4888-9912-ace4e6543002")
-
-
-def generate_uuid(*, seed: str) -> str:
-    """Generates a deterministic UUIDv5 within the KB namespace."""
-    return str(uuid.uuid5(KB_NAMESPACE, seed))
-
-def generate_doc_id(
-    *,
-    tenant_id: str,
-    source_url: str,
-) -> str:
-    """Generates a deterministic document-level ID based on source URL."""
-    seed = f"doc::{tenant_id}::{source_url.strip()}"
-    return generate_uuid(seed=seed)
-
-
-def generate_chunk_id(
-    *,
-    tenant_id: str,
-    source_url: str,
-    chunk_index: int,
-    content: str,
-) -> str:
-    """Combines document origin, sequential index, and text to prevent collisions."""
-    seed = f"chunk::{tenant_id}::{source_url}#{chunk_index}:{content.strip()}"
-    return generate_uuid(seed=seed)
-
-
-def generate_question_id(
-    *,
-    chunk_id: str,
-    question: str,
-) -> str:
-    """Generates a deterministic ID bound to the parent chunk and question text."""
-    seed = f"question::{chunk_id}:{question.strip()}"
-    return generate_uuid(seed=seed)
-
-
-def generate_sparse_id(
-    *,
-    parent_id: str,
-    model_name: Optional[str] = "bm25",
-) -> str:
-    """Generates a deterministic ID for a sparse representation tied to its source entity."""
-    seed = f"sparse::{model_name}:{parent_id}"
-    return generate_uuid(seed=seed)
-
-
-
-
-
-
-
-
-app/utils/temporal.py:
+temporal.py:
 """Academic-period and temporal helpers shared by ingestion and query time."""
 import re
 from collections import Counter
@@ -1598,13 +3293,68 @@ def format_period(start_year: Optional[int]) -> Optional[str]:
 
 
 
+uuid_generator.py:
+import uuid
+from typing import Optional
+
+KB_NAMESPACE: uuid.UUID = uuid.UUID("a3bb189e-8bf9-4888-9912-ace4e6543002")
+
+
+def generate_uuid(*, seed: str) -> str:
+    """Generates a deterministic UUIDv5 within the KB namespace."""
+    return str(uuid.uuid5(KB_NAMESPACE, seed))
+
+def generate_doc_id(
+    *,
+    tenant_id: str,
+    source_url: str,
+) -> str:
+    """Generates a deterministic document-level ID based on source URL."""
+    seed = f"doc::{tenant_id}::{source_url.strip()}"
+    return generate_uuid(seed=seed)
+
+
+def generate_chunk_id(
+    *,
+    tenant_id: str,
+    source_url: str,
+    chunk_index: int,
+    content: str,
+) -> str:
+    """Combines document origin, sequential index, and text to prevent collisions."""
+    seed = f"chunk::{tenant_id}::{source_url}#{chunk_index}:{content.strip()}"
+    return generate_uuid(seed=seed)
+
+
+def generate_question_id(
+    *,
+    chunk_id: str,
+    question: str,
+) -> str:
+    """Generates a deterministic ID bound to the parent chunk and question text."""
+    seed = f"question::{chunk_id}:{question.strip()}"
+    return generate_uuid(seed=seed)
+
+
+def generate_sparse_id(
+    *,
+    parent_id: str,
+    model_name: Optional[str] = "bm25",
+) -> str:
+    """Generates a deterministic ID for a sparse representation tied to its source entity."""
+    seed = f"sparse::{model_name}:{parent_id}"
+    return generate_uuid(seed=seed)
 
 
 
 
 
+from backend/
 
-backend/app/main.py:
+__init__.py:
+
+
+main.py:
 import asyncio
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
@@ -1618,6 +3368,8 @@ from app.routes.ingest import router as ingest_router
 from app.routes.orgs import router as orgs_router
 from app.routes.query import router as query_router
 from app.routes.websites import router as websites_router
+from app.routes.stats import router as stats_router
+from app.routes.branding import router as branding_router
 from app.services.embeddings.factory import get_embedder
 from app.services.vector_db.factory import get_vector_db
 from app.utils.telegram_bot import start_telegram_bot_listener
@@ -1658,7 +3410,10 @@ app = FastAPI(lifespan=lifespan)
 origins = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
-    "https://mseuf-rag.vercel.app"
+    "https://mseuf-rag.vercel.app",
+    "https://mseuf-rag-test.netlify.app",
+    "https://mseuf-rag-test-staging.netlify.app",
+    "https://mseuf-chat.netlify.app"
 ]
 
 app.add_middleware(
@@ -1674,6 +3429,8 @@ app.include_router(orgs_router)
 app.include_router(websites_router)
 app.include_router(ingest_router)
 app.include_router(query_router)
+app.include_router(stats_router)
+app.include_router(branding_router)
 
 if __name__ == "__main__":
     uvicorn.run(
@@ -1682,95 +3439,3 @@ if __name__ == "__main__":
         port=settings.PORT,
         reload=True,
     )
-
-
-
-
-
-
-
-
-
-
-
-
-backend/app/qdrant_duplicate_collection.py:
-import os
-import tempfile
-import httpx
-from qdrant_client import QdrantClient
-from app.core.config import settings
-
-CLUSTER_URL = settings.test_qdrant_cluster_endpoint.rstrip("/")
-API_KEY = settings.test_qdrant_api_key
-
-client = QdrantClient(
-    url=CLUSTER_URL,
-    api_key=API_KEY,
-    timeout=900.0  # 15 minutes
-)
-
-source_collection = settings.resolved_collection_name
-target_collection = f"improve-and-benchmarks_{source_collection}"
-
-print(f"Checking existing snapshots for '{source_collection}'...")
-existing_snapshots = client.list_snapshots(collection_name=source_collection)
-
-if existing_snapshots:
-    latest = sorted(existing_snapshots, key=lambda s: s.creation_time or "", reverse=True)[0]
-    snapshot_name = latest.name
-    print(f"Found existing snapshot: {snapshot_name} (size: {latest.size / (1024 * 1024):.2f} MB)")
-else:
-    print(f"Creating new snapshot for '{source_collection}'...")
-    snapshot_info = client.create_snapshot(
-        collection_name=source_collection,
-        wait=True
-    )
-    snapshot_name = snapshot_info.name
-    print(f"Snapshot created successfully: {snapshot_name}")
-
-with tempfile.TemporaryDirectory() as tmp_dir:
-    temp_snapshot_path = os.path.join(tmp_dir, snapshot_name)
-
-    headers = {"api-key": API_KEY} if API_KEY else {}
-
-    # 1. Download snapshot via standard HTTP stream
-    download_url = f"{CLUSTER_URL}/collections/{source_collection}/snapshots/{snapshot_name}"
-    print("Downloading snapshot archive to Codespaces temporary disk...")
-    with httpx.Client(timeout=900.0) as http_client:
-        with http_client.stream("GET", download_url, headers=headers) as response:
-            response.raise_for_status()
-            with open(temp_snapshot_path, "wb") as f:
-                for chunk in response.iter_bytes(chunk_size=1024 * 1024):  # 1MB chunks
-                    f.write(chunk)
-    
-    print(f"Downloaded {os.path.getsize(temp_snapshot_path) / (1024 * 1024):.2f} MB.")
-
-    # 2. Upload and restore into the new target collection via multipart POST
-    upload_url = f"{CLUSTER_URL}/collections/{target_collection}/snapshots/upload?wait=true"
-    print(f"Restoring into new collection '{target_collection}' on Qdrant Cloud...")
-    with open(temp_snapshot_path, "rb") as snapshot_file:
-        files = {"snapshot": (snapshot_name, snapshot_file, "application/octet-stream")}
-        with httpx.Client(timeout=900.0) as http_client:
-            res = http_client.post(upload_url, headers=headers, files=files)
-            res.raise_for_status()
-
-# 3. Final validation
-src_count = client.count(source_collection).count
-tgt_count = client.count(target_collection).count
-
-print("\nVerification Results:")
-print(f"  Source collection ('{source_collection}'): {src_count} points (untouched)")
-print(f"  Target collection ('{target_collection}'): {tgt_count} points (ready for testing)")
-assert src_count == tgt_count, "Point count mismatch between source and target!"
-print("\nDuplication complete!")
-
-
-
-
-
-
-
-
-
-

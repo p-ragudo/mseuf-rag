@@ -1,4 +1,4 @@
-from app/services/llm_qgen/
+from backend/app/services/llm_qgen
 
 base_qgen.py:
 from abc import ABC, abstractmethod
@@ -23,10 +23,6 @@ class BaseQuestionGenerator(ABC):
         pass
 
 
-
-
-
-
 factory.py:
 from .base_qgen import BaseQuestionGenerator
 from .gemini_provider import GeminiQuestionGenerator
@@ -44,9 +40,6 @@ def get_question_generator(provider: str = None) -> BaseQuestionGenerator:
     #     return OpenAICompatibleQuestionGenerator(model_name=os.getenv("OPENAI_MODEL", "gpt-4o-mini"))
 
     raise ValueError(f"Unsupported LLM provider: {provider}")
-
-
-
 
 gemini_provider.py:
 import asyncio
@@ -201,11 +194,45 @@ class GeminiQuestionGenerator(BaseQuestionGenerator):
         return output_map
 
 
+openai_provider.py:
+# import os
+# from openai import AsyncOpenAI
+# from app.services.llm_qgen.base import BaseQuestionGenerator
+# from app.services.llm_qgen.qgen import RawChunk, GeneratedQuestionSet
+# from app.services.llm_qgen import SYSTEM_INSTRUCTION
 
+# class OpenAICompatibleQuestionGenerator(BaseQuestionGenerator):
+#     def __init__(
+#         self,
+#         model_name: str = "gpt-4o-mini",
+#         base_url: str = None,
+#         api_key: str = None,
+#         temperature: float = 0.3,
+#     ):
+#         self.model_name = model_name
+#         self.temperature = temperature
+#         self.client = AsyncOpenAI(
+#             api_key=api_key or os.getenv("OPENAI_API_KEY", "dummy-key"),
+#             base_url=base_url or os.getenv("OPENAI_BASE_URL"),
+#         )
 
-
-
-
+#     async def generate_questions(self, chunk: RawChunk) -> GeneratedQuestionSet:
+#         prompt = (
+#             f"Page Title: {chunk.title}\n"
+#             f"URL: {chunk.source_url}\n\n"
+#             f"Content:\n{chunk.content}"
+#         )
+#         # client.beta.chat.completions.parse handles schema generation and validation
+#         response = await self.client.beta.chat.completions.parse(
+#             model=self.model_name,
+#             messages=[
+#                 {"role": "system", "content": SYSTEM_INSTRUCTION},
+#                 {"role": "user", "content": prompt},
+#             ],
+#             response_format=GeneratedQuestionSet,
+#             temperature=self.temperature,
+#         )
+#         return response.choices[0].message.parsed
 
 schema.py:
 from typing import List, Dict, Any
@@ -227,15 +254,9 @@ class GeneratedQuestion(BaseModel):
     content: str
     tags: List[str]
 
-class BatchGeneratedQuestionSet(BaseModel):
-    """Batched response schema: mapping of chunk_id to list of generated questions."""
-    chunks: Dict[str, List[str]] = Field(
-        default_factory=dict,
-        description="Dictionary where each key is a chunk_id, mapping to 3-5 realistic questions answering that chunk."
-    )
-
-
-
+class GeneratedQuestionSet(BaseModel):
+    """The strict schema enforced on the LLM output."""
+    questions: List[str] = Field(description="3 to 5 realistic questions that this text chunk answers directly.")
 
 sys_instructions.py:
 SYSTEM_INSTRUCTION = """
