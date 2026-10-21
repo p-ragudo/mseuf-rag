@@ -100,10 +100,13 @@ async def test_full_api_surface_branding_query_and_analytics(
     )
     await live_or_mock_qdrant.upsert_points(TEST_COLLECTION_NAME, [test_point])
 
-    # 7. Sync the route's cached pipeline instance to use our deterministic embedder and mock synthesizer
+    # 7. Sync the route's cached pipeline instance and flush previous test cache entries
     pipeline = get_query_pipeline()
     pipeline.embedder = embedder
     
+    # Flush semantic cache so we test the full retrieval-to-LLM cold path
+    await pipeline.semantic_cache.clear()
+
     mock_qa = AsyncMock()
     mock_qa.generate_answer.return_value = QAResponse(
         answer="The BSCS curriculum covers Systems Programming and AI.",
@@ -111,10 +114,10 @@ async def test_full_api_surface_branding_query_and_analytics(
     )
     pipeline.qa_synthesizer = mock_qa
 
-    # Disable reranker threshold gating for this synthetic test
+    # Disable reranker score gating for this test
     monkeypatch.setattr(settings, "reranker_score_threshold", None)
 
-    # 8. Execute POST /query/{org_id} (Verifies full pipeline execution & response logging)
+    # 8. Execute FIRST POST /query/{org_id} (Cold Query: Must hit LLM synthesis)
     query_res = await api_client.post(
         f"/query/{org_id}",
         json={"query": "What is the curriculum for Computer Science?", "session_id": "session_test_42"},
@@ -125,6 +128,16 @@ async def test_full_api_surface_branding_query_and_analytics(
     assert "Systems Programming" in query_data["answer"]
     response_id = query_data["response_id"]
     assert response_id is not None
+
+    # 8b. Execute SECOND POST /query/{org_id} (Warm Query: Must hit semantic cache)
+    cached_query_res = await api_client.post(
+        f"/query/{org_id}",
+        json={"query": "What is the curriculum for Computer Science?", "session_id": "session_test_42"},
+    )
+    assert cached_query_res.status_code == 200
+    cached_data = cached_query_res.json()
+    assert cached_data["source"] == "cache"
+    assert cached_data["is_cached"] is True
 
     # 9. Record User Feedback: POST /query/{response_id}/feedback
     feedback_res = await api_client.post(
