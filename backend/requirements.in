@@ -33,5 +33,6 @@ fastembed
 
 # --- RAG Evaluation Metrics ----
 ragas
+datasets
 langchain-google-genai
 pandas

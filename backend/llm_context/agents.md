@@ -25,7 +25,7 @@ The core retrieval architecture uses **question-augmented indexing**:
 | Sparse embeddings | fastembed `Qdrant/bm25` (`FastEmbedSparseEmbedder`), IDF modifier applied server-side by Qdrant |
 | Cross-encoder reranker | fastembed `TextCrossEncoder` (default `Xenova/ms-marco-MiniLM-L-12-v2`), with FlashRank and PyTorch Transformers alternatives |
 | Question generation | Gemini (`gemini-2.5-flash`), temperature 0.2, batches of 10 chunks per structured JSON call |
-| Answer synthesis | Gemini (`gemini-2.5-flash`), temperature 0.3, max 2048 output tokens |
+| Answer synthesis | Gemini (``), temperature 0.3, max 2048 output tokens |
 | Intent classifier | Gemini (`gemini-3.5-flash-lite`), structured JSON output via Pydantic schema (`QueryIntent`) with conversational follow-up rewriting |
 | Semantic cache | Redis via RedisVL `SemanticCache` (or in-memory mock), tenant- and campus-scoped with `content_version` invalidation |
 | Web Scraping | crawl4ai `AsyncWebCrawler`, httpx, recursive sitemaps and robots.txt discovery with crawl trap detection |
@@ -200,7 +200,7 @@ Five concurrent asynchronous stages in `orchestrator.py` coordinated by `asyncio
    - Extracts academic cycle year (`doc_period`) via `temporal.py`.
 4. **Question Generation Stage** (`orchestrator.py`, `services/llm_qgen/`):
    - Chunks are fetched in batches of 10.
-   - Gemini (`gemini-2.5-flash`, temperature 0.2) generates 3–5 grounded synthetic questions per chunk using structured JSON output.
+   - Gemini (``, temperature 0.2) generates 3–5 grounded synthetic questions per chunk using structured JSON output.
    - Successful generations insert `GeneratedQuestion` records and set `has_qgen=True`.
    - Failed or unreturned chunks increment `qgen_attempts` (capped at 3).
 5. **Qdrant Sync Stage** (`orchestrator.py`):

@@ -125,3 +125,20 @@ USE_TEST_QDRANT_DB=false
 # Telegram Bot Environment Switch
 TELEGRAM_BOT_USE_PROD=false
 ```
+
+## RAG Evaluation using RAGAS
+Ensure you are in the backend directory
+
+```bash
+# Generate for a single organization (creates evaluation/data/org_1/ground_truth.jsonl)
+uv run python -m evaluation.generate_ground_truth --org-id 1 --limit 30
+
+# Or generate for multiple specific organizations
+uv run python -m evaluation.generate_ground_truth --org-id 1 2 3 --limit 30
+
+# Evaluate a single tenant (reads and writes inside evaluation/data/org_1/)
+uv run python -m evaluation.run_evaluation --org-id 1 --top-k 5
+
+# Evaluate all tenant folders and produce evaluation/data/multi_tenant_summary.csv
+uv run python -m evaluation.run_evaluation --all-orgs --top-k 5
+```

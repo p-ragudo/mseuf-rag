@@ -1,0 +1,1 @@
+"""Multi-tenant RAG evaluation suite: Retrieval, Reranker Lift, Ragas, Custom Judges, and Lexical Metrics."""
