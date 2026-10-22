@@ -1,6 +1,7 @@
+"""LLM-as-judge rubrics. One sample per call (no cross-contamination between items), full contexts (no truncation)."""
 import asyncio
 import json
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 
 from google import genai
 from google.genai import types
@@ -8,133 +9,144 @@ from pydantic import BaseModel, Field
 
 from app.core.config import settings
 
-JUDGE_BATCH_SIZE = 5
+JUDGE_CONCURRENCY = 3
 
 
-class CustomJudgeScoreItem(BaseModel):
-    test_id: str = Field(description="The exact test_id of the evaluated sample.")
-    groundedness: float = Field(
-        description="0.0 to 1.0: Can every factual claim in the response be directly traced to the retrieved context without unsupported extrapolation?"
+class AnswerJudgeScore(BaseModel):
+    groundedness: float = Field(description="0.0-1.0, see rubric")
+    completeness: float = Field(description="0.0-1.0, see rubric")
+    helpfulness: float = Field(description="0.0-1.0, see rubric")
+    context_sufficiency: float = Field(description="0.0-1.0, see rubric")
+    brief_rationale: str = Field(description="One sentence explaining any deduction.")
+
+
+class AbstentionVerdict(BaseModel):
+    abstained: bool = Field(description="True if the response declines / says the information is not available.")
+    asserted_unsupported_facts: bool = Field(
+        description="True if the response states concrete facts (fees, dates, policies...) that are not in the contexts."
     )
-    completeness: float = Field(
-        description="0.0 to 1.0: Does the generated response cover all essential facts, steps, or requirements present in the ground_truth_answer?"
-    )
-    helpfulness: float = Field(
-        description="0.0 to 1.0: Does the response directly, clearly, and actionably satisfy the user's inquiry intent?"
-    )
-    source_sufficiency: float = Field(
-        description="0.0 to 1.0: Are the retrieved contexts and returned source URLs sufficient and relevant enough to answer the user's question?"
-    )
-    brief_rationale: str = Field(
-        description="1-sentence diagnostic explanation of any deductions."
-    )
+    brief_rationale: str
 
 
-class BatchCustomJudgeOutput(BaseModel):
-    evaluations: List[CustomJudgeScoreItem] = Field(
-        description="List of evaluation scores corresponding to each input test_id."
-    )
+ANSWER_RUBRIC = """You are an impartial, rigorous RAG evaluation judge. Score ONE test execution.
+Use only these values for every score: 0.0, 0.25, 0.5, 0.75, 1.0.
+
+groundedness - are the response's factual claims supported by the Retrieved Contexts?
+  1.0 every claim/number/date/step is supported; 0.5 mostly supported with minor unsupported additions;
+  0.0 contains claims absent from or contradicting the contexts.
+completeness - compared with the Reference Answer, does the response contain its key facts/steps/conditions?
+  1.0 all; 0.5 about half or key steps missing; 0.0 misses the core answer. Correct extra detail is NOT penalised.
+  Different wording of the same fact counts as covered.
+helpfulness - does the response directly and clearly answer the User Query, with correct branch/campus/level scope?
+  1.0 direct and actionable; 0.0 refuses although the contexts contained the answer, or is confusing.
+context_sufficiency - judging ONLY the Retrieved Contexts, do they contain the evidence needed to answer the query?
+  1.0 complete unambiguous evidence; 0.5 partial (e.g. part of a list missing); 0.0 irrelevant or empty.
+Judge each score independently."""
+
+ABSTENTION_RUBRIC = """You judge whether an assistant correctly REFUSED to answer a question that its knowledge base does
+not cover. Given the question, the retrieved contexts and the response, decide:
+  abstained: the response says the information is unavailable / cannot be answered from the documents (a partial
+             'here is what I do know about a related topic' that does not claim to answer the question still counts
+             as abstained).
+  asserted_unsupported_facts: the response states concrete facts that answer the question but are NOT in the contexts."""
 
 
-JUDGE_SYSTEM_INSTRUCTION = """You are an impartial, rigorous RAG Evaluation Judge.
-You will receive a batch of RAG test executions. For each item, score the following four metrics on a continuous scale from 0.0 to 1.0 (e.g., 0.0, 0.25, 0.5, 0.75, 1.0):
-
-1. groundedness (0.0 - 1.0):
-   - 1.0: Every single claim, number, date, or procedure in the Response is explicitly supported by the Retrieved Contexts.
-   - 0.5: Partially grounded, but includes minor unverified extrapolations.
-   - 0.0: Hallucinates facts not in the Retrieved Contexts or contradicts the context. (Note: A polite fallback saying information is unavailable when context is empty is 1.0 grounded).
-
-2. completeness (0.0 - 1.0):
-   - Compare the Response against the Ground Truth Reference Answer.
-   - 1.0: Captures 100% of the key facts, steps, or conditions in the reference answer.
-   - 0.5: Capturesroughly half of the necessary details or omits key steps.
-   - 0.0: Misses the core answer completely.
-
-3. helpfulness (0.0 - 1.0):
-   - 1.0: Directly answers the User Query with clear formatting, appropriate branch/level specificity, and actionable clarity.
-   - 0.0: Refuses to answer when context was present, is confusing, or fails to address user intent.
-
-4. source_sufficiency (0.0 - 1.0):
-   - 1.0: The Retrieved Contexts contain complete, unambiguous evidence required to answer the User Query, and the Ground Truth URL is represented.
-   - 0.5: The Retrieved Contexts contain partial evidence (e.g., missing parts of a list).
-   - 0.0: The Retrieved Contexts are irrelevant noise or empty.
-"""
-
-
-async def run_custom_judges_batch(
-    samples: List[Dict[str, Any]],
-    judge_model: str = "gemini-3.8-flash",
-) -> Dict[str, Dict[str, Any]]:
-    """
-    Evaluates groundedness, completeness, helpfulness, and source_sufficiency
-    in batches of 5 to maximize speed and minimize API quota usage.
-    Returns mapping: test_id -> {groundedness, completeness, helpfulness, source_sufficiency, brief_rationale}
-    """
+def _client():
     api_key = settings.llm_qa_api_key or settings.llm_qgen_api_key
-    client = genai.Client(api_key=api_key)
-    results_map: Dict[str, Dict[str, Any]] = {}
+    return genai.Client(api_key=api_key)
 
-    for i in range(0, len(samples), JUDGE_BATCH_SIZE):
-        batch = samples[i : i + JUDGE_BATCH_SIZE]
-        blocks = []
 
-        for item in batch:
-            ctx_preview = "\n---\n".join(item.get("retrieved_contexts", []))[:6000]
-            blocks.append(
-                f"=== TEST_ID: {item['test_id']} ===\n"
-                f"User Query: {item['user_input']}\n"
-                f"Ground Truth URL: {item.get('gt_url', 'N/A')}\n"
-                f"Retrieved URLs: {', '.join(item.get('retrieved_urls', [])) or 'None'}\n"
-                f"Ground Truth Reference Answer:\n{item['reference']}\n\n"
-                f"Retrieved Contexts:\n{ctx_preview}\n\n"
-                f"Generated Response:\n{item['response']}\n"
-                f"=== END TEST_ID: {item['test_id']} ==="
+async def _generate_json(client, model: str, system_instruction: str, prompt: str, schema, attempts: int = 3
+                         ) -> Optional[Dict[str, Any]]:
+    last: Optional[Exception] = None
+    for attempt in range(attempts):
+        try:
+            resp = await client.aio.models.generate_content(
+                model=model,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction=system_instruction,
+                    response_mime_type="application/json",
+                    response_schema=schema,
+                    temperature=0.0,
+                    automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+                ),
             )
+            if resp.text:
+                return json.loads(resp.text)
+            last = ValueError("empty judge response")
+        except Exception as e:  # noqa: BLE001
+            last = e
+        await asyncio.sleep(2.5 * (2 ** attempt))
+    print(f"  [Judge Error] {last}")
+    return None
 
+
+def _clamp(v: Any) -> Optional[float]:
+    try:
+        return round(min(1.0, max(0.0, float(v))), 4)
+    except (TypeError, ValueError):
+        return None
+
+
+async def run_answer_judges(rows: List[Dict[str, Any]], judge_model: str) -> Tuple[Dict[str, Dict[str, Any]], int]:
+    """rows need: test_id, user_input, reference, retrieved_contexts (list[str]), response. Returns (scores, n_failed)."""
+    client = _client()
+    sem = asyncio.Semaphore(JUDGE_CONCURRENCY)
+    out: Dict[str, Dict[str, Any]] = {}
+    failed = 0
+
+    async def one(row: Dict[str, Any]) -> None:
+        nonlocal failed
+        ctx = "\n---\n".join(row["retrieved_contexts"])
         prompt = (
-            f"Evaluate the following {len(batch)} RAG pipeline outputs independently:\n\n"
-            + "\n\n".join(blocks)
+            f"User Query:\n{row['user_input']}\n\n"
+            f"Reference Answer:\n{row['reference']}\n\n"
+            f"Retrieved Contexts:\n{ctx}\n\n"
+            f"Response to judge:\n{row['response']}\n"
         )
+        async with sem:
+            parsed = await _generate_json(client, judge_model, ANSWER_RUBRIC, prompt, AnswerJudgeScore)
+            await asyncio.sleep(0.3)
+        if not parsed:
+            failed += 1
+            return
+        out[row["test_id"]] = {
+            "groundedness": _clamp(parsed.get("groundedness")),
+            "completeness": _clamp(parsed.get("completeness")),
+            "helpfulness": _clamp(parsed.get("helpfulness")),
+            "context_sufficiency": _clamp(parsed.get("context_sufficiency")),
+            "judge_rationale": parsed.get("brief_rationale", ""),
+        }
 
-        response = None
-        for attempt in range(3):
-            try:
-                response = await client.aio.models.generate_content(
-                    model=judge_model,
-                    contents=prompt,
-                    config=types.GenerateContentConfig(
-                        system_instruction=JUDGE_SYSTEM_INSTRUCTION,
-                        response_mime_type="application/json",
-                        response_schema=BatchCustomJudgeOutput,
-                        temperature=0.0,
-                        automatic_function_calling=types.AutomaticFunctionCallingConfig(
-                            disable=True
-                        ),
-                    ),
-                )
-                break
-            except Exception as e:
-                if attempt < 2:
-                    await asyncio.sleep(2.5 * (2 ** attempt))
-                else:
-                    print(f"  [Custom Judge Error] Batch {i}..{i+len(batch)}: {e}")
+    await asyncio.gather(*(one(r) for r in rows))
+    return out, failed
 
-        if response and response.text:
-            try:
-                parsed = json.loads(response.text)
-                for ev in parsed.get("evaluations", []):
-                    tid = ev.get("test_id")
-                    if tid:
-                        results_map[tid] = {
-                            "groundedness": round(float(ev.get("groundedness", 0.0)), 4),
-                            "completeness": round(float(ev.get("completeness", 0.0)), 4),
-                            "helpfulness": round(float(ev.get("helpfulness", 0.0)), 4),
-                            "source_sufficiency": round(float(ev.get("source_sufficiency", 0.0)), 4),
-                            "judge_rationale": ev.get("brief_rationale", ""),
-                        }
-            except Exception as e:
-                print(f"  [Custom Judge Parse Error] Batch {i}..{i+len(batch)}: {e}")
 
-        await asyncio.sleep(0.4)
+async def run_abstention_judges(rows: List[Dict[str, Any]], judge_model: str) -> Tuple[Dict[str, Dict[str, Any]], int]:
+    """For unanswerable (negative) rows that the pipeline answered with the LLM. Fallback rows are abstentions by definition."""
+    client = _client()
+    sem = asyncio.Semaphore(JUDGE_CONCURRENCY)
+    out: Dict[str, Dict[str, Any]] = {}
+    failed = 0
 
-    return results_map
+    async def one(row: Dict[str, Any]) -> None:
+        nonlocal failed
+        ctx = "\n---\n".join(row["retrieved_contexts"])
+        prompt = (
+            f"Question:\n{row['user_input']}\n\nRetrieved Contexts:\n{ctx}\n\nResponse:\n{row['response']}\n"
+        )
+        async with sem:
+            parsed = await _generate_json(client, judge_model, ABSTENTION_RUBRIC, prompt, AbstentionVerdict)
+            await asyncio.sleep(0.3)
+        if not parsed:
+            failed += 1
+            return
+        out[row["test_id"]] = {
+            "abstained": bool(parsed.get("abstained")),
+            "asserted_unsupported_facts": bool(parsed.get("asserted_unsupported_facts")),
+            "judge_rationale": parsed.get("brief_rationale", ""),
+        }
+
+    await asyncio.gather(*(one(r) for r in rows))
+    return out, failed

@@ -142,3 +142,20 @@ uv run python -m evaluation.run_evaluation --org-id 1 --top-k 5
 # Evaluate all tenant folders and produce evaluation/data/multi_tenant_summary.csv
 uv run python -m evaluation.run_evaluation --all-orgs --top-k 5
 ```
+
+## RAG evaluation updated by claude
+```bash
+cd backend
+mkdir -p evaluation/_old && cp evaluation/*.py evaluation/_old/        # back up your current files
+# copy every file from this package over backend/evaluation/ (same names; new: compat, common, safety, stats, reporting, import_human_queries)
+
+# A. fastest useful run: re-score your EXISTING ground_truth.jsonl with the fixed retrieval metrics (no answer generation)
+uv run python -m evaluation.run_evaluation --org-id 1 --stage retrieval --filename ground_truth.jsonl
+
+# B. build the stronger test sets (standard + colloquial on the same chunks + unanswerable questions)
+uv run python -m evaluation.generate_ground_truth --org-id 1 --limit 40 --colloquial-model <a-different-model-if-you-can>
+uv run python -m evaluation.run_evaluation --org-id 1 --stage retrieval
+
+# C. full run: answers, judges, Ragas, abstention
+uv run python -m evaluation.run_evaluation --org-id 1 --stage all --judge-model <not-the-QA-model-if-you-can>
+```
