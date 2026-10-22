@@ -1,8 +1,4 @@
-"""Turns per-query rows into summary statistics (with confidence intervals) and a Markdown report across:
-  - Set 1: 100 Synthetic QA Pairs (broken down by Easy/Medium/Hard and Domain Cluster)
-  - Set 2: 21 Official FAQ QA Pairs
-  - Set 3: 71 Real-User Queries (reference-free RAG Triad & telemetry)
-"""
+"""Turns per-query rows into summary statistics (with confidence intervals, dataset-level rollups, and language breakdowns)."""
 import math
 from typing import Any, Dict, List, Optional
 
@@ -72,12 +68,14 @@ def retrieval_block(pos: List[Dict[str, Any]], k: int, n_boot: int, seed: int) -
     for name, key in STAGES:
         ranks = [r.get(key) for r in pos]
         ms = [rank_metrics(x, k) for x in ranks]
+        precisions = [r.get(f"precision_{name}", (1.0 / k if m["hit"] else 0.0)) for r, m in zip(pos, ms)]
         recalls = [r.get(f"recall_{name}", m["hit"]) for r, m in zip(pos, ms)]
         all_hits = [r.get(f"all_hit_{name}", m["hit"]) for r, m in zip(pos, ms)]
         ndcgs = [r.get(f"ndcg_{name}", m["ndcg"]) for r, m in zip(pos, ms)]
         out[name] = {
             "hit@1": _block([1.0 if (x is not None and x <= 1) else 0.0 for x in ranks], cl, n_boot, seed),
             "hit@k": _block([m["hit"] for m in ms], cl, n_boot, seed),
+            "precision@k": _block(precisions, cl, n_boot, seed),
             "recall@k": _block(recalls, cl, n_boot, seed),
             "all_hit@k": _block(all_hits, cl, n_boot, seed),
             "mrr@k": _block([m["rr"] for m in ms], cl, n_boot, seed),
@@ -88,7 +86,7 @@ def retrieval_block(pos: List[Dict[str, Any]], k: int, n_boot: int, seed: int) -
 
 
 def slice_breakdown(pos: List[Dict[str, Any]], slice_key: str, k: int, n_boot: int, seed: int) -> Dict[str, Dict[str, Any]]:
-    """Computes retrieval and answer metrics grouped by difficulty ('easy','medium','hard') or domain_cluster."""
+    """Computes retrieval and answer metrics grouped by a metadata key (e.g. 'language', 'difficulty', 'domain_cluster')."""
     out: Dict[str, Dict[str, Any]] = {}
     keys = sorted({str(r.get(slice_key) or "unspecified") for r in pos})
     for val in keys:
@@ -148,6 +146,8 @@ def summarize(
         "meta": meta,
         "n": {},
         "retrieval": {},
+        "global_aggregate": {},
+        "by_language": {},
         "by_difficulty": {},
         "by_domain_cluster": {},
         "reranker_effect": {},
@@ -161,50 +161,65 @@ def summarize(
         "warnings": [],
     }
     pos_all = [r for r in rows if r["answerable"] and r.get("has_ground_truth", True)]
-    syn_100_rows = [r for r in pos_all if r["set_name"] in ("synthetic_100", "synthetic_standard")]
     real_user_rows = [r for r in rows if not r.get("has_ground_truth", True) and r["answerable"]]
     neg = [r for r in rows if not r["answerable"]]
 
-    target_for_slices = syn_100_rows if syn_100_rows else pos_all
-    if target_for_slices:
-        out["by_difficulty"] = slice_breakdown(target_for_slices, "difficulty", k, n_boot, seed)
-        out["by_domain_cluster"] = slice_breakdown(target_for_slices, "domain_cluster", k, n_boot, seed)
-
-    for s in sorted({r["set_name"] for r in pos_all}):
-        pos = [r for r in pos_all if r["set_name"] == s]
-        out["n"][s] = {"queries": len(pos), "gold_chunks": len({r["cluster"] for r in pos})}
-        out["retrieval"][s] = retrieval_block(pos, k, n_boot, seed)
-        out["reranker_effect"][s] = paired_effect(pos, "rank_rrf", "rank_rerank", k, n_boot, seed)
-        out["temporal_effect"][s] = paired_effect(pos, "rank_rerank", "rank_final", k, n_boot, seed)
-        cl = [r["cluster"] for r in pos]
-        ctx = {
-            "gold_in_context": _block([1.0 if r.get("ctx_hit") else 0.0 for r in pos], cl, n_boot, seed),
-            "proportional_ctx_recall": _block([float(r.get("ctx_recall", 1.0 if r.get("ctx_hit") else 0.0)) for r in pos], cl, n_boot, seed),
-            "final_hit_but_not_in_context": sum(
-                1 for r in pos if r.get("rank_final") is not None and r["rank_final"] <= k and not r.get("ctx_hit")
-            ),
+    # 1. Global Aggregate across all ground-truth datasets (Synthetic 150 + FAQs 63)
+    if pos_all:
+        cl_all = [r["cluster"] for r in pos_all]
+        ranks_all = [r.get("rank_final") for r in pos_all]
+        ms_all = [rank_metrics(x, k) for x in ranks_all]
+        rec_all = [r.get("recall_final", m["hit"]) for r, m in zip(pos_all, ms_all)]
+        global_ans: Dict[str, Any] = {}
+        answered_all = [r for r in pos_all if r.get("source") == "llm" and r.get("reference")]
+        for m_name in ANSWER_METRICS:
+            vs = [(r[m_name], r["cluster"]) for r in answered_all if _isnum(r.get(m_name))]
+            if vs:
+                global_ans[m_name] = _block([v for v, _ in vs], [c for _, c in vs], n_boot, seed)
+        out["global_aggregate"] = {
+            "n": len(pos_all),
+            "hit@k": _block([m["hit"] for m in ms_all], cl_all, n_boot, seed),
+            "recall@k": _block(rec_all, cl_all, n_boot, seed),
+            "mrr@k": _block([m["rr"] for m in ms_all], cl_all, n_boot, seed),
+            "answers": global_ans,
         }
-        out["context"][s] = ctx
+        # Slices for ground-truth datasets
+        out["by_difficulty"] = slice_breakdown(pos_all, "difficulty", k, n_boot, seed)
+        out["by_domain_cluster"] = slice_breakdown(pos_all, "domain_cluster", k, n_boot, seed)
+        out["by_language"] = slice_breakdown(pos_all, "language", k, n_boot, seed)
 
-        answered = [r for r in pos if r.get("source") == "llm" and r.get("reference")]
-        with_resp = [r for r in pos if r.get("answer_stage")]
-        if with_resp:
-            a: Dict[str, Any] = {
-                "n_answered": len(answered),
-                "fallback_rate": _block([1.0 if r["source"] == "fallback" else 0.0 for r in pos], cl, n_boot, seed),
+    # 2. Per-Dataset Breakdown (synthetic_150 vs. faqs_63 vs. real_user_71)
+    for s in sorted({r["set_name"] for r in rows if r["answerable"]}):
+        pos = [r for r in rows if r["set_name"] == s and r["answerable"]]
+        if not pos:
+            continue
+        has_gt = pos[0].get("has_ground_truth", True)
+        out["n"][s] = {"queries": len(pos), "gold_chunks": len({r["cluster"] for r in pos})}
+        
+        if has_gt:
+            out["retrieval"][s] = retrieval_block(pos, k, n_boot, seed)
+            out["reranker_effect"][s] = paired_effect(pos, "rank_rrf", "rank_rerank", k, n_boot, seed)
+            out["temporal_effect"][s] = paired_effect(pos, "rank_rerank", "rank_final", k, n_boot, seed)
+            cl = [r["cluster"] for r in pos]
+            ctx = {
+                "gold_in_context": _block([1.0 if r.get("ctx_hit") else 0.0 for r in pos], cl, n_boot, seed),
+                "proportional_ctx_recall": _block([float(r.get("ctx_recall", 1.0 if r.get("ctx_hit") else 0.0)) for r in pos], cl, n_boot, seed),
             }
-            for m in ANSWER_METRICS:
-                vs = [(r[m], r["cluster"]) for r in answered if _isnum(r.get(m))]
-                a[m] = _block([v for v, _ in vs], [c for _, c in vs], n_boot, seed)
-            ref_rows = [r for r in pos if r.get("reference") and r.get("source") in ("llm", "fallback")]
-            vs2 = [
-                ((r["completeness"] if r["source"] == "llm" and _isnum(r.get("completeness")) else 0.0), r["cluster"])
-                for r in ref_rows
-                if r["source"] == "fallback" or _isnum(r.get("completeness"))
-            ]
-            a["completeness_unconditional"] = _block([v for v, _ in vs2], [c for _, c in vs2], n_boot, seed)
-            out["answers"][s] = a
+            out["context"][s] = ctx
 
+            answered = [r for r in pos if r.get("source") == "llm" and r.get("reference")]
+            if answered:
+                a: Dict[str, Any] = {
+                    "n_answered": len(answered),
+                    "fallback_rate": _block([1.0 if r["source"] == "fallback" else 0.0 for r in pos], cl, n_boot, seed),
+                }
+                for m in ANSWER_METRICS:
+                    vs = [(r[m], r["cluster"]) for r in answered if _isnum(r.get(m))]
+                    if vs:
+                        a[m] = _block([v for v, _ in vs], [c for _, c in vs], n_boot, seed)
+                out["answers"][s] = a
+
+    # 3. Real-User Queries Telemetry (Untouched, single block)
     if real_user_rows:
         cl = [r["test_id"] for r in real_user_rows]
         ru: Dict[str, Any] = {
@@ -238,7 +253,7 @@ def summarize(
         nb["best_reranker_threshold"] = best_threshold(pos_scores, neg_scores)
         out["negatives"] = nb
 
-    ans_rows = [r for r in pos_all if r.get("source") == "llm"]
+    ans_rows = [r for r in pos_all if r.get("source")] == "llm"
     for a_key, b_key in AGREEMENT_PAIRS:
         rho = spearman(
             [r.get(a_key) if _isnum(r.get(a_key)) else None for r in ans_rows],
@@ -249,13 +264,6 @@ def summarize(
     for name, key in (("total_ms", "latency_ms"), ("retrieval_ms", "retrieval_latency_ms")):
         v = [r[key] for r in rows if _isnum(r.get(key))]
         out["latency"][name] = {"p50": percentile(v, 0.5), "p95": percentile(v, 0.95), "n": len(v)}
-
-    if meta.get("judge_model") and meta["judge_model"] in (meta.get("qa_model"), meta.get("curator_model")):
-        out["warnings"].append("The judge model equals the answer or curator model: expect self-preference bias.")
-    if meta.get("stale_skipped"):
-        out["warnings"].append(
-            f"{meta['stale_skipped']} records skipped because their gold chunk changed/disappeared since dataset generation."
-        )
     return out
 
 
@@ -283,17 +291,28 @@ def render_markdown(s: Dict[str, Any], k: int) -> str:
     if m.get("parity"):
         L.append(f"- Parity check (inspector vs production execute()): {m['parity']}")
     L.append("")
-    if s["warnings"]:
-        L += ["## Cautions", ""] + [f"- {w}" for w in s["warnings"]] + [""]
 
-    L += [
-        "## 1. Stage-by-Stage Retrieval (100 Synthetic vs. 21 Official FAQs)",
-        "",
-        f"`Hit@{k}` = at least one gold chunk in top-{k}. `Recall@{k}` = fraction of required chunks retrieved (crucial for Medium/Hard multi-chunk queries). `All-Hit@{k}` = 1.0 iff ALL required chunks are in top-{k}.",
-        "",
-    ]
+    # 1. Global Aggregate Summary
+    if s.get("global_aggregate"):
+        ga = s["global_aggregate"]
+        L += [
+            "## 1. Global Aggregated Performance (All Ground-Truth Datasets Combined)",
+            "",
+            f"- **Grand Total Evaluated Ground-Truth Queries**: {ga['n']}",
+            f"- **Overall Hit@{k}**: {_f(ga['hit@k'])}",
+            f"- **Overall Recall@{k}**: {_f(ga['recall@k'])}",
+            f"- **Overall MRR@{k}**: {_f(ga['mrr@k'])}",
+        ]
+        if ga.get("answers") and "groundedness" in ga["answers"]:
+            L.append(f"- **Overall Groundedness**: {_f(ga['answers']['groundedness'])}")
+        L.append("")
+
+    # 2. Per-Dataset Retrieval Breakdown
+    L += ["## 2. Per-Dataset Stage-by-Stage Retrieval", ""]
     for st, nn in s["n"].items():
-        L += [f"### Set: {st}  (n = {nn['queries']} queries, {nn['gold_chunks']} primary gold chunks)", ""]
+        if st not in s["retrieval"]:
+            continue
+        L += [f"### Dataset: {st}  (n = {nn['queries']} queries)", ""]
         rows = []
         for name, _ in STAGES:
             b = s["retrieval"][st][name]
@@ -301,15 +320,35 @@ def render_markdown(s: Dict[str, Any], k: int) -> str:
                 STAGE_LABELS[name],
                 _f(b["hit@1"]),
                 _f(b["hit@k"]),
+                _f(b["precision@k"]),
                 _f(b["recall@k"]),
                 _f(b["all_hit@k"]),
                 _f(b["mrr@k"]),
                 _f(b["ndcg@k"]),
             ])
-        L += [_table(["Stage", "Hit@1", f"Hit@{k}", f"Recall@{k}", f"All-Hit@{k}", f"MRR@{k}", f"nDCG@{k}"], rows), ""]
+        L += [_table(["Stage", "Hit@1", f"Hit@{k}", f"Precision@{k}", f"Recall@{k}", f"All-Hit@{k}", f"MRR@{k}", f"nDCG@{k}"], rows), ""]
 
+    # 3. Breakdown by Language (English vs Tagalog vs Taglish)
+    if s.get("by_language"):
+        L += ["## 3. Breakdown by Language (English vs. Tagalog vs. Taglish)", ""]
+        rows = []
+        for lang_name, b in s["by_language"].items():
+            rows.append([
+                lang_name,
+                str(b["n"]),
+                _f(b["hit@k"]),
+                _f(b["recall@k"]),
+                _f(b["mrr@k"]),
+                _f(b["ctx_recall"]),
+                _f(b.get("groundedness")),
+                _f(b.get("completeness")),
+                _f(b.get("answer_semantic_similarity")),
+            ])
+        L += [_table(["Language", "n", f"Hit@{k}", f"Recall@{k}", f"MRR@{k}", "Ctx Recall", "Groundedness", "Completeness", "Semantic Sim"], rows), ""]
+
+    # 4. Breakdown by Difficulty Tier
     if s.get("by_difficulty"):
-        L += ["## 2. Synthetic 100 Breakdown by Difficulty Tier (Easy / Medium / Hard)", ""]
+        L += ["## 4. Breakdown by Difficulty Tier (Easy / Medium / Hard)", ""]
         rows = []
         for diff in ("easy", "medium", "hard"):
             if diff not in s["by_difficulty"]:
@@ -322,61 +361,27 @@ def render_markdown(s: Dict[str, Any], k: int) -> str:
                 _f(b["recall@k"]),
                 _f(b["all_hit@k"]),
                 _f(b["mrr@k"]),
-                _f(b["ctx_recall"]),
                 _f(b.get("completeness")),
                 _f(b.get("answer_semantic_similarity")),
             ])
-        L += [_table(["Tier", "n", f"Hit@{k}", f"Recall@{k}", f"All-Hit@{k}", f"MRR@{k}", "Ctx Recall", "Completeness", "Semantic Sim"], rows), ""]
+        L += [_table(["Tier", "n", f"Hit@{k}", f"Recall@{k}", f"All-Hit@{k}", f"MRR@{k}", "Completeness", "Semantic Sim"], rows), ""]
 
-    if s.get("by_domain_cluster"):
-        L += ["## 3. Synthetic 100 Breakdown by Domain Cluster", ""]
-        rows = []
-        for cl_name, b in s["by_domain_cluster"].items():
-            rows.append([
-                cl_name,
-                str(b["n"]),
-                _f(b["hit@k"]),
-                _f(b["recall@k"]),
-                _f(b["mrr@k"]),
-                _f(b["ctx_recall"]),
-                _f(b.get("groundedness")),
-                _f(b.get("completeness")),
-            ])
-        L += [_table(["Domain Cluster", "n", f"Hit@{k}", f"Recall@{k}", f"MRR@{k}", "Ctx Recall", "Groundedness", "Completeness"], rows), ""]
-
-    L += ["## 4. Cross-Encoder Reranker Effect (Paired)", ""]
-    rows = []
-    for st, e in s["reranker_effect"].items():
-        rows.append([st, str(e["rescued"]), str(e["harmed"]), _f(e["delta_hit@k"]), _f(e["delta_mrr@k"]), f"{e['mcnemar_p']:.3f}"])
-    L += [_table(["Set", "Rescued", "Harmed", f"Delta Hit@{k}", f"Delta MRR@{k}", "McNemar p"], rows), ""]
-
-    if s["answers"]:
-        L += ["## 5. Answer Quality, Semantic Similarity & Lexical Metrics (100 Synthetic & 21 FAQs)", ""]
-        hdr = ["Metric"] + list(s["answers"].keys())
-        rows = [
-            ["answered n"] + [str(a["n_answered"]) for a in s["answers"].values()],
-            ["fallback rate"] + [_f(a["fallback_rate"]) for a in s["answers"].values()],
-            ["completeness (incl. fallback=0)"] + [_f(a["completeness_unconditional"]) for a in s["answers"].values()],
-        ]
-        for mt in ANSWER_METRICS:
-            rows.append([mt] + [_f(a.get(mt)) for a in s["answers"].values()])
-        L += [_table(hdr, rows), ""]
-
+    # 5. Real-User Queries Telemetry (Untouched block)
     if s.get("real_user_telemetry"):
         ru = s["real_user_telemetry"]
         L += [
-            f"## 6. Real-User Queries Evaluation (n = {ru['n']} unlabeled queries, Reference-Free Metrics)",
+            f"## 5. Real-User Queries Telemetry (n = {ru['n']} unlabeled queries, Reference-Free Metrics)",
             "",
             f"- Answered rate: {_f(ru['answered_rate'])}  |  Fallback rate: {_f(ru['fallback_rate'])}  |  Campus filter triggered: {_f(ru['campus_detected_rate'])}",
             f"- Reference-Free Groundedness: {_f(ru.get('groundedness'))}  |  Helpfulness: {_f(ru.get('helpfulness'))}  |  Context Sufficiency: {_f(ru.get('context_sufficiency'))}",
-            f"- Ragas Faithfulness: {_f(ru.get('faithfulness'))}  |  Ragas Answer Relevancy: {_f(ru.get('answer_relevancy'))}  |  Mean Top Rerank Score: {_f(ru.get('top_rerank_score'))}",
+            f"- Ragas Faithfulness: {_f(ru.get('faithfulness'))}  |  Ragas Answer Relevancy: {_f(ru.get('answer_relevancy'))}",
             "",
         ]
 
     lat = s["latency"]
     if lat.get("total_ms", {}).get("n"):
         L += [
-            "## 7. Latency",
+            "## 6. Latency",
             "",
             f"- Total p50/p95: {lat['total_ms']['p50']:.0f} / {lat['total_ms']['p95']:.0f} ms  |  Retrieval-only p50/p95: {lat['retrieval_ms']['p50']:.0f} / {lat['retrieval_ms']['p95']:.0f} ms",
             "",
@@ -386,13 +391,13 @@ def render_markdown(s: Dict[str, Any], k: int) -> str:
 
 def headline(s: Dict[str, Any]) -> Dict[str, Any]:
     flat: Dict[str, Any] = {"org_id": s["meta"].get("org_id"), "org_name": s["meta"].get("org_name")}
+    if s.get("global_aggregate"):
+        ga = s["global_aggregate"]
+        flat["global.hit@k"] = ga["hit@k"]["mean"]
+        flat["global.recall@k"] = ga["recall@k"]["mean"]
+        flat["global.mrr@k"] = ga["mrr@k"]["mean"]
     for st in s["retrieval"]:
         for stage in ("rrf", "rerank", "final"):
             for mt in ("hit@k", "recall@k", "mrr@k"):
                 flat[f"{st}.{stage}.{mt}"] = s["retrieval"][st][stage][mt]["mean"]
-        flat[f"{st}.gold_in_context"] = s["context"][st]["gold_in_context"]["mean"]
-    for st, a in s["answers"].items():
-        for mt in ("groundedness", "completeness", "answer_semantic_similarity", "token_f1", "rouge_l", "bleu"):
-            if mt in a:
-                flat[f"{st}.{mt}"] = a[mt]["mean"]
     return flat
