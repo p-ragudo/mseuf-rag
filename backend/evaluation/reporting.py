@@ -55,7 +55,7 @@ AGREEMENT_PAIRS = [
 
 
 def _isnum(x: Any) -> bool:
-    return isinstance(x, (int, float)) and not (isinstance(x, float) and math.isnan(x))
+    return isinstance(x, (int, float)) and not isinstance(x, bool) and not (isinstance(x, float) and math.isnan(x))
 
 
 def _block(values: List[float], clusters: List[Any], n_boot: int, seed: int) -> Dict[str, Any]:
@@ -253,13 +253,15 @@ def summarize(
         nb["best_reranker_threshold"] = best_threshold(pos_scores, neg_scores)
         out["negatives"] = nb
 
-    ans_rows = [r for r in pos_all if r.get("source")] == "llm"
+    ans_rows = [r for r in pos_all if r.get("source") == "llm"]
     for a_key, b_key in AGREEMENT_PAIRS:
-        rho = spearman(
-            [r.get(a_key) if _isnum(r.get(a_key)) else None for r in ans_rows],
-            [r.get(b_key) if _isnum(r.get(b_key)) else None for r in ans_rows],
-        )
-        out["judge_agreement"][f"{a_key} vs {b_key}"] = rho
+        val_a = [r.get(a_key) if _isnum(r.get(a_key)) else None for r in ans_rows]
+        val_b = [r.get(b_key) if _isnum(r.get(b_key)) else None for r in ans_rows]
+        if any(v is not None for v in val_a) and any(v is not None for v in val_b):
+            rho = spearman(val_a, val_b)
+            out["judge_agreement"][f"{a_key} vs {b_key}"] = rho
+        else:
+            out["judge_agreement"][f"{a_key} vs {b_key}"] = None
 
     for name, key in (("total_ms", "latency_ms"), ("retrieval_ms", "retrieval_latency_ms")):
         v = [r[key] for r in rows if _isnum(r.get(key))]

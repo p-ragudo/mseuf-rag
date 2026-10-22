@@ -299,11 +299,10 @@ def setup_ragas_judge(judge_model_name: str, reference_free_only: bool = False):
 
 
 def run_ragas(rows: List[Dict[str, Any]], judge_model: str, reference_free_only: bool = False) -> None:
+    import concurrent.futures
     import pandas as pd
     from datasets import Dataset
-    from ragas import evaluate
 
-    metrics = setup_ragas_judge(judge_model, reference_free_only=reference_free_only)
     df = pd.DataFrame([
         {
             "user_input": r["user_input"],
@@ -313,7 +312,31 @@ def run_ragas(rows: List[Dict[str, Any]], judge_model: str, reference_free_only:
         }
         for r in rows
     ])
-    scores = evaluate(dataset=Dataset.from_pandas(df), metrics=metrics).to_pandas()
+    dataset = Dataset.from_pandas(df)
+
+    def _isolated_worker():
+        import asyncio
+        from ragas import evaluate
+        
+        # Give the thread its own dedicated event loop
+        new_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(new_loop)
+        try:
+            # Instantiate judge wrappers cleanly inside this thread's loop
+            metrics = setup_ragas_judge(judge_model, reference_free_only=reference_free_only)
+            result = evaluate(dataset=dataset, metrics=metrics)
+            return result.to_pandas()
+        finally:
+            new_loop.close()
+
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(_isolated_worker)
+            scores = future.result(timeout=600)  # 10 min hard timeout
+    except Exception as exc:
+        print(f"[Ragas Isolated Worker Warning] {exc!r}. Skipping Ragas metrics for this set.")
+        return
+
     cols = (
         ("faithfulness", "answer_relevancy")
         if reference_free_only
