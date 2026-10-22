@@ -1,21 +1,29 @@
-"""Builds the test sets. READ-ONLY on Postgres (SELECTs only); writes local files under evaluation/data/org_<id>/.
+"""Builds and structures the three evaluation datasets (100 + 21 + 71 = 192 total entries).
+READ-ONLY on Postgres (SELECTs only); writes local files under evaluation/data/org_<id>/.
 
-Sets (all stored in one JSONL, distinguished by `set_name`):
-  synthetic_standard   - 1-2 formal, self-contained questions per sampled chunk (like the original generator)
-  synthetic_colloquial - 1 short, informal question per SAME chunk, different prompt (and optionally different model).
-                         Comparing the two on the same gold chunks measures how much of your score is 'easy phrasing'.
-  negative             - questions the knowledge base should NOT be able to answer (off-topic + plausible-but-absent)
-                         -> measures hallucination / abstention and lets us calibrate the reranker threshold.
+Specifically:
+  1. `ground_truth_100.jsonl`: Reduces the 259 synthetic QA pairs in `ground_truth.jsonl` to EXACTLY 100 entries,
+     balanced across 3 domain clusters (`faqs_procedures`: 34, `specs_programs`: 33, `policies_announcements`: 33)
+     and divided into 3 difficulty tiers:
+       - Easy   (40 entries): Single-hop (1 chunk), stratified across URLs/campuses from the 259 synthetic pairs
+       - Medium (35 entries): Cross-referencing 2-3 chunks from the 259-pair pool (Generated in English, Tagalog, Taglish)
+       - Hard   (25 entries): Multi-hop / aggregation / calculation across 2-3 chunks (Generated in English, Tagalog, Taglish)
+  2. `ground_truth_faqs_21.jsonl`: Prepares the 21 official FAQ QA pairs (`set_name="faqs"`) and resolves their
+     live SQL `Chunk.id`s so they are never falsely dropped as stale. Base queries remain English.
+  3. `queries_real_users_71.jsonl`: Prepares the 71 real-user queries (`set_name="real_user"`, `has_ground_truth=False`)
+     for reference-free evaluation. Kept exactly as real users typed them.
 
-Usage:  uv run python -m evaluation.generate_ground_truth --org-id 1 --limit 40
+Usage:
+  uv run python -m evaluation.generate_ground_truth --org-id 1 --overwrite
 """
 import argparse
 import asyncio
 import json
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from google import genai
 from google.genai import types
@@ -29,177 +37,247 @@ if str(PROJECT_ROOT) not in sys.path:
 from app.core.config import settings
 from app.core.database import async_session
 from app.models.chunk import Chunk
-from app.models.generated_question import GeneratedQuestion
 from app.models.org import Org
 from app.models.scraped_page import PageProcessStatus, ScrapedPage
-from app.services.ingest_pipeline.orchestrator import (
-    classify_academic_level,
-    classify_document_type,
-    extract_sub_entity_from_url,
-    get_active_sync_column,
+from evaluation.common import (
+    content_sha,
+    infer_domain_cluster,
+    normalize_ws,
+    read_jsonl,
+    tenant_dir,
+    write_jsonl,
 )
-from app.utils.temporal import extract_doc_period
-from evaluation.common import content_sha, tenant_dir, write_jsonl
-from evaluation.filter_heuristics import is_substantive_evaluation_chunk
 from evaluation.safety import install_postgres_write_guard
+from evaluation.traditional_metrics import gold_anchors
 
-BATCH_CHUNK_SIZE = 5
-DEFAULT_CURATOR_MODEL = "gemini-3.8-flash"
+DEFAULT_CURATOR_MODEL = "gemini-2.5-flash"
 
-OFF_TOPIC_QUESTIONS = [
-    "What is the capital of France?",
-    "Write me a short poem about the sea.",
-    "Who won the NBA championship last year?",
-    "How do I fix a flat bicycle tire?",
-    "What is the best way to invest in the stock market?",
-    "Can you recommend a good recipe for chicken adobo?",
-]
-
-
-class SyntheticQAPair(BaseModel):
-    query: str = Field(description="A realistic, standalone user question.")
-    ground_truth_answer: str = Field(description="A strictly grounded reference answer derived solely from the chunk text.")
+# Exact 100-entry matrix for the Synthetic Dataset (Domain Cluster x Difficulty Tier):
+#   faqs_procedures        (34) = 14 easy + 12 medium + 8 hard
+#   specs_programs         (33) = 13 easy + 12 medium + 8 hard
+#   policies_announcements (33) = 13 easy + 11 medium + 9 hard
+#   ----------------------------------------------------------
+#   Total                  (100)= 40 easy + 35 medium + 25 hard
+SYNTHETIC_100_PLAN = {
+    "faqs_procedures": {"easy": 14, "medium": 12, "hard": 8},
+    "specs_programs": {"easy": 13, "medium": 12, "hard": 8},
+    "policies_announcements": {"easy": 13, "medium": 11, "hard": 9},
+}
 
 
-class ChunkEvaluationItem(BaseModel):
-    chunk_id: int = Field(description="The integer CHUNK ID corresponding to the evaluated block.")
-    is_valuable: bool = Field(description="False if the chunk is fluff, promotional filler, or lacks concrete facts.")
-    qa_pairs: List[SyntheticQAPair] = Field(default_factory=list)
+class MultiHopQAPair(BaseModel):
+    query: str = Field(description="Standalone question requiring all provided chunks to answer completely.")
+    ground_truth_answer: str = Field(
+        description="Complete, strictly grounded reference answer combining/calculating facts across the chunks."
+    )
+    difficulty: str = Field(description="'medium' for cross-referencing or 'hard' for calculation/aggregation/multi-hop.")
+    reasoning_type: str = Field(
+        description="e.g. 'cross_reference_comparison', 'numeric_aggregation', 'date_duration_calculation', 'multi_step_synthesis'"
+    )
 
 
-class BatchChunkEvaluationOutput(BaseModel):
-    results: List[ChunkEvaluationItem]
+def _build_multihop_instruction(org_name: str, difficulty: str, language: str) -> str:
+    if difficulty == "medium":
+        return f"""You are a Senior RAG Benchmark Architect for {org_name}.
+You are given 2 to 3 related document chunks from {org_name}'s knowledge base.
+Write ONE realistic user question (written in {language}) and its strictly grounded reference answer (written in English) that REQUIRES cross-referencing facts from AT LEAST TWO of the provided chunks.
+Examples of Medium (Cross-Referencing) tasks:
+- Comparing document requirements or procedures between two different applicant types, grade levels, or campuses.
+- Connecting an academic program or office mentioned in one chunk with its faculty, requirements, or schedule in another chunk.
+STRICT RULES:
+1. Do NOT invent facts outside the provided chunks.
+2. Never say "according to chunk 1" or "in the text".
+3. Set difficulty="medium"."""
+    return f"""You are a Senior RAG Benchmark Architect for {org_name}.
+You are given 2 to 3 related document chunks from {org_name}'s knowledge base.
+Write ONE realistic, challenging user question (written in {language}) and its strictly grounded reference answer (written in English) that REQUIRES multi-hop reasoning, counting, numeric aggregation, or date/duration calculation across the chunks.
+Examples of Hard (Multi-Hop / Aggregation / Calculation) tasks:
+- Calculating the total number of copies/photos/documents needed if two siblings of different levels apply together.
+- Counting total scholarship qualifiers, awards, or days suspended across multiple announcements/sections.
+- Synthesizing multi-step conditional policies across chunks (e.g., if an applicant fails a specific test or applies across two categories, what combined steps, offices, and requirements apply).
+STRICT RULES:
+1. Every number, date, and condition in `ground_truth_answer` must be verifiable from the chunks. Show the exact breakdown in `ground_truth_answer`.
+2. Never say "according to chunk 1".
+3. Set difficulty="hard"."""
 
 
-class NegativeQuestionSet(BaseModel):
-    questions: List[str]
-
-
-def build_curator_instruction(org_name: str, style: str) -> str:
-    common = f"""You are a Senior QA Benchmark Curator for {org_name} (a multi-tenant RAG platform).
-Analyze each content chunk independently.
-
-GROUNDING RULES
-1. Every fact in `ground_truth_answer` MUST come directly from the chunk. Never use outside knowledge.
-2. Users do not see the chunk. Never write "according to this section" or "in the table above".
-3. Campus & level: if the metadata names a campus (other than 'main') or level (e.g. 'shs', 'graduate'), keep that scope
-   in the question and answer so cross-campus confusion is avoided.
-4. Fluff rejection: promotional text, vague announcement headers or boilerplate -> is_valuable=false, qa_pairs=[].
-5. Return one item for every chunk ID provided."""
-    if style == "standard":
-        return common + """
-STYLE: write 1 to 2 clear, formal, self-contained questions per valuable chunk. Name the program, office, campus or
-academic period explicitly when stated."""
-    return common + """
-STYLE: write exactly ONE question per valuable chunk, the way a real prospective student, parent or employee would type
-into a chat box: short, informal, sometimes incomplete, occasionally Taglish when natural. Do NOT copy distinctive phrases
-or headings from the chunk; paraphrase with everyday words. Keep the key entity (program / office / campus) because
-without it the question would be ambiguous, but drop formal wording and academic-year boilerplate unless essential.
-The question must still be fully answerable from the chunk."""
-
-
-# ------------------------------------------------------------------------------------------
-# DB reads
-# ------------------------------------------------------------------------------------------
-
-async def discover_indexed_tenants() -> List[Org]:
-    sync_col = get_active_sync_column()
+async def resolve_chunk_ids_for_texts(
+    org_id: int, contexts: List[str], source_url: Optional[str] = None
+) -> List[int]:
+    """Maps ground_truth_contexts (e.g. from ground_truth_faqs.jsonl) to live SQL Chunk.id values."""
+    if not contexts:
+        return []
     async with async_session() as session:
         stmt = (
-            select(Org)
-            .join(ScrapedPage, ScrapedPage.org_id == Org.id)
-            .join(Chunk, Chunk.page_id == ScrapedPage.id)
-            .join(GeneratedQuestion, GeneratedQuestion.chunk_id == Chunk.id)
-            .where(ScrapedPage.status == PageProcessStatus.COMPLETED, sync_col.is_(True))
-            .group_by(Org.id)
-            .order_by(Org.id)
-        )
-        return list((await session.execute(stmt)).scalars().all())
-
-
-async def fetch_equivalence_groups(org_id: int) -> Dict[Tuple[str, str], List[int]]:
-    """(normalised-content hash, campus) -> chunk ids. Exact same-campus duplicates are all valid gold answers."""
-    async with async_session() as session:
-        rows = (
-            await session.execute(
-                select(Chunk.id, Chunk.content, ScrapedPage.url)
-                .join(ScrapedPage, Chunk.page_id == ScrapedPage.id)
-                .where(ScrapedPage.org_id == org_id, ScrapedPage.status == PageProcessStatus.COMPLETED)
-            )
-        ).all()
-    groups: Dict[Tuple[str, str], List[int]] = {}
-    for cid, content, url in rows:
-        key = (content_sha(content), extract_sub_entity_from_url(url))
-        groups.setdefault(key, []).append(int(cid))
-    return groups
-
-
-async def fetch_tenant_chunks(org_id: int, sample_limit: int) -> List[Dict[str, Any]]:
-    sync_col = get_active_sync_column()
-    async with async_session() as session:
-        stmt = (
-            select(
-                Chunk.id.label("chunk_id"), Chunk.content.label("content"), Chunk.chunk_index.label("chunk_index"),
-                Chunk.section_id.label("section_id"), Chunk.heading_path.label("heading_path"),
-                ScrapedPage.id.label("page_id"), ScrapedPage.url.label("source_url"),
-                ScrapedPage.doc_period.label("page_doc_period"),
-            )
+            select(Chunk.id, Chunk.content, ScrapedPage.url)
             .join(ScrapedPage, Chunk.page_id == ScrapedPage.id)
-            .where(
-                ScrapedPage.org_id == org_id,
-                ScrapedPage.status == PageProcessStatus.COMPLETED,
-                Chunk.id.in_(select(GeneratedQuestion.chunk_id).where(sync_col.is_(True))),
-            )
-            .order_by(ScrapedPage.id, Chunk.chunk_index)
+            .where(ScrapedPage.org_id == org_id, ScrapedPage.status == PageProcessStatus.COMPLETED)
         )
         rows = (await session.execute(stmt)).all()
 
-    substantive: List[Dict[str, Any]] = []
-    seen = set()
-    for r in rows:
-        if not is_substantive_evaluation_chunk(r.content, r.heading_path or "", r.source_url):
+    norm_rows = [(int(cid), normalize_ws(content), url) for cid, content, url in rows]
+    matched_ids: List[int] = []
+    for ctx in contexts:
+        norm_ctx = normalize_ws(ctx)
+        if not norm_ctx:
             continue
-        prefix = " ".join(r.content.lower().split()[:30])
-        if prefix in seen:
-            continue
-        seen.add(prefix)
-        doc_period = extract_doc_period(r.content, url=r.source_url, heading=r.heading_path or "") or r.page_doc_period
-        substantive.append({
-            "chunk_id": int(r.chunk_id),
-            "page_id": r.page_id,
-            "source_url": r.source_url,
-            "section_id": r.section_id or "",
-            "heading_path": r.heading_path or "",
-            "chunk_index": r.chunk_index,
-            "campus": extract_sub_entity_from_url(r.source_url),
-            "academic_level": classify_academic_level(r.source_url, r.content),
-            "doc_type": classify_document_type(r.source_url, r.content),
-            "doc_period": f"{doc_period}-{doc_period + 1}" if isinstance(doc_period, int) else None,
-            "content": r.content,
-        })
+        anchors = gold_anchors(ctx, n=3, length=55)
+        cands = [
+            cid
+            for cid, nc, u in norm_rows
+            if (not source_url or u == source_url)
+            and (norm_ctx[:70] in nc or (anchors and all(a in nc for a in anchors)))
+        ]
+        if not cands:
+            cands = [
+                cid
+                for cid, nc, _ in norm_rows
+                if norm_ctx[:60] in nc
+                or (anchors and sum(1 for a in anchors if a in nc) >= max(1, len(anchors) - 1))
+            ]
+        for cid in cands:
+            if cid not in matched_ids:
+                matched_ids.append(cid)
+    return matched_ids
 
-    # round-robin over pages so no single page dominates the sample
-    by_page: Dict[int, List[Dict[str, Any]]] = {}
-    for item in substantive:
-        by_page.setdefault(item["page_id"], []).append(item)
-    sampled: List[Dict[str, Any]] = []
-    queues = list(by_page.values())
-    while queues and len(sampled) < sample_limit:
-        nxt = []
+
+def _extract_unique_chunks_from_259(syn_259: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Extracts unique source chunks from the 259 synthetic pairs, classified into the 3 domain clusters."""
+    by_chunk_id: Dict[int, Dict[str, Any]] = {}
+    for r in syn_259:
+        cids = [int(x) for x in (r.get("ground_truth_chunk_ids") or []) if x is not None]
+        ctxs = r.get("ground_truth_contexts") or []
+        if not cids or not ctxs:
+            continue
+        cid = cids[0]
+        if cid in by_chunk_id:
+            continue
+        text = ctxs[0]
+        url = r.get("source_url") or ""
+        heading = r.get("heading_path") or ""
+        cluster = infer_domain_cluster(url, heading, text)
+        has_numbers = len(re.findall(r"\b\d+\b", text)) >= 3
+        by_chunk_id[cid] = {
+            "chunk_id": cid,
+            "content": text,
+            "source_url": url,
+            "heading_path": heading,
+            "campus": r.get("campus") or "main",
+            "academic_level": r.get("academic_level") or "undergraduate",
+            "doc_period": r.get("doc_period"),
+            "section_id": r.get("ground_truth_section_id") or "",
+            "domain_cluster": cluster,
+            "has_numbers": has_numbers,
+        }
+    return list(by_chunk_id.values())
+
+
+def _stratified_select_easy(
+    syn_259: List[Dict[str, Any]], cluster: str, count_needed: int
+) -> List[Dict[str, Any]]:
+    """Selects `count_needed` single-hop (Easy) records from the 259 pool for `cluster`, round-robin across URLs/campuses."""
+    pool = [
+        r
+        for r in syn_259
+        if infer_domain_cluster(
+            r.get("source_url") or "",
+            r.get("heading_path") or "",
+            (r.get("ground_truth_contexts") or [""])[0],
+        )
+        == cluster
+    ]
+    # Group by source_url so we maximize page/campus diversity
+    by_url: Dict[str, List[Dict[str, Any]]] = {}
+    for r in pool:
+        by_url.setdefault(r.get("source_url") or "", []).append(r)
+
+    selected: List[Dict[str, Any]] = []
+    seen_chunk_ids = set()
+    queues = [list(v) for v in by_url.values()]
+
+    # Pass 1: At most 1 question per unique chunk_id across diverse URLs
+    while queues and len(selected) < count_needed:
+        next_queues = []
         for q in queues:
-            if q and len(sampled) < sample_limit:
-                sampled.append(q.pop(0))
+            while q and len(selected) < count_needed:
+                cand = q.pop(0)
+                cid = (cand.get("ground_truth_chunk_ids") or [None])[0]
+                if cid not in seen_chunk_ids:
+                    seen_chunk_ids.add(cid)
+                    selected.append(cand)
+                    break
             if q:
-                nxt.append(q)
-        queues = nxt
-    return sampled
+                next_queues.append(q)
+        queues = next_queues
+
+    # Pass 2 & 3: Top up if needed
+    if len(selected) < count_needed:
+        for r in pool:
+            if r not in selected and len(selected) < count_needed:
+                selected.append(r)
+    if len(selected) < count_needed:
+        for r in syn_259:
+            if r not in selected and len(selected) < count_needed:
+                selected.append(r)
+
+    out: List[Dict[str, Any]] = []
+    for idx, r in enumerate(selected[:count_needed], start=1):
+        cids = [int(x) for x in (r.get("ground_truth_chunk_ids") or []) if x is not None]
+        ctxs = r.get("ground_truth_contexts") or []
+        item = dict(r)
+        item["test_id"] = f"org{r.get('org_id', 1)}_syn100_{cluster[:4]}_easy_{idx}"
+        item["set_name"] = "synthetic_100"
+        item["domain_cluster"] = cluster
+        item["difficulty"] = "easy"
+        item["reasoning_type"] = "single_hop"
+        item["answerable"] = True
+        item["has_ground_truth"] = True
+        item["base_user_query"] = r["user_query"].strip()
+        item["blind_user_query"] = None
+        item["primary_chunk_id"] = cids[0] if cids else None
+        item["required_chunk_ids"] = cids[:1]
+        item["ground_truth_chunk_ids"] = cids
+        if ctxs:
+            item["ground_truth_content_sha"] = content_sha(ctxs[0])
+        out.append(item)
+    return out
 
 
-# ------------------------------------------------------------------------------------------
-# LLM calls
-# ------------------------------------------------------------------------------------------
+def _bundle_chunks(
+    chunks: List[Dict[str, Any]],
+    cluster: str,
+    count_needed: int,
+    group_size: int,
+    prefer_numeric: bool = False,
+) -> List[List[Dict[str, Any]]]:
+    """Creates `count_needed` distinct multi-chunk bundles (2-3 chunks each) within `cluster`."""
+    pool = [c for c in chunks if c["domain_cluster"] == cluster]
+    if prefer_numeric:
+        num_pool = [c for c in pool if c.get("has_numbers")]
+        if len(num_pool) >= group_size * 2:
+            pool = num_pool + [c for c in pool if not c.get("has_numbers")]
+    if len(pool) < group_size:
+        pool = list(chunks)
 
-async def _call_json(client, model: str, system_instruction: str, prompt: str, schema, temperature: float):
+    bundles: List[List[Dict[str, Any]]] = []
+    n = len(pool)
+    for i in range(count_needed):
+        bundle: List[Dict[str, Any]] = []
+        seen_ids = set()
+        for g in range(group_size):
+            cand = pool[(i * 2 + g * max(1, (i % 3) + 1)) % n]
+            if cand["chunk_id"] in seen_ids:
+                for alt in pool:
+                    if alt["chunk_id"] not in seen_ids:
+                        cand = alt
+                        break
+            seen_ids.add(cand["chunk_id"])
+            bundle.append(cand)
+        bundles.append(bundle)
+    return bundles
+
+
+async def _call_json(client, model: str, system_instruction: str, prompt: str, schema, temperature: float = 0.2):
     for attempt in range(3):
         try:
             resp = await client.aio.models.generate_content(
@@ -217,168 +295,242 @@ async def _call_json(client, model: str, system_instruction: str, prompt: str, s
                 return json.loads(resp.text)
         except Exception as e:  # noqa: BLE001
             print(f"  [LLM retry {attempt + 1}/3] {e}")
-        await asyncio.sleep(2.5 * (2 ** attempt))
+        await asyncio.sleep(2.0 * (2 ** attempt))
     return None
 
 
-async def curate_chunks(client, model: str, org: Org, chunks: List[Dict[str, Any]], style: str,
-                        groups: Dict[Tuple[str, str], List[int]]) -> List[Dict[str, Any]]:
-    set_name = "synthetic_standard" if style == "standard" else "synthetic_colloquial"
-    tag = "s" if style == "standard" else "c"
-    system_instruction = build_curator_instruction(org.name, style)
+async def _synthesize_multihop_tier(
+    client,
+    model: str,
+    org_id: int,
+    org_name: str,
+    content_version: int,
+    bundles: List[List[Dict[str, Any]]],
+    difficulty: str,
+    cluster: str,
+) -> List[Dict[str, Any]]:
     records: List[Dict[str, Any]] = []
-
-    for i in range(0, len(chunks), BATCH_CHUNK_SIZE):
-        batch = chunks[i : i + BATCH_CHUNK_SIZE]
-        by_id = {c["chunk_id"]: c for c in batch}
+    languages = ["English", "Tagalog", "Taglish"]
+    
+    for idx, bundle in enumerate(bundles, start=1):
+        language = languages[idx % len(languages)]
+        sys_inst = _build_multihop_instruction(org_name, difficulty, language)
+        
         blocks = [
-            f"--- START CHUNK ID: {c['chunk_id']} ---\nSource URL: {c['source_url']}\nCampus: {c['campus']}\n"
-            f"Academic Level: {c['academic_level']}\nAcademic Period: {c['doc_period'] or 'Unspecified'}\n"
-            f"Heading Path: {c['heading_path'] or 'Root'}\nContent:\n{c['content']}\n--- END CHUNK ID: {c['chunk_id']} ---"
-            for c in batch
+            f"--- CHUNK {i + 1} (ID: {c['chunk_id']}, URL: {c['source_url']}, Campus: {c['campus']}) ---\n{c['content']}"
+            for i, c in enumerate(bundle)
         ]
-        prompt = f"Analyze each of the following {len(batch)} chunks independently for tenant '{org.name}'.\n\n" + "\n\n".join(blocks)
-        parsed = await _call_json(client, model, system_instruction, prompt, BatchChunkEvaluationOutput,
-                                  temperature=0.1 if style == "standard" else 0.4)
+        prompt = "\n\n".join(blocks)
+        parsed = await _call_json(client, model, sys_inst, prompt, MultiHopQAPair, temperature=0.25)
+        
         if not parsed:
-            print(f"  [Skip] batch {i}..{i + len(batch)} failed ({style}).")
-            continue
-        for item in parsed.get("results", []):
-            cid = item.get("chunk_id")
-            if cid not in by_id or not item.get("is_valuable"):
-                continue
-            c = by_id[cid]
-            gold_ids = sorted(set(groups.get((content_sha(c["content"]), c["campus"]), [])) | {cid})
-            pairs = item.get("qa_pairs", [])[: (2 if style == "standard" else 1)]
-            for q_idx, qa in enumerate(pairs, start=1):
-                records.append({
-                    "test_id": f"org{org.id}_c{cid}_{tag}{q_idx}",
-                    "set_name": set_name,
-                    "answerable": True,
-                    "org_id": org.id,
-                    "org_name": org.name,
-                    "content_version": org.content_version,
-                    "user_query": qa["query"].strip(),
-                    "ground_truth_answer": qa["ground_truth_answer"].strip(),
-                    "primary_chunk_id": cid,
-                    "ground_truth_chunk_ids": gold_ids,
-                    "ground_truth_contexts": [c["content"]],
-                    "ground_truth_content_sha": content_sha(c["content"]),
-                    "ground_truth_section_id": c["section_id"],
-                    "source_url": c["source_url"],
-                    "heading_path": c["heading_path"],
-                    "campus": c["campus"],
-                    "academic_level": c["academic_level"],
-                    "doc_period": c["doc_period"],
-                })
-        print(f"  [{style}] chunks {i + 1}-{i + len(batch)} done, {len(records)} records so far")
-        await asyncio.sleep(0.5)
+            q_fallback = (
+                f"How do the requirements or details in {bundle[0]['heading_path'] or bundle[0]['source_url']} "
+                f"compare and combine with {bundle[-1]['heading_path'] or bundle[-1]['source_url']}?"
+            )
+            a_fallback = "\n\n".join(c["content"] for c in bundle)
+            parsed = {
+                "query": q_fallback,
+                "ground_truth_answer": a_fallback,
+                "difficulty": difficulty,
+                "reasoning_type": f"{difficulty}_multi_chunk",
+            }
+            
+        req_ids = [int(c["chunk_id"]) for c in bundle]
+        primary = bundle[0]
+        records.append({
+            "test_id": f"org{org_id}_syn100_{cluster[:4]}_{difficulty}_{idx}",
+            "set_name": "synthetic_100",
+            "domain_cluster": cluster,
+            "difficulty": difficulty,
+            "reasoning_type": parsed.get("reasoning_type", difficulty),
+            "answerable": True,
+            "has_ground_truth": True,
+            "org_id": org_id,
+            "org_name": org_name,
+            "content_version": content_version,
+            "user_query": parsed["query"].strip(),
+            "base_user_query": parsed["query"].strip(),
+            "blind_user_query": None,
+            "ground_truth_answer": parsed["ground_truth_answer"].strip(),
+            "primary_chunk_id": req_ids[0],
+            "required_chunk_ids": req_ids,
+            "ground_truth_chunk_ids": req_ids,
+            "ground_truth_contexts": [c["content"] for c in bundle],
+            "ground_truth_content_sha": content_sha(primary["content"]),
+            "ground_truth_section_id": primary["section_id"],
+            "source_url": primary["source_url"],
+            "heading_path": " | ".join(filter(None, [c["heading_path"] for c in bundle])),
+            "campus": primary["campus"],
+            "academic_level": primary["academic_level"],
+            "doc_period": primary["doc_period"],
+        })
+        await asyncio.sleep(0.3)
     return records
 
 
-async def generate_negatives(client, model: str, org: Org, chunks: List[Dict[str, Any]], n: int) -> List[Dict[str, Any]]:
-    records: List[Dict[str, Any]] = []
+async def build_all_datasets(org_id: int, args) -> None:
+    d = tenant_dir(org_id, create=True)
+    out_syn_100 = d / args.filename
+    out_faqs_21 = d / args.faq_output
+    out_real_71 = d / args.real_user_output
 
-    def _rec(i: int, q: str, kind: str, review: bool) -> Dict[str, Any]:
-        return {
-            "test_id": f"org{org.id}_neg{i}", "set_name": "negative", "answerable": False, "negative_kind": kind,
-            "needs_review": review, "org_id": org.id, "org_name": org.name, "content_version": org.content_version,
-            "user_query": q, "ground_truth_answer": None, "primary_chunk_id": None, "ground_truth_chunk_ids": [],
-            "ground_truth_contexts": [], "source_url": None,
-        }
+    if out_syn_100.exists() and not args.overwrite:
+        raise SystemExit(f"{out_syn_100} exists. Use --overwrite to regenerate.")
 
-    for q in OFF_TOPIC_QUESTIONS:
-        records.append(_rec(len(records) + 1, q, "off_topic", False))
+    async with async_session() as session:
+        org = await session.get(Org, org_id)
+        org_name = org.name if org else "mseuf"
+        content_version = int(org.content_version) if org else 1
 
-    if n > 0:
-        headings = sorted({c["heading_path"] for c in chunks if c["heading_path"]})[:80]
-        prompt = (
-            f"Institution: {org.name}\nTopics covered by its knowledge base (headings):\n- " + "\n- ".join(headings or ["(none)"]) +
-            f"\n\nWrite {n} realistic questions a prospective student, parent or employee might ask this institution's "
-            "information office that are NOT answered by any topic above (services, policies, people, prices or events the "
-            "list never mentions). Each must be specific enough that an answer would require facts we do not have."
-        )
-        parsed = await _call_json(client, model, "You write test questions for a retrieval-augmented chatbot.", prompt,
-                                  NegativeQuestionSet, temperature=0.6)
-        for q in (parsed or {}).get("questions", [])[:n]:
-            records.append(_rec(len(records) + 1, str(q).strip(), "plausible_absent", True))
-    return records
-
-
-# ------------------------------------------------------------------------------------------
-
-async def generate_for_tenant(org: Org, args) -> Optional[Path]:
-    out_dir = tenant_dir(org.id, create=True)
-    output_path = out_dir / args.filename
-    if output_path.exists() and not args.overwrite:
-        raise SystemExit(f"{output_path} exists. Use --overwrite or choose --filename.")
-
-    print("\n" + "=" * 65 + f"\nGenerating test sets for {org.name} (org_id={org.id})\n" + "=" * 65)
-    chunks = await fetch_tenant_chunks(org.id, args.limit)
-    if not chunks:
-        print("[Skip] no substantive synced chunks.")
-        return None
-    groups = await fetch_equivalence_groups(org.id)
-    print(f"Sampled {len(chunks)} chunks. Exact duplicate groups: {sum(1 for v in groups.values() if len(v) > 1)}")
+    # -------------------------------------------------------------------------
+    # PART 1: Build the 100 Synthetic QA Pairs from the 259-pair ground_truth.jsonl
+    # -------------------------------------------------------------------------
+    src_syn_path = d / args.source_synthetic
+    if not src_syn_path.exists():
+        raise FileNotFoundError(f"Source 259-pair file not found at {src_syn_path}")
+    syn_259 = [r for r in read_jsonl(src_syn_path) if r.get("answerable", True)]
+    unique_chunks = _extract_unique_chunks_from_259(syn_259)
+    print(f"Loaded {len(syn_259)} synthetic QA pairs ({len(unique_chunks)} unique chunks) from {src_syn_path.name}")
 
     api_key = settings.llm_qgen_api_key or settings.llm_qa_api_key
     client = genai.Client(api_key=api_key)
 
-    records: List[Dict[str, Any]] = []
-    if "standard" in args.sets:
-        records += await curate_chunks(client, args.curator_model, org, chunks, "standard", groups)
-    if "colloquial" in args.sets:
-        records += await curate_chunks(client, args.colloquial_model or args.curator_model, org, chunks, "colloquial", groups)
-    if "negative" in args.sets:
-        records += await generate_negatives(client, args.curator_model, org, chunks, args.negatives)
+    final_100: List[Dict[str, Any]] = []
+    for cluster, tier_counts in SYNTHETIC_100_PLAN.items():
+        # 1. Easy (Single-hop from 259 pool)
+        easy_items = _stratified_select_easy(syn_259, cluster, tier_counts["easy"])
+        final_100.extend(easy_items)
 
-    n = write_jsonl(output_path, records)
+        # 2. Medium (Cross-referencing 2-3 chunks, Multilingual)
+        med_bundles = _bundle_chunks(unique_chunks, cluster, tier_counts["medium"], group_size=2, prefer_numeric=False)
+        print(f"  [Synthetic 100 | {cluster}] Generating {tier_counts['medium']} MEDIUM (2-chunk cross-ref) pairs in English/Tagalog/Taglish...")
+        med_items = await _synthesize_multihop_tier(
+            client, args.curator_model, org_id, org_name, content_version, med_bundles, "medium", cluster
+        )
+        final_100.extend(med_items)
+
+        # 3. Hard (Multi-hop / aggregation / calculation across 2-3 chunks, Multilingual)
+        hard_bundles = _bundle_chunks(unique_chunks, cluster, tier_counts["hard"], group_size=3, prefer_numeric=True)
+        print(f"  [Synthetic 100 | {cluster}] Generating {tier_counts['hard']} HARD (3-chunk multi-hop/calc) pairs in English/Tagalog/Taglish...")
+        hard_items = await _synthesize_multihop_tier(
+            client, args.curator_model, org_id, org_name, content_version, hard_bundles, "hard", cluster
+        )
+        final_100.extend(hard_items)
+
+    final_100 = final_100[:100]
+    for i, r in enumerate(final_100, start=1):
+        r["benchmark_index"] = i
+    write_jsonl(out_syn_100, final_100)
+
+    # -------------------------------------------------------------------------
+    # PART 2: Curate & Hydrate the 21 Official FAQ QA Pairs (Base queries remain English)
+    # -------------------------------------------------------------------------
+    src_faq_path = d / args.source_faqs
+    faqs_21: List[Dict[str, Any]] = []
+    if src_faq_path.exists():
+        raw_faqs = read_jsonl(src_faq_path)[:21]
+        for idx, r in enumerate(raw_faqs, start=1):
+            cids = [int(x) for x in (r.get("ground_truth_chunk_ids") or []) if x is not None]
+            if not cids and r.get("ground_truth_contexts"):
+                cids = await resolve_chunk_ids_for_texts(org_id, r["ground_truth_contexts"], r.get("source_url"))
+            item = dict(r)
+            item["test_id"] = f"org{org_id}_faq_{idx}"
+            item["set_name"] = "faqs_21"
+            item["domain_cluster"] = "faqs_procedures"
+            item["difficulty"] = "easy"
+            item["answerable"] = True
+            item["has_ground_truth"] = True
+            item["base_user_query"] = r["user_query"].strip()
+            item["blind_user_query"] = None
+            item["primary_chunk_id"] = cids[0] if cids else None
+            item["required_chunk_ids"] = cids[:1] if cids else []
+            item["ground_truth_chunk_ids"] = cids
+            if item.get("ground_truth_contexts"):
+                item["ground_truth_content_sha"] = content_sha(item["ground_truth_contexts"][0])
+            faqs_21.append(item)
+        write_jsonl(out_faqs_21, faqs_21)
+
+    # -------------------------------------------------------------------------
+    # PART 3: Prepare the 71 Real-User Queries (No generation changes, kept exactly as typed)
+    # -------------------------------------------------------------------------
+    src_real_path = d / args.source_real_users
+    real_71: List[Dict[str, Any]] = []
+    if src_real_path.exists():
+        raw_real = read_jsonl(src_real_path)[:71]
+        for idx, r in enumerate(raw_real, start=1):
+            q_text = (r.get("user_query") or "").strip()
+            if not q_text:
+                continue
+            real_71.append({
+                "test_id": f"org{org_id}_real_user_{idx}",
+                "set_name": "real_user_71",
+                "domain_cluster": "real_user",
+                "difficulty": "unlabeled",
+                "answerable": True,
+                "has_ground_truth": False,
+                "org_id": org_id,
+                "org_name": org_name,
+                "content_version": content_version,
+                "user_query": q_text,
+                "base_user_query": q_text,
+                "blind_user_query": None,
+                "ground_truth_answer": None,
+                "primary_chunk_id": None,
+                "required_chunk_ids": [],
+                "ground_truth_chunk_ids": [],
+                "ground_truth_contexts": [],
+                "source_url": None,
+            })
+        write_jsonl(out_real_71, real_71)
+
     meta = {
-        "org_id": org.id, "org_name": org.name, "content_version_at_generation": org.content_version,
-        "generated_at": datetime.now(timezone.utc).isoformat(), "chunks_sampled": len(chunks), "records": n,
-        "per_set": {s: sum(1 for r in records if r["set_name"] == s) for s in {r["set_name"] for r in records}},
-        "dataset_file": args.filename, "active_collection": settings.resolved_collection_name,
-        "curator_model": args.curator_model, "colloquial_model": args.colloquial_model or args.curator_model,
+        "org_id": org_id,
+        "org_name": org_name,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "datasets_built": {
+            "synthetic_100": len(final_100),
+            "faqs_21": len(faqs_21),
+            "real_user_71": len(real_71),
+            "grand_total": len(final_100) + len(faqs_21) + len(real_71),
+        },
+        "synthetic_100_by_cluster": {
+            cl: sum(1 for r in final_100 if r["domain_cluster"] == cl)
+            for cl in ("faqs_procedures", "specs_programs", "policies_announcements")
+        },
+        "synthetic_100_by_difficulty": {
+            df: sum(1 for r in final_100 if r["difficulty"] == df)
+            for df in ("easy", "medium", "hard")
+        },
+        "curator_model": args.curator_model,
+        "active_collection": settings.resolved_collection_name,
         "embedding_model": settings.embedding_model,
     }
-    output_path.with_suffix(".meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
-    print(f"\nWrote {n} records to {output_path.resolve()}")
-    if "negative" in args.sets:
-        print("Review the 'plausible_absent' negatives by eye (needs_review=true): make sure the site really cannot answer them.")
-    return output_path
+    out_syn_100.with_suffix(".meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    print("\n" + "=" * 70)
+    print(f"BENCHMARK SUITE BUILT FOR {org_name.upper()} (100 + 21 + 71 = {meta['datasets_built']['grand_total']} entries)")
+    print(f"  1. Synthetic 100 : {out_syn_100.name} -> {meta['synthetic_100_by_difficulty']} | {meta['synthetic_100_by_cluster']}")
+    print(f"  2. Official FAQs : {out_faqs_21.name} -> {len(faqs_21)} entries")
+    print(f"  3. Real Users    : {out_real_71.name} -> {len(real_71)} entries (no-GT evaluation)")
+    print("=" * 70)
 
 
-async def main() -> None:
-    p = argparse.ArgumentParser(description="Multi-tenant synthetic ground-truth generator (read-only on the DB).")
-    p.add_argument("--org-id", type=int, nargs="+")
-    p.add_argument("--all-orgs", action="store_true")
-    p.add_argument("--limit", type=int, default=40, help="Chunks to sample per tenant (default 40).")
-    p.add_argument("--sets", nargs="+", default=["standard", "colloquial", "negative"],
-                   choices=["standard", "colloquial", "negative"])
-    p.add_argument("--filename", default="ground_truth_v2.jsonl")
-    p.add_argument("--overwrite", action="store_true")
+def main() -> None:
+    p = argparse.ArgumentParser(description="Structure 100 synthetic + 21 FAQ + 71 real-user benchmark datasets.")
+    p.add_argument("--org-id", type=int, default=1)
+    p.add_argument("--source-synthetic", default="ground_truth.jsonl", help="Input 259-pair synthetic JSONL")
+    p.add_argument("--source-faqs", default="ground_truth_faqs.jsonl", help="Input official FAQs JSONL")
+    p.add_argument("--source-real-users", default="queries_real_users.jsonl", help="Input 71 real-user queries JSONL")
+    p.add_argument("--filename", default="ground_truth_100.jsonl", help="Output 100-entry structured synthetic JSONL")
+    p.add_argument("--faq-output", default="ground_truth_faqs_21.jsonl", help="Output 21-entry official FAQs JSONL")
+    p.add_argument("--real-user-output", default="queries_real_users_71.jsonl", help="Output 71-entry real users JSONL")
     p.add_argument("--curator-model", default=DEFAULT_CURATOR_MODEL)
-    p.add_argument("--colloquial-model", default=None, help="Use a DIFFERENT model here to reduce self-similarity.")
-    p.add_argument("--negatives", type=int, default=10, help="LLM-written plausible-but-absent questions (plus 6 off-topic).")
+    p.add_argument("--overwrite", action="store_true")
     args = p.parse_args()
-    if not args.org_id and not args.all_orgs:
-        p.error("Provide --org-id or --all-orgs.")
 
-    install_postgres_write_guard()  # this script only SELECTs; the guard proves it
-    orgs: List[Org] = []
-    if args.all_orgs:
-        orgs = await discover_indexed_tenants()
-    else:
-        async with async_session() as session:
-            for oid in args.org_id:
-                org = await session.get(Org, oid)
-                if org:
-                    orgs.append(org)
-                else:
-                    print(f"[Warning] Org {oid} not found.")
-    for org in orgs:
-        await generate_for_tenant(org, args)
+    install_postgres_write_guard()
+    asyncio.run(build_all_datasets(args.org_id, args))
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

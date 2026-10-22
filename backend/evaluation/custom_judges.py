@@ -1,4 +1,8 @@
-"""LLM-as-judge rubrics. One sample per call (no cross-contamination between items), full contexts (no truncation)."""
+"""LLM-as-judge rubrics:
+  1. Reference-Guided Judge (for the 100 Synthetic & 21 FAQ QA pairs)
+  2. Reference-Free RAG Triad Judge (for the 71 Real-User queries with no ground-truth reference)
+  3. Abstention Judge (for negative/unanswerable queries)
+"""
 import asyncio
 import json
 from typing import Any, Dict, List, Optional, Tuple
@@ -13,11 +17,18 @@ JUDGE_CONCURRENCY = 3
 
 
 class AnswerJudgeScore(BaseModel):
-    groundedness: float = Field(description="0.0-1.0, see rubric")
-    completeness: float = Field(description="0.0-1.0, see rubric")
-    helpfulness: float = Field(description="0.0-1.0, see rubric")
-    context_sufficiency: float = Field(description="0.0-1.0, see rubric")
+    groundedness: float = Field(description="0.0, 0.25, 0.5, 0.75, or 1.0")
+    completeness: float = Field(description="0.0, 0.25, 0.5, 0.75, or 1.0")
+    helpfulness: float = Field(description="0.0, 0.25, 0.5, 0.75, or 1.0")
+    context_sufficiency: float = Field(description="0.0, 0.25, 0.5, 0.75, or 1.0")
     brief_rationale: str = Field(description="One sentence explaining any deduction.")
+
+
+class ReferenceFreeJudgeScore(BaseModel):
+    groundedness: float = Field(description="0.0, 0.25, 0.5, 0.75, or 1.0: are claims supported by contexts?")
+    helpfulness: float = Field(description="0.0, 0.25, 0.5, 0.75, or 1.0: does it directly address the user query?")
+    context_sufficiency: float = Field(description="0.0, 0.25, 0.5, 0.75, or 1.0: do contexts contain the answer?")
+    brief_rationale: str = Field(description="One sentence explaining the verdict.")
 
 
 class AbstentionVerdict(BaseModel):
@@ -43,6 +54,13 @@ context_sufficiency - judging ONLY the Retrieved Contexts, do they contain the e
   1.0 complete unambiguous evidence; 0.5 partial (e.g. part of a list missing); 0.0 irrelevant or empty.
 Judge each score independently."""
 
+REFERENCE_FREE_RUBRIC = """You are an impartial RAG evaluation judge evaluating a real user query WITHOUT a pre-written reference answer.
+Use only these values for every score: 0.0, 0.25, 0.5, 0.75, 1.0.
+
+groundedness - are all factual claims in the Response strictly supported by the Retrieved Contexts? (If the response honestly states that specific details are not in the documents, groundedness is 1.0).
+helpfulness - is the Response clear, direct, polite, and appropriately scoped (including asking a helpful clarification if the user query was vague or conversational)?
+context_sufficiency - judging ONLY the Retrieved Contexts, how well do they contain the information needed to answer the User Query?"""
+
 ABSTENTION_RUBRIC = """You judge whether an assistant correctly REFUSED to answer a question that its knowledge base does
 not cover. Given the question, the retrieved contexts and the response, decide:
   abstained: the response says the information is unavailable / cannot be answered from the documents (a partial
@@ -56,8 +74,9 @@ def _client():
     return genai.Client(api_key=api_key)
 
 
-async def _generate_json(client, model: str, system_instruction: str, prompt: str, schema, attempts: int = 3
-                         ) -> Optional[Dict[str, Any]]:
+async def _generate_json(
+    client, model: str, system_instruction: str, prompt: str, schema, attempts: int = 3
+) -> Optional[Dict[str, Any]]:
     last: Optional[Exception] = None
     for attempt in range(attempts):
         try:
@@ -90,7 +109,7 @@ def _clamp(v: Any) -> Optional[float]:
 
 
 async def run_answer_judges(rows: List[Dict[str, Any]], judge_model: str) -> Tuple[Dict[str, Dict[str, Any]], int]:
-    """rows need: test_id, user_input, reference, retrieved_contexts (list[str]), response. Returns (scores, n_failed)."""
+    """Scores rows that have a ground-truth reference answer (100 Synthetic + 21 FAQs)."""
     client = _client()
     sem = asyncio.Semaphore(JUDGE_CONCURRENCY)
     out: Dict[str, Dict[str, Any]] = {}
@@ -123,8 +142,40 @@ async def run_answer_judges(rows: List[Dict[str, Any]], judge_model: str) -> Tup
     return out, failed
 
 
+async def run_reference_free_judges(rows: List[Dict[str, Any]], judge_model: str) -> Tuple[Dict[str, Dict[str, Any]], int]:
+    """Scores the 71 unlabeled real-user queries using the Reference-Free RAG Triad."""
+    client = _client()
+    sem = asyncio.Semaphore(JUDGE_CONCURRENCY)
+    out: Dict[str, Dict[str, Any]] = {}
+    failed = 0
+
+    async def one(row: Dict[str, Any]) -> None:
+        nonlocal failed
+        ctx = "\n---\n".join(row["retrieved_contexts"])
+        prompt = (
+            f"User Query:\n{row['user_input']}\n\n"
+            f"Retrieved Contexts:\n{ctx}\n\n"
+            f"Response to judge:\n{row['response']}\n"
+        )
+        async with sem:
+            parsed = await _generate_json(client, judge_model, REFERENCE_FREE_RUBRIC, prompt, ReferenceFreeJudgeScore)
+            await asyncio.sleep(0.3)
+        if not parsed:
+            failed += 1
+            return
+        out[row["test_id"]] = {
+            "groundedness": _clamp(parsed.get("groundedness")),
+            "helpfulness": _clamp(parsed.get("helpfulness")),
+            "context_sufficiency": _clamp(parsed.get("context_sufficiency")),
+            "judge_rationale": parsed.get("brief_rationale", ""),
+        }
+
+    await asyncio.gather(*(one(r) for r in rows))
+    return out, failed
+
+
 async def run_abstention_judges(rows: List[Dict[str, Any]], judge_model: str) -> Tuple[Dict[str, Dict[str, Any]], int]:
-    """For unanswerable (negative) rows that the pipeline answered with the LLM. Fallback rows are abstentions by definition."""
+    """Scores negative/unanswerable rows that the pipeline answered with the LLM."""
     client = _client()
     sem = asyncio.Semaphore(JUDGE_CONCURRENCY)
     out: Dict[str, Dict[str, Any]] = {}

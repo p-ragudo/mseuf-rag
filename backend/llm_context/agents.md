@@ -24,7 +24,7 @@ The core retrieval architecture uses **question-augmented indexing**:
 | Dense embeddings | Gemini embeddings (`models/text-embedding-004` or configured model) via `EmbedderFactory` (with FastEmbed, SentenceTransformers, and Ollama alternatives; default 768 / 3072 dim) |
 | Sparse embeddings | fastembed `Qdrant/bm25` (`FastEmbedSparseEmbedder`), IDF modifier applied server-side by Qdrant |
 | Cross-encoder reranker | fastembed `TextCrossEncoder` (default `Xenova/ms-marco-MiniLM-L-12-v2`), with FlashRank and PyTorch Transformers alternatives |
-| Question generation | Gemini (`gemini-2.5-flash`), temperature 0.2, batches of 10 chunks per structured JSON call |
+| Question generation | Gemini (`gemini-3.1-flash-lite`), temperature 0.2, batches of 10 chunks per structured JSON call |
 | Answer synthesis | Gemini (``), temperature 0.3, max 2048 output tokens |
 | Intent classifier | Gemini (`gemini-3.5-flash-lite`), structured JSON output via Pydantic schema (`QueryIntent`) with conversational follow-up rewriting |
 | Semantic cache | Redis via RedisVL `SemanticCache` (or in-memory mock), tenant- and campus-scoped with `content_version` invalidation |

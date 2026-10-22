@@ -6,19 +6,19 @@ Location: `backend/evaluation/`. Everything here is **read-only against producti
 
 ```bash
 cd backend
-mkdir -p evaluation/_old && cp evaluation/*.py evaluation/_old/        # back up your current files
-# copy every file from this package over backend/evaluation/ (same names; new: compat, common, safety, stats, reporting, import_human_queries)
 
-# A. fastest useful run: re-score your EXISTING ground_truth.jsonl with the fixed retrieval metrics (no answer generation)
-uv run python -m evaluation.run_evaluation --org-id 1 --stage retrieval --filename ground_truth.jsonl
+# Step 1: Structure the 3 datasets (100 stratified/tiered Synthetic + 21 hydrated Official FAQs + 71 Real Users = 192 total)
+uv run python -m evaluation.generate_ground_truth --org-id 1 --overwrite
 
-# B. build the stronger test sets (standard + colloquial on the same chunks + unanswerable questions)
-uv run python -m evaluation.generate_ground_truth --org-id 1 --limit 40 --colloquial-model <a-different-model-if-you-can>
-uv run python -m evaluation.run_evaluation --org-id 1 --stage retrieval
+# Step 2: Run the Blind Query Generator on the 100 Synthetic pairs (and 21 FAQs)
+uv run python -m evaluation.blind_query_generator --org-id 1
 
-# C. full run: answers, judges, Ragas, abstention
-uv run python -m evaluation.run_evaluation --org-id 1 --stage all --judge-model <not-the-QA-model-if-you-can>
+# Step 3: Run the complete evaluation across all 192 queries (100 Blind Synthetic + 21 Blind FAQs + 71 Real Users)
+uv run python -m evaluation.run_evaluation --org-id 1 \
+  --filename ground_truth_100_blind.jsonl ground_truth_faqs_21_blind.jsonl queries_real_users_71.jsonl \
+  --use-blind-queries --stage all --allow-prod-read
 ```
+
 If `.env` points at the PRODUCTION Qdrant, add `--allow-prod-read` (reads only; see section 2).
 Results: `evaluation/data/org_<id>/runs/<timestamp>/report.md` (paper-ready tables), `summary.json`, `rows.csv`, `rows.jsonl`. Old runs are never overwritten.
 

@@ -1,16 +1,11 @@
-"""Rank metrics, gold-in-context matching and lexical overlap metrics. No app imports."""
+"""Rank metrics, multi-hop recall, gold-in-context matching, semantic cosine, and lexical overlap metrics. No app imports."""
 import math
 import re
 import string
 from collections import Counter
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from evaluation.common import normalize_ws
-
-# --------------------------------------------------------------------------------------
-# Ranking (chunk level). A hit means the GOLD CHUNK (or an exact same-campus duplicate of it)
-# is in the list. A different chunk from the same page is NOT a hit.
-# --------------------------------------------------------------------------------------
 
 
 def first_rank(ranked_ids: Sequence[Optional[int]], gold_ids: Sequence[int]) -> Optional[int]:
@@ -34,16 +29,63 @@ def first_url_rank(ranked_urls: Sequence[str], gold_url: Optional[str]) -> Optio
 
 
 def rank_metrics(rank: Optional[int], k: int) -> Dict[str, float]:
-    """Hit@k, RR@k and binary NDCG@k for ONE relevant item (IDCG = 1)."""
+    """Single-gold Hit@k, RR@k and binary NDCG@k (IDCG = 1)."""
     if rank is None or rank > k:
         return {"hit": 0.0, "rr": 0.0, "ndcg": 0.0}
     return {"hit": 1.0, "rr": 1.0 / rank, "ndcg": 1.0 / math.log2(rank + 1)}
 
 
-# --------------------------------------------------------------------------------------
-# Did the LLM actually SEE the gold chunk?  (small-to-big expansion merges neighbours, so we
-# match text anchors instead of ids.)
-# --------------------------------------------------------------------------------------
+def multi_gold_metrics(
+    ranked_ids: Sequence[Optional[int]],
+    required_ids: Sequence[int],
+    all_acceptable_ids: Optional[Sequence[int]] = None,
+    k: int = 5,
+) -> Dict[str, float]:
+    """
+    Computes multi-chunk retrieval metrics at cutoff k:
+      - hit: 1.0 if AT LEAST ONE acceptable gold chunk is in top-k (Any-Hit@k)
+      - recall: fraction of required_ids retrieved in top-k (Proportional Recall@k)
+      - all_hit: 1.0 if ALL required_ids are retrieved in top-k (Complete Multi-Hop Hit@k)
+      - rr: Reciprocal rank of the first acceptable gold chunk in top-k (MRR@k)
+      - ndcg: Multi-label binary nDCG@k normalized by IDCG of len(required_ids)
+    """
+    req_set = {int(x) for x in required_ids if x is not None}
+    acc_set = {int(x) for x in (all_acceptable_ids or required_ids) if x is not None} | req_set
+    if not req_set:
+        return {"hit": 0.0, "recall": 0.0, "all_hit": 0.0, "rr": 0.0, "ndcg": 0.0}
+
+    top_k_ids = [int(cid) for cid in ranked_ids[:k] if cid is not None]
+    top_k_set = set(top_k_ids)
+
+    found_req = len(req_set & top_k_set)
+    recall = found_req / len(req_set)
+    all_hit = 1.0 if found_req == len(req_set) else 0.0
+    any_hit = 1.0 if bool(acc_set & top_k_set) else 0.0
+
+    rr = 0.0
+    for idx, cid in enumerate(top_k_ids, start=1):
+        if cid in acc_set:
+            rr = 1.0 / idx
+            break
+
+    dcg = 0.0
+    seen_hits = set()
+    for idx, cid in enumerate(top_k_ids, start=1):
+        if cid in acc_set and cid not in seen_hits:
+            seen_hits.add(cid)
+            dcg += 1.0 / math.log2(idx + 1)
+
+    ideal_hits = min(len(req_set), k)
+    idcg = sum(1.0 / math.log2(i + 1) for i in range(1, ideal_hits + 1))
+    ndcg = min(1.0, dcg / idcg) if idcg > 0 else 0.0
+
+    return {
+        "hit": round(any_hit, 4),
+        "recall": round(recall, 4),
+        "all_hit": round(all_hit, 4),
+        "rr": round(rr, 4),
+        "ndcg": round(ndcg, 4),
+    }
 
 
 def gold_body(text: str) -> str:
@@ -53,7 +95,7 @@ def gold_body(text: str) -> str:
     return (text or "").strip()
 
 
-def gold_anchors(text: str, n: int = 3, length: int = 100) -> List[str]:
+def gold_anchors(text: str, n: int = 3, length: int = 90) -> List[str]:
     body = normalize_ws(gold_body(text))
     if not body:
         return []
@@ -81,17 +123,44 @@ def gold_in_contexts(
     return False, None
 
 
-# --------------------------------------------------------------------------------------
-# Lexical metrics. Weak evidence of answer quality (both texts are LLM-written); keep them as
-# secondary / sanity metrics only.
-# --------------------------------------------------------------------------------------
+def multi_gold_in_contexts(
+    gold_texts: Sequence[str], contexts: Sequence[str], min_fraction: float = 2 / 3
+) -> Tuple[bool, float, Optional[int]]:
+    """
+    Checks all required gold contexts against retrieved expanded contexts.
+    Returns (any_hit, proportional_context_recall, first_ctx_rank).
+    """
+    if not gold_texts:
+        return False, 0.0, None
+    hits = 0
+    best_rank: Optional[int] = None
+    for gt in gold_texts:
+        hit, rnk = gold_in_contexts(gt, contexts, min_fraction=min_fraction)
+        if hit:
+            hits += 1
+            if rnk is not None and (best_rank is None or rnk < best_rank):
+                best_rank = rnk
+    recall = round(hits / len(gold_texts), 4)
+    return hits > 0, recall, best_rank
+
+
+def cosine_similarity(vec_a: Sequence[float], vec_b: Sequence[float]) -> Optional[float]:
+    if not vec_a or not vec_b or len(vec_a) != len(vec_b):
+        return None
+    dot = sum(a * b for a, b in zip(vec_a, vec_b))
+    na = math.sqrt(sum(a * a for a in vec_a))
+    nb = math.sqrt(sum(b * b for b in vec_b))
+    if na == 0.0 or nb == 0.0:
+        return None
+    return round(max(0.0, min(1.0, dot / (na * nb))), 4)
+
 
 _PUNCT = set(string.punctuation)
 
 
 def normalize_text(text: str) -> str:
     text = (text or "").lower()
-    text = re.sub(r"(?<=\d)\s*[-\u2013\u2014/]\s*(?=\d)", " ", text)  # 2025-2026 -> 2025 2026
+    text = re.sub(r"(?<=\d)\s*[-\u2013\u2014/]\s*(?=\d)", " ", text)
     text = text.replace("\u2013", " ").replace("\u2014", " ")
     text = "".join(ch for ch in text if ch not in _PUNCT)
     text = re.sub(r"\b(a|an|the)\b", " ", text)
@@ -127,11 +196,13 @@ def _get_ngrams(tokens: Sequence[str], n: int) -> Counter:
 
 
 def compute_bleu(prediction: str, reference: str, max_n: int = 4) -> float:
+    """Smoothed sentence-level BLEU-4 (Chen & Cherry Method 1)."""
     pred_tokens = tokenize(prediction)
     ref_tokens = tokenize(reference)
     if not pred_tokens or not ref_tokens:
         return 0.0
     precisions: List[float] = []
+    epsilon = 0.1
     for n in range(1, max_n + 1):
         pred_ngrams = _get_ngrams(pred_tokens, n)
         ref_ngrams = _get_ngrams(ref_tokens, n)
@@ -140,8 +211,11 @@ def compute_bleu(prediction: str, reference: str, max_n: int = 4) -> float:
             precisions.append(0.0)
             continue
         clipped = sum(min(count, ref_ngrams[g]) for g, count in pred_ngrams.items())
-        precisions.append((clipped + 1.0) / (total_pred + 1.0) if n > 1 else clipped / total_pred)
-    if any(p <= 0 for p in precisions):
+        if clipped == 0:
+            precisions.append(epsilon / total_pred if n > 1 else 0.0)
+        else:
+            precisions.append(clipped / total_pred)
+    if precisions[0] <= 0 or any(p <= 0 for p in precisions):
         return 0.0
     log_avg = sum(math.log(p) for p in precisions) / max_n
     c, r = len(pred_tokens), len(ref_tokens)
