@@ -1,0 +1,300 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="A homepage and embedded chat assistant concept for Manuel S. Enverga University Foundation."
+    />
+    <meta name="theme-color" content="#791219" />
+    <title>Enverga University — Find your people here</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Poppins:wght@500;600;700;800&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="./styles.css?v=4" />
+  </head>
+  <body>
+    <div class="site">
+      <div class="utility-bar">
+        <div class="utility-inner">
+          <a href="#students">Student</a>
+          <a href="#alumni">Alumni</a>
+          <a href="#faculty">Faculty &amp; Staff</a>
+          <a href="#downloads">Downloads</a>
+          <a href="#careers">Careers</a>
+          <a href="#library">Library</a>
+          <a href="#sites">Sites</a>
+          <button
+            class="search-button"
+            type="button"
+            aria-label="Search programs"
+            aria-haspopup="dialog"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="10.8" cy="10.8" r="6.2"></circle>
+              <path d="m15.5 15.5 4.2 4.2"></path>
+            </svg>
+          </button>
+        </div>
+      </div>
+
+      <header class="main-header">
+        <a class="brand" href="#" aria-label="Enverga University home">
+          <img
+            src="https://mseuf.edu.ph/web4_assets/site/logo/eu-logo.svg"
+            alt="Enverga University"
+          />
+        </a>
+        <div class="header-actions">
+          <div class="action-buttons">
+            <a class="apply-button" href="#apply">APPLY NOW</a>
+            <a class="help-button" href="#help">GET HELP</a>
+          </div>
+          <nav aria-label="Main navigation">
+            <a href="#instruction">INSTRUCTION</a>
+            <a href="#research">RESEARCH</a>
+            <a href="#sustainability">SUSTAINABILITY</a>
+            <a href="#internationalization">INTERNATIONALIZATION</a>
+            <a href="#about">ABOUT</a>
+          </nav>
+        </div>
+        <button
+          class="menu-button"
+          type="button"
+          aria-label="Open menu"
+          aria-expanded="false"
+          aria-controls="mobile-navigation"
+        >
+          <span></span><span></span><span></span>
+        </button>
+        <nav
+          class="mobile-menu"
+          id="mobile-navigation"
+          aria-label="Mobile navigation"
+          hidden
+        >
+          <a href="#instruction">Instruction</a>
+          <a href="#research">Research</a>
+          <a href="#sustainability">Sustainability</a>
+          <a href="#internationalization">Internationalization</a>
+          <a href="#about">About</a>
+          <a href="#apply">Apply now</a>
+        </nav>
+      </header>
+
+      <main>
+        <section class="hero" aria-label="Welcome to Enverga University">
+          <img
+            class="hero-image"
+            src="https://mseuf.edu.ph/web4_assets/homepage/banners/img-8757.webp"
+            alt="Enverga University students enjoying campus life"
+          />
+          <div class="hero-shade"></div>
+          <div class="hero-content">
+            <span class="eyebrow">
+              <span></span> MANUEL S. ENVERGA UNIVERSITY
+            </span>
+            <h1 class="hero-title" aria-live="polite">Find your<br />people here.</h1>
+            <p>
+              Build friendships, discover your passion, and find your place in
+              a university that feels like home.
+            </p>
+            <a
+              class="community-button"
+              href="https://mseuf.edu.ph/"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              JOIN OUR COMMUNITY <span aria-hidden="true">↗</span>
+            </a>
+            <div class="hero-interactions">
+              <div class="slide-indicator" aria-label="Choose a featured slide">
+                <button type="button" aria-label="Show slide 1"></button>
+                <button type="button" aria-label="Show slide 2"></button>
+                <button type="button" aria-label="Show slide 3"></button>
+                <button type="button" aria-label="Show slide 4"></button>
+                <button type="button" aria-label="Show slide 5"></button>
+              </div>
+              <div class="hero-controls">
+                <button type="button" class="slide-toggle" aria-label="Pause slides">
+                  <span aria-hidden="true">Ⅱ</span>
+                </button>
+                <button type="button" class="slide-previous" aria-label="Previous slide">
+                  <span aria-hidden="true">←</span>
+                </button>
+                <span class="slide-count">02 — 05</span>
+                <button type="button" class="slide-next" aria-label="Next slide">
+                  <span aria-hidden="true">→</span>
+                </button>
+              </div>
+            </div>
+          </div>
+          <div class="hero-caption">
+            <span class="hero-caption-label">YOUR JOURNEY STARTS HERE</span>
+          </div>
+        </section>
+
+        <section class="programs" id="instruction">
+          <div class="section-heading">
+            <div>
+              <span class="section-kicker">LEARN WITH PURPOSE</span>
+              <h2>Explore our academic programs</h2>
+              <p class="section-description">
+                Find a program that fits your ambitions and start planning what comes next.
+              </p>
+            </div>
+            <button class="view-all-programs" type="button">
+              <span class="view-all-label">VIEW ALL PROGRAMS</span> <span>↗</span>
+            </button>
+          </div>
+          <div class="program-grid" aria-live="polite">
+            <button
+              class="program-card"
+              type="button"
+              data-title="Undergraduate Programs"
+              data-description="Discover bachelor's degree programs across a broad range of fields. Explore your interests, build practical skills, and prepare for the career you want."
+              data-search="undergraduate bachelor's bachelors college degree programs careers engineering business information technology arts sciences psychology education nursing medical criminology tourism architecture"
+            >
+              <img
+                src="https://mseuf.edu.ph/web4_assets/homepage/programs/undergraduate.webp"
+                alt=""
+                loading="lazy"
+              />
+              <span class="card-arrow" aria-hidden="true">↗</span>
+              <div>
+                <span>01 / FIND YOUR PATH</span>
+                <h3>Undergraduate Programs</h3>
+                <span class="card-action">EXPLORE PROGRAMS <span aria-hidden="true">→</span></span>
+              </div>
+            </button>
+            <button
+              class="program-card"
+              type="button"
+              data-title="Graduate Programs"
+              data-description="Take the next step in your professional journey with graduate studies designed for academicians and working professionals."
+              data-search="graduate master's masters doctorate postgraduate research professional"
+            >
+              <img
+                src="https://mseuf.edu.ph/web4_assets/homepage/programs/graduate.webp"
+                alt=""
+                loading="lazy"
+              />
+              <span class="card-arrow" aria-hidden="true">↗</span>
+              <div>
+                <span>02 / TAKE THE NEXT STEP</span>
+                <h3>Graduate Programs</h3>
+                <span class="card-action">EXPLORE PROGRAMS <span aria-hidden="true">→</span></span>
+              </div>
+            </button>
+            <button
+              class="program-card"
+              type="button"
+              data-title="Pre-school and K-12"
+              data-description="Start a lifelong love of learning with an education journey from preschool through senior high school."
+              data-search="preschool pre-school kindergarten k-12 k12 basic education senior high school"
+            >
+              <img
+                src="https://mseuf.edu.ph/web4_assets/homepage/programs/pre-school.webp"
+                alt=""
+                loading="lazy"
+              />
+              <span class="card-arrow" aria-hidden="true">↗</span>
+              <div>
+                <span>03 / BEGIN YOUR JOURNEY</span>
+                <h3>Pre-school and K-12</h3>
+                <span class="card-action">EXPLORE PROGRAMS <span aria-hidden="true">→</span></span>
+              </div>
+            </button>
+          </div>
+          <p class="program-empty" role="status" hidden>
+            No programs match that search. Try another keyword.
+          </p>
+        </section>
+      </main>
+
+      <footer class="page-footer" id="about">
+        <span>MANUEL S. ENVERGA UNIVERSITY FOUNDATION</span>
+        <span>LUCENA CITY, PHILIPPINES · EST. 1947</span>
+      </footer>
+    </div>
+
+    <dialog class="program-dialog" aria-labelledby="program-dialog-title">
+      <button class="dialog-close" type="button" aria-label="Close program details">
+        <span aria-hidden="true">×</span>
+      </button>
+      <span class="section-kicker">FIND YOUR NEXT STEP</span>
+      <h2 id="program-dialog-title"></h2>
+      <p class="program-dialog-description"></p>
+      <div class="dialog-actions">
+        <button class="dialog-ask" type="button">ASK THE ASSISTANT</button>
+        <a href="https://mseuf.edu.ph/" target="_blank" rel="noopener noreferrer">
+          VISIT MSEUF <span aria-hidden="true">↗</span>
+        </a>
+      </div>
+    </dialog>
+
+    <dialog class="search-dialog" aria-labelledby="search-dialog-title">
+      <form class="program-search">
+        <div class="search-dialog-heading">
+          <div>
+            <span class="section-kicker">YOUR NEXT CHAPTER</span>
+            <h2 id="search-dialog-title">Find a program</h2>
+          </div>
+          <button class="dialog-close search-close" type="button" aria-label="Close search">
+            <span aria-hidden="true">×</span>
+          </button>
+        </div>
+        <label class="sr-only" for="program-search-input">Search academic programs</label>
+        <div class="search-field">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="10.8" cy="10.8" r="6.2"></circle>
+            <path d="m15.5 15.5 4.2 4.2"></path>
+          </svg>
+          <input id="program-search-input" type="search" placeholder="Try “engineering” or “graduate”" />
+          <button class="clear-search" type="reset" aria-label="Clear search">CLEAR</button>
+        </div>
+        <p class="search-hint" role="status">Search undergraduate, graduate, or basic education.</p>
+        <button class="search-submit" type="submit">SHOW MATCHING PROGRAMS <span>→</span></button>
+      </form>
+    </dialog>
+
+    <aside class="chat-panel" aria-label="Enverga University chat assistant">
+      <iframe
+        class="chat-frame"
+        title="Enverga University live chat"
+        data-frontend-url="http://localhost:5173/#/chat/1"
+        data-org-id="1"
+        allow="clipboard-write"
+      ></iframe>
+      <button class="close-chat" type="button" aria-label="Minimize chat">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M5 12h14"></path>
+        </svg>
+      </button>
+      <div class="chat-config-hint" hidden>
+        Start the frontend and set this widget's organization ID to connect the
+        live chat.
+      </div>
+    </aside>
+
+    <button
+      class="chat-launcher"
+      type="button"
+      aria-label="Open Enverga University chat"
+      hidden
+    >
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path
+          d="M20 11.5a7.5 7.5 0 0 1-8 7.5 8.3 8.3 0 0 1-3.5-.8L4 20l1.2-3.3A7 7 0 0 1 4 12c0-4.2 3.6-7.5 8-7.5s8 3.1 8 7Z"
+        ></path>
+        <path d="M8.5 12h.01M12 12h.01M15.5 12h.01"></path>
+      </svg>
+      <span class="launcher-ping"></span>
+    </button>
+    <script src="./script.js?v=4"></script>
+  </body>
+</html>

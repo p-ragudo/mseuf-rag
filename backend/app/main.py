@@ -53,6 +53,7 @@ app = FastAPI(lifespan=lifespan)
 origins = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
+    "http://0.0.0.0:8765/",
     "https://mseuf-rag.vercel.app",
     "https://mseuf-rag-test.netlify.app",
     "https://mseuf-rag-test-staging.netlify.app",
