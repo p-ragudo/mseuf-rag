@@ -1,10 +1,53 @@
 """Small shared helpers (no app imports, safe to unit-test offline)."""
 import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 EVAL_DIR = Path(__file__).resolve().parent
+
+# Common Tagalog function words / particles used to detect Tagalog or Taglish responses
+_TAGALOG_MARKERS = frozenset({
+    "ang", "mga", "ng", "sa", "na", "at", "ay", "po", "opo", "hindi", "kung",
+    "para", "ito", "iyan", "iyon", "kayo", "kami", "tayo", "sila", "niya",
+    "nila", "inyo", "atin", "amin", "kailangan", "pwede", "puwede", "maaari",
+    "paano", "saan", "kailan", "bakit", "ano", "sino", "alin", "magkano",
+    "dahil", "kapag", "upang", "mula", "hanggang", "bilang", "bawat", "lahat",
+    "lamang", "lang", "din", "rin", "daw", "raw", "ba", "pa", "na", "naman",
+    "muna", "pala", "kaya", "tulad", "ayon", "tungkol", "kaugnay", "hakbang",
+    "dokumento", "aplikante", "estudyante", "mag-aaral", "paaralan", "unibersidad",
+})
+
+
+def is_english_text(text: str, max_tagalog_ratio: float = 0.03) -> bool:
+    """Returns True if `text` is written in English (and not Tagalog or Taglish).
+
+    Used to gate traditional lexical metrics (BLEU, ROUGE, Token F1) so they are
+    only computed when the generated answer is in English, matching the English
+    ground-truth reference.
+    """
+    words = re.findall(r"[a-zA-ZÀ-ÿ]+(?:-[a-zA-ZÀ-ÿ]+)?", (text or "").lower())
+    if not words:
+        return False
+    tagalog_hits = sum(1 for w in words if w in _TAGALOG_MARKERS)
+    if tagalog_hits >= 3 or (tagalog_hits / len(words)) > max_tagalog_ratio:
+        return False
+    return True
+
+
+def detect_query_language(text: str) -> str:
+    """Heuristic fallback if a record does not have an explicit `language` field."""
+    words = re.findall(r"[a-zA-ZÀ-ÿ]+(?:-[a-zA-ZÀ-ÿ]+)?", (text or "").lower())
+    if not words:
+        return "English"
+    tagalog_hits = sum(1 for w in words if w in _TAGALOG_MARKERS)
+    ratio = tagalog_hits / len(words)
+    if tagalog_hits == 0:
+        return "English"
+    if ratio >= 0.35:
+        return "Tagalog"
+    return "Taglish"
 
 
 def normalize_ws(text: str) -> str:
@@ -63,14 +106,14 @@ def infer_domain_cluster(url: str = "", heading: str = "", text: str = "") -> st
 
 
 def normalize_record(raw: Dict[str, Any], use_blind_query: bool = False) -> Dict[str, Any]:
-    """Normalizes synthetic_100, faqs_21, real_user_71, and legacy v1/v2 schemas."""
+    """Normalizes synthetic_150, faqs_63, real_user_71, and legacy v1/v2 schemas."""
     r = dict(raw)
     ids = [int(x) for x in (r.get("ground_truth_chunk_ids") or []) if x is not None]
     req_ids = [int(x) for x in (r.get("required_chunk_ids") or ids) if x is not None]
 
     r["ground_truth_chunk_ids"] = ids
     r["required_chunk_ids"] = req_ids
-    r.setdefault("set_name", "synthetic_100")
+    r.setdefault("set_name", "synthetic_150")
     r.setdefault("answerable", r.get("set_name") != "negative")
     r.setdefault(
         "has_ground_truth",
@@ -101,8 +144,15 @@ def normalize_record(raw: Dict[str, Any], use_blind_query: bool = False) -> Dict
         r["user_query"] = blind_q
         r["active_query_mode"] = "blind"
     else:
-        r["user_query"] = r.get("user_query", base_q).strip()
+        r["user_query"] = (r.get("user_query") or base_q).strip()
         r["active_query_mode"] = "blind" if (r.get("query_mode") == "blind") else "base"
+
+    # Preserve explicit language ("English", "Tagalog", "Taglish") or infer from query text
+    explicit_lang = r.get("language") or r.get("language_constraint")
+    if explicit_lang in ("English", "Tagalog", "Taglish"):
+        r["language"] = explicit_lang
+    else:
+        r["language"] = detect_query_language(r["user_query"])
 
     if not r.get("ground_truth_content_sha") and r["ground_truth_contexts"]:
         r["ground_truth_content_sha"] = content_sha(r["ground_truth_contexts"][0])

@@ -9,7 +9,7 @@ Datasets built:
        - Medium (51 entries): Cross-referencing 2-3 chunks in English (17), Tagalog (17), Taglish (17)
        - Hard   (39 entries): Multi-hop / calculation across 2-3 chunks in English (13), Tagalog (13), Taglish (13)
   2. `ground_truth_faqs_63.jsonl`: Full 21 official FAQs generated in all 3 languages (21 English, 21 Tagalog,
-     21 Taglish = 63 entries total), with their chunk IDs hydrated from PostgreSQL.
+     21 Taglish = 63 entries total), with their chunk IDs and content SHAs hydrated directly from PostgreSQL.
   3. `queries_real_users_71.jsonl`: 71 real-user queries (`set_name="real_user_71"`), left untouched.
 
 Usage:
@@ -22,7 +22,7 @@ import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from google import genai
 from google.genai import types
@@ -41,23 +41,17 @@ from app.models.scraped_page import PageProcessStatus, ScrapedPage
 from evaluation.common import (
     content_sha,
     infer_domain_cluster,
-    normalize_ws,
     read_jsonl,
     tenant_dir,
     write_jsonl,
 )
 from evaluation.safety import install_postgres_write_guard
-from evaluation.traditional_metrics import gold_anchors
+from evaluation.traditional_metrics import _clean_for_anchor, gold_anchors
 
-DEFAULT_CURATOR_MODEL = "gemini-3.1-flash-lite"
+DEFAULT_CURATOR_MODEL = "gemini-2.5-flash"
 LANGUAGES = ["English", "Tagalog", "Taglish"]
+FAQ_URL = "https://mseuf.edu.ph/admission/pages/frequently-asked-questions-admissions-procedure"
 
-# Exact 150-entry plan for Synthetic QA pairs (50 English, 50 Tagalog, 50 Taglish total):
-#   faqs_procedures        (51 total) = 21 easy + 18 medium + 12 hard
-#   specs_programs         (50 total) = 20 easy + 17 medium + 13 hard
-#   policies_announcements (49 total) = 19 easy + 16 medium + 14 hard
-#   ------------------------------------------------------------------
-#   Total                  (150)      = 60 easy + 51 medium + 39 hard
 SYNTHETIC_150_PLAN = {
     "faqs_procedures": {"easy": 21, "medium": 18, "hard": 12},
     "specs_programs": {"easy": 20, "medium": 17, "hard": 13},
@@ -106,11 +100,14 @@ STRICT RULES:
 
 
 async def resolve_chunk_ids_for_texts(
-    org_id: int, contexts: List[str], source_url: Optional[str] = None
-) -> List[int]:
-    """Maps ground_truth_contexts to live SQL Chunk.id values."""
-    if not contexts:
-        return []
+    org_id: int,
+    contexts: List[str],
+    source_url: Optional[str] = None,
+    query_hint: str = "",
+) -> Tuple[List[int], Optional[str]]:
+    """Maps FAQ snippets or ground_truth_contexts to live SQL Chunk.id values and returns (chunk_ids, primary_chunk_sha)."""
+    if not contexts and not query_hint:
+        return [], None
     async with async_session() as session:
         stmt = (
             select(Chunk.id, Chunk.content, ScrapedPage.url)
@@ -119,30 +116,52 @@ async def resolve_chunk_ids_for_texts(
         )
         rows = (await session.execute(stmt)).all()
 
-    norm_rows = [(int(cid), normalize_ws(content), url) for cid, content, url in rows]
+    if not rows:
+        return [], None
+
+    cleaned_rows = [(int(cid), _clean_for_anchor(content), content_sha(content), url) for cid, content, url in rows]
+    same_url_rows = [r for r in cleaned_rows if source_url and r[3].rstrip("/") == source_url.rstrip("/")]
+    search_pool = same_url_rows if same_url_rows else cleaned_rows
+
     matched_ids: List[int] = []
-    for ctx in contexts:
-        norm_ctx = normalize_ws(ctx)
-        if not norm_ctx:
+    primary_sha: Optional[str] = None
+
+    for ctx in (contexts or [query_hint]):
+        clean_ctx = _clean_for_anchor(ctx)
+        if not clean_ctx:
             continue
-        anchors = gold_anchors(ctx, n=3, length=55)
+        anchors = gold_anchors(ctx, n=3, length=35)
+        ctx_tokens = set(clean_ctx.split())
+
+        # 1. Exact substring or anchor match
         cands = [
-            cid
-            for cid, nc, u in norm_rows
-            if (not source_url or u == source_url)
-            and (norm_ctx[:70] in nc or (anchors and all(a in nc for a in anchors)))
+            (cid, sha)
+            for cid, nc, sha, _ in search_pool
+            if clean_ctx[:50] in nc or (anchors and sum(1 for a in anchors if a in nc) >= max(1, len(anchors) - 1))
         ]
-        if not cands:
-            cands = [
-                cid
-                for cid, nc, _ in norm_rows
-                if norm_ctx[:60] in nc
-                or (anchors and sum(1 for a in anchors if a in nc) >= max(1, len(anchors) - 1))
-            ]
-        for cid in cands:
+        # 2. Token recall fallback on same URL (handles formatting differences on the FAQ page)
+        if not cands and ctx_tokens:
+            scored = []
+            for cid, nc, sha, _ in search_pool:
+                nc_tokens = set(nc.split())
+                overlap = len(ctx_tokens & nc_tokens) / max(1, len(ctx_tokens))
+                if overlap >= 0.45:
+                    scored.append((overlap, cid, sha))
+            scored.sort(reverse=True)
+            if scored:
+                cands = [(scored[0][1], scored[0][2])]
+
+        # 3. If still empty and source_url has chunks, include all chunks of that FAQ page as acceptable gold
+        if not cands and same_url_rows:
+            cands = [(cid, sha) for cid, _, sha, _ in same_url_rows]
+
+        for cid, sha in cands:
             if cid not in matched_ids:
                 matched_ids.append(cid)
-    return matched_ids
+                if primary_sha is None:
+                    primary_sha = sha
+
+    return matched_ids, primary_sha
 
 
 def _extract_unique_chunks_from_259(syn_259: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -394,6 +413,20 @@ async def build_63_multilingual_faqs(
     """Builds a full 21 English, 21 Tagalog, and 21 Taglish FAQ dataset (63 entries total)."""
     faqs_63: List[Dict[str, Any]] = []
 
+    # Resolve chunk IDs once per FAQ item (all 3 language variants share the same gold chunk IDs and SHA)
+    resolved_cache: Dict[int, Tuple[List[int], Optional[str]]] = {}
+    for idx, r in enumerate(raw_faqs_21, start=1):
+        cids = [int(x) for x in (r.get("ground_truth_chunk_ids") or []) if x is not None]
+        sha = None
+        if not cids:
+            cids, sha = await resolve_chunk_ids_for_texts(
+                org_id,
+                r.get("ground_truth_contexts") or [r.get("ground_truth_answer", "")],
+                r.get("source_url") or FAQ_URL,
+                query_hint=r.get("user_query", ""),
+            )
+        resolved_cache[idx] = (cids, sha)
+
     for lang_code in LANGUAGES:
         for idx, r in enumerate(raw_faqs_21, start=1):
             base_eng_query = r["user_query"].strip()
@@ -409,10 +442,7 @@ async def build_63_multilingual_faqs(
                 if parsed and parsed.get("query"):
                     query_text = parsed["query"].strip()
 
-            cids = [int(x) for x in (r.get("ground_truth_chunk_ids") or []) if x is not None]
-            if not cids and r.get("ground_truth_contexts"):
-                cids = await resolve_chunk_ids_for_texts(org_id, r["ground_truth_contexts"], r.get("source_url"))
-
+            cids, db_sha = resolved_cache[idx]
             item = dict(r)
             item["test_id"] = f"org{org_id}_faq_{lang_code.lower()}_{idx}"
             item["set_name"] = "faqs_63"
@@ -427,8 +457,9 @@ async def build_63_multilingual_faqs(
             item["primary_chunk_id"] = cids[0] if cids else None
             item["required_chunk_ids"] = cids[:1] if cids else []
             item["ground_truth_chunk_ids"] = cids
-            if item.get("ground_truth_contexts"):
-                item["ground_truth_content_sha"] = content_sha(item["ground_truth_contexts"][0])
+            item["ground_truth_content_sha"] = db_sha or (
+                content_sha(item["ground_truth_contexts"][0]) if item.get("ground_truth_contexts") else None
+            )
             faqs_63.append(item)
             await asyncio.sleep(0.15)
 

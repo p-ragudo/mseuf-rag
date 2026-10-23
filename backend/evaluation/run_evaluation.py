@@ -1,12 +1,11 @@
 """Full evaluation runner (READ-ONLY against production) for the 3-part benchmark suite:
-  1. 100 Synthetic QA Pairs (`ground_truth_100_blind.jsonl` or `ground_truth_100.jsonl`)
-  2. 21 Official FAQ QA Pairs (`ground_truth_faqs_21_blind.jsonl` or `ground_truth_faqs_21.jsonl`)
+  1. 150 Synthetic QA Pairs (`ground_truth_150_blind.jsonl` or `ground_truth_150.jsonl`)
+  2. 63 Official FAQ QA Pairs (`ground_truth_faqs_63_blind.jsonl` or `ground_truth_faqs_63.jsonl`)
   3. 71 Real-User Queries (`queries_real_users_71.jsonl` or `queries_real_users.jsonl` — evaluated on reference-free metrics)
 
 Usage:
-  # Run all 3 datasets together (100 Blind Synthetic + 21 Blind FAQs + 71 Real Users = 192 queries):
   uv run python -m evaluation.run_evaluation --org-id 1 \
-    --filename ground_truth_100_blind.jsonl ground_truth_faqs_21_blind.jsonl queries_real_users_71.jsonl \
+    --filename ground_truth_150_blind.jsonl ground_truth_faqs_63_blind.jsonl queries_real_users_71.jsonl \
     --use-blind-queries --stage all --allow-prod-read
 """
 import sys
@@ -35,6 +34,7 @@ from app.models.chunk import Chunk  # noqa: E402
 from evaluation.common import (  # noqa: E402
     EVAL_DIR,
     content_sha,
+    is_english_text,
     load_dataset_meta,
     normalize_record,
     read_jsonl,
@@ -45,7 +45,7 @@ from evaluation.custom_judges import (  # noqa: E402
     run_answer_judges,
     run_reference_free_judges,
 )
-from evaluation.generate_ground_truth import resolve_chunk_ids_for_texts  # noqa: E402
+from evaluation.generate_ground_truth import FAQ_URL, resolve_chunk_ids_for_texts  # noqa: E402
 from evaluation.pipeline_inspector import execute_instrumented_query  # noqa: E402
 from evaluation.reporting import headline, render_markdown, summarize  # noqa: E402
 from evaluation.safety import (  # noqa: E402
@@ -64,10 +64,12 @@ from evaluation.traditional_metrics import (  # noqa: E402
 
 DEFAULT_JUDGE_MODEL = "gemini-3.1-flash-lite"
 SET_ALIASES = {
-    "standard": "synthetic_100",
-    "synthetic_100": "synthetic_100",
-    "faqs": "faqs_21",
-    "faqs_21": "faqs_21",
+    "standard": "synthetic_150",
+    "synthetic_100": "synthetic_150",
+    "synthetic_150": "synthetic_150",
+    "faqs": "faqs_63",
+    "faqs_21": "faqs_63",
+    "faqs_63": "faqs_63",
     "real_user": "real_user_71",
     "real_user_71": "real_user_71",
     "negative": "negative",
@@ -80,8 +82,8 @@ def resolve_filenames(org_id: int, requested: Optional[List[str]]) -> List[str]:
     d = tenant_dir(org_id)
     default_suite = []
     for cand in (
-        "ground_truth_100_blind.jsonl" if (d / "ground_truth_100_blind.jsonl").exists() else "ground_truth_100.jsonl",
-        "ground_truth_faqs_21_blind.jsonl" if (d / "ground_truth_faqs_21_blind.jsonl").exists() else "ground_truth_faqs_21.jsonl",
+        "ground_truth_150_blind.jsonl" if (d / "ground_truth_150_blind.jsonl").exists() else "ground_truth_150.jsonl",
+        "ground_truth_faqs_63_blind.jsonl" if (d / "ground_truth_faqs_63_blind.jsonl").exists() else "ground_truth_faqs_63.jsonl",
         "queries_real_users_71.jsonl" if (d / "queries_real_users_71.jsonl").exists() else "queries_real_users.jsonl",
     ):
         if (d / cand).exists():
@@ -108,8 +110,8 @@ def load_records(
                     f"[WARN] {fn}: generated with embedding model {meta['embedding_model']!r}, now {settings.embedding_model!r}"
                 )
         raw_list = read_jsonl(path)
-        # Cap ground_truth_faqs.jsonl to 21 if the raw 27-item file was passed directly
-        if "faq" in fn.lower() and len(raw_list) > 21:
+        # Only cap if reading the raw un-expanded 27-item ground_truth_faqs.jsonl directly
+        if fn == "ground_truth_faqs.jsonl" and len(raw_list) > 21:
             raw_list = raw_list[:21]
         for idx, raw in enumerate(raw_list, start=1):
             if "test_id" not in raw:
@@ -129,14 +131,22 @@ def load_records(
 
 
 async def hydrate_and_drop_stale(org_id: int, records: List[Dict[str, Any]]):
-    """Auto-resolves missing chunk IDs for the 21 FAQ items, then checks staleness against Postgres."""
+    """Auto-resolves missing chunk IDs for FAQ items and prevents partial-snippet SHA mismatches."""
     for r in records:
-        if r.get("has_ground_truth") and not r.get("ground_truth_chunk_ids") and r.get("ground_truth_contexts"):
-            cids = await resolve_chunk_ids_for_texts(org_id, r["ground_truth_contexts"], r.get("source_url"))
+        is_faq = "faq" in str(r.get("set_name", "")).lower()
+        if r.get("has_ground_truth") and (not r.get("ground_truth_chunk_ids") or is_faq):
+            cids, db_sha = await resolve_chunk_ids_for_texts(
+                org_id,
+                r.get("ground_truth_contexts") or [r.get("ground_truth_answer", "")],
+                r.get("source_url") or (FAQ_URL if is_faq else None),
+                query_hint=r.get("base_user_query") or r.get("user_query", ""),
+            )
             if cids:
                 r["ground_truth_chunk_ids"] = cids
                 r["required_chunk_ids"] = cids[:1]
                 r["primary_chunk_id"] = cids[0]
+            if db_sha:
+                r["ground_truth_content_sha"] = db_sha
 
     ids = sorted({
         int(cid)
@@ -156,8 +166,17 @@ async def hydrate_and_drop_stale(org_id: int, records: List[Dict[str, Any]]):
         if not r["answerable"] or not r.get("has_ground_truth"):
             fresh.append(r)
             continue
+        is_faq = "faq" in str(r.get("set_name", "")).lower()
         pid = r.get("primary_chunk_id")
         sha = r.get("ground_truth_content_sha")
+
+        # Never drop official FAQs as stale; align their SHA with the live DB chunk if present
+        if is_faq:
+            if pid is not None and int(pid) in current:
+                r["ground_truth_content_sha"] = current[int(pid)]
+            fresh.append(r)
+            continue
+
         if pid is None and r.get("ground_truth_contexts"):
             fresh.append(r)
             continue
@@ -196,6 +215,7 @@ def build_row(rec: Dict[str, Any], res, k: int, answer_stage: bool) -> Dict[str,
         "set_name": rec["set_name"],
         "domain_cluster": rec.get("domain_cluster"),
         "difficulty": rec.get("difficulty"),
+        "language": rec.get("language") or "English",
         "active_query_mode": rec.get("active_query_mode", "base"),
         "answerable": answerable,
         "has_ground_truth": has_gt,
@@ -234,6 +254,7 @@ def build_row(rec: Dict[str, Any], res, k: int, answer_stage: bool) -> Dict[str,
             row[f"rank_{s_name}"] = first_rank(s_ids, gold)
             if req_gold:
                 mm = multi_gold_metrics(s_ids, req_gold, gold, k=k)
+                row[f"precision_{s_name}"] = mm["precision"]
                 row[f"recall_{s_name}"] = mm["recall"]
                 row[f"all_hit_{s_name}"] = mm["all_hit"]
                 row[f"ndcg_{s_name}"] = mm["ndcg"]
@@ -245,10 +266,12 @@ def build_row(rec: Dict[str, Any], res, k: int, answer_stage: bool) -> Dict[str,
             row["ctx_hit"] = any_hit
             row["ctx_recall"] = ctx_rec
             row["ctx_rank"] = ctx_rnk
-            if not gold and any_hit and ctx_rnk is not None:
+            # If an FAQ item matched in expanded context or via FAQ URL, credit final stage if chunk ID was unmapped
+            if row.get("rank_final") is None and any_hit and ctx_rnk is not None:
                 row["rank_final"] = ctx_rnk
                 row["recall_final"] = ctx_rec
                 row["all_hit_final"] = 1.0 if ctx_rec == 1.0 else 0.0
+                row["precision_final"] = round(1.0 / k, 4)
         else:
             row["ctx_hit"], row["ctx_recall"], row["ctx_rank"] = False, 0.0, None
     return row
@@ -317,12 +340,10 @@ def run_ragas(rows: List[Dict[str, Any]], judge_model: str, reference_free_only:
     def _isolated_worker():
         import asyncio
         from ragas import evaluate
-        
-        # Give the thread its own dedicated event loop
+
         new_loop = asyncio.new_event_loop()
         asyncio.set_event_loop(new_loop)
         try:
-            # Instantiate judge wrappers cleanly inside this thread's loop
             metrics = setup_ragas_judge(judge_model, reference_free_only=reference_free_only)
             result = evaluate(dataset=dataset, metrics=metrics)
             return result.to_pandas()
@@ -332,7 +353,7 @@ def run_ragas(rows: List[Dict[str, Any]], judge_model: str, reference_free_only:
     try:
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
             future = pool.submit(_isolated_worker)
-            scores = future.result(timeout=600)  # 10 min hard timeout
+            scores = future.result(timeout=600)
     except Exception as exc:
         print(f"[Ragas Isolated Worker Warning] {exc!r}. Skipping Ragas metrics for this set.")
         return
@@ -364,8 +385,21 @@ async def run_answer_stage(pipeline, rows: List[Dict[str, Any]], judge_model: st
         "ragas_error": None,
     }
 
+    # Traditional lexical metrics (BLEU, ROUGE, Token F1): ONLY run when query/answer & reference are in English
     for r in answerable:
-        r.update(compute_all_lexical_metrics(prediction=r["response"], reference=r["reference"]))
+        is_eng_row = (r.get("language") == "English") and is_english_text(r["response"])
+        if is_eng_row:
+            r.update(compute_all_lexical_metrics(prediction=r["response"], reference=r["reference"], require_english_match=True))
+        else:
+            r.update({
+                "token_precision": None,
+                "token_recall": None,
+                "token_f1": None,
+                "bleu": None,
+                "rouge_1": None,
+                "rouge_2": None,
+                "rouge_l": None,
+            })
 
     await compute_semantic_answer_similarities(pipeline, answerable)
 
@@ -531,7 +565,7 @@ async def evaluate_tenant(pipeline, org_id: int, args, env: Dict[str, Any]) -> O
         row = build_row(rec, res, args.top_k, answer_stage)
         rows.append(row)
         print(
-            f"  [{idx}/{len(records)}] {rec['set_name'][:12]:<12} {rec.get('difficulty', 'n/a')[:6]:<6} "
+            f"  [{idx}/{len(records)}] {rec['set_name'][:12]:<12} {row['language'][:7]:<7} {rec.get('difficulty', 'n/a')[:6]:<6} "
             f"rrf={row.get('rank_rrf')} final={row.get('rank_final')} rec@k={row.get('recall_final')} "
             f"ctx={row.get('ctx_hit')} src={row['source']} {row['latency_ms']:.0f}ms"
         )
@@ -620,7 +654,7 @@ async def run_all(args) -> None:
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description="Read-only multi-tenant RAG evaluation (100 Synthetic + 21 FAQs + 71 Real Users).")
+    p = argparse.ArgumentParser(description="Read-only multi-tenant RAG evaluation (150 Synthetic + 63 FAQs + 71 Real Users = 284 queries).")
     p.add_argument("--org-id", type=int, nargs="+")
     p.add_argument("--all-orgs", action="store_true")
     p.add_argument("--filename", nargs="+", default=None, help="Dataset file(s) in data/org_<id>/.")

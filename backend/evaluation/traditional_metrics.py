@@ -5,7 +5,7 @@ import string
 from collections import Counter
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from evaluation.common import normalize_ws
+from evaluation.common import is_english_text, normalize_ws
 
 
 def first_rank(ranked_ids: Sequence[Optional[int]], gold_ids: Sequence[int]) -> Optional[int]:
@@ -44,6 +44,7 @@ def multi_gold_metrics(
     """
     Computes multi-chunk retrieval metrics at cutoff k:
       - hit: 1.0 if AT LEAST ONE acceptable gold chunk is in top-k (Any-Hit@k)
+      - precision: fraction of top-k slots occupied by acceptable gold chunks (Precision@k)
       - recall: fraction of required_ids retrieved in top-k (Proportional Recall@k)
       - all_hit: 1.0 if ALL required_ids are retrieved in top-k (Complete Multi-Hop Hit@k)
       - rr: Reciprocal rank of the first acceptable gold chunk in top-k (MRR@k)
@@ -51,13 +52,15 @@ def multi_gold_metrics(
     """
     req_set = {int(x) for x in required_ids if x is not None}
     acc_set = {int(x) for x in (all_acceptable_ids or required_ids) if x is not None} | req_set
-    if not req_set:
-        return {"hit": 0.0, "recall": 0.0, "all_hit": 0.0, "rr": 0.0, "ndcg": 0.0}
+    if not req_set or k <= 0:
+        return {"hit": 0.0, "precision": 0.0, "recall": 0.0, "all_hit": 0.0, "rr": 0.0, "ndcg": 0.0}
 
     top_k_ids = [int(cid) for cid in ranked_ids[:k] if cid is not None]
     top_k_set = set(top_k_ids)
 
     found_req = len(req_set & top_k_set)
+    found_acc = sum(1 for cid in top_k_ids if cid in acc_set)
+    precision = found_acc / k
     recall = found_req / len(req_set)
     all_hit = 1.0 if found_req == len(req_set) else 0.0
     any_hit = 1.0 if bool(acc_set & top_k_set) else 0.0
@@ -81,6 +84,7 @@ def multi_gold_metrics(
 
     return {
         "hit": round(any_hit, 4),
+        "precision": round(precision, 4),
         "recall": round(recall, 4),
         "all_hit": round(all_hit, 4),
         "rr": round(rr, 4),
@@ -95,8 +99,15 @@ def gold_body(text: str) -> str:
     return (text or "").strip()
 
 
-def gold_anchors(text: str, n: int = 3, length: int = 90) -> List[str]:
-    body = normalize_ws(gold_body(text))
+def _clean_for_anchor(text: str) -> str:
+    """Strips markdown formatting and punctuation so FAQ snippets match scraped page chunks reliably."""
+    t = gold_body(text).lower()
+    t = re.sub(r"[^a-z0-9\s]", " ", t)
+    return " ".join(t.split())
+
+
+def gold_anchors(text: str, n: int = 3, length: int = 45) -> List[str]:
+    body = _clean_for_anchor(text)
     if not body:
         return []
     if len(body) <= length:
@@ -104,8 +115,8 @@ def gold_anchors(text: str, n: int = 3, length: int = 90) -> List[str]:
     anchors = []
     for i in range(n):
         start = int((len(body) - length) * i / max(1, n - 1))
-        anchors.append(body[start : start + length])
-    return anchors
+        anchors.append(body[start : start + length].strip())
+    return [a for a in anchors if a]
 
 
 def gold_in_contexts(
@@ -116,7 +127,7 @@ def gold_in_contexts(
     if not anchors:
         return False, None
     for idx, ctx in enumerate(contexts, start=1):
-        norm_ctx = normalize_ws(ctx)
+        norm_ctx = _clean_for_anchor(ctx)
         found = sum(1 for a in anchors if a in norm_ctx)
         if found / len(anchors) >= min_fraction:
             return True, idx
@@ -270,7 +281,27 @@ def compute_rouge_l(prediction: str, reference: str) -> float:
     return round((2 * prec * rec) / (prec + rec), 4)
 
 
-def compute_all_lexical_metrics(prediction: str, reference: str) -> Dict[str, float]:
+def compute_all_lexical_metrics(
+    prediction: str,
+    reference: str,
+    require_english_match: bool = True,
+) -> Dict[str, Optional[float]]:
+    """Computes Token Precision/Recall/F1, BLEU-4, and ROUGE-1/2/L.
+
+    If `require_english_match` is True and either `prediction` or `reference` is not in English
+    (e.g. a Tagalog or Taglish response compared against an English reference), returns `None`
+    for all lexical metrics so cross-language answers do not artificially tank lexical scores.
+    """
+    if require_english_match and (not is_english_text(prediction) or not is_english_text(reference)):
+        return {
+            "token_precision": None,
+            "token_recall": None,
+            "token_f1": None,
+            "bleu": None,
+            "rouge_1": None,
+            "rouge_2": None,
+            "rouge_l": None,
+        }
     f1 = compute_token_f1(prediction, reference)
     return {
         "token_precision": f1["precision"],

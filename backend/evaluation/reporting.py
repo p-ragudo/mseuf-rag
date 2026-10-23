@@ -88,9 +88,9 @@ def retrieval_block(pos: List[Dict[str, Any]], k: int, n_boot: int, seed: int) -
 def slice_breakdown(pos: List[Dict[str, Any]], slice_key: str, k: int, n_boot: int, seed: int) -> Dict[str, Dict[str, Any]]:
     """Computes retrieval and answer metrics grouped by a metadata key (e.g. 'language', 'difficulty', 'domain_cluster')."""
     out: Dict[str, Dict[str, Any]] = {}
-    keys = sorted({str(r.get(slice_key) or "unspecified") for r in pos})
+    keys = sorted({str(r.get(slice_key) or "English") for r in pos})
     for val in keys:
-        sub = [r for r in pos if str(r.get(slice_key) or "unspecified") == val]
+        sub = [r for r in pos if str(r.get(slice_key) or "English") == val]
         if not sub:
             continue
         cl = [r["cluster"] for r in sub]
@@ -98,13 +98,17 @@ def slice_breakdown(pos: List[Dict[str, Any]], slice_key: str, k: int, n_boot: i
         ms = [rank_metrics(x, k) for x in ranks]
         recalls = [r.get("recall_final", m["hit"]) for r, m in zip(sub, ms)]
         all_hits = [r.get("all_hit_final", m["hit"]) for r, m in zip(sub, ms)]
+        ctx_vals = [
+            float(r["ctx_recall"]) if _isnum(r.get("ctx_recall")) else (1.0 if r.get("ctx_hit") else 0.0)
+            for r in sub
+        ]
         entry: Dict[str, Any] = {
             "n": len(sub),
             "hit@k": _block([m["hit"] for m in ms], cl, n_boot, seed),
             "recall@k": _block(recalls, cl, n_boot, seed),
             "all_hit@k": _block(all_hits, cl, n_boot, seed),
             "mrr@k": _block([m["rr"] for m in ms], cl, n_boot, seed),
-            "ctx_recall": _block([float(r.get("ctx_recall", 1.0 if r.get("ctx_hit") else 0.0)) for r in sub], cl, n_boot, seed),
+            "ctx_recall": _block(ctx_vals, cl, n_boot, seed),
         }
         for m_name in ("groundedness", "completeness", "answer_semantic_similarity", "token_f1", "rouge_l", "bleu"):
             vs = [(r[m_name], r["cluster"]) for r in sub if _isnum(r.get(m_name))]
@@ -148,6 +152,7 @@ def summarize(
         "retrieval": {},
         "global_aggregate": {},
         "by_language": {},
+        "by_dataset_and_language": {},
         "by_difficulty": {},
         "by_domain_cluster": {},
         "reranker_effect": {},
@@ -183,7 +188,6 @@ def summarize(
             "mrr@k": _block([m["rr"] for m in ms_all], cl_all, n_boot, seed),
             "answers": global_ans,
         }
-        # Slices for ground-truth datasets
         out["by_difficulty"] = slice_breakdown(pos_all, "difficulty", k, n_boot, seed)
         out["by_domain_cluster"] = slice_breakdown(pos_all, "domain_cluster", k, n_boot, seed)
         out["by_language"] = slice_breakdown(pos_all, "language", k, n_boot, seed)
@@ -195,15 +199,20 @@ def summarize(
             continue
         has_gt = pos[0].get("has_ground_truth", True)
         out["n"][s] = {"queries": len(pos), "gold_chunks": len({r["cluster"] for r in pos})}
-        
+
         if has_gt:
             out["retrieval"][s] = retrieval_block(pos, k, n_boot, seed)
+            out["by_dataset_and_language"][s] = slice_breakdown(pos, "language", k, n_boot, seed)
             out["reranker_effect"][s] = paired_effect(pos, "rank_rrf", "rank_rerank", k, n_boot, seed)
             out["temporal_effect"][s] = paired_effect(pos, "rank_rerank", "rank_final", k, n_boot, seed)
             cl = [r["cluster"] for r in pos]
+            ctx_vals = [
+                float(r["ctx_recall"]) if _isnum(r.get("ctx_recall")) else (1.0 if r.get("ctx_hit") else 0.0)
+                for r in pos
+            ]
             ctx = {
                 "gold_in_context": _block([1.0 if r.get("ctx_hit") else 0.0 for r in pos], cl, n_boot, seed),
-                "proportional_ctx_recall": _block([float(r.get("ctx_recall", 1.0 if r.get("ctx_hit") else 0.0)) for r in pos], cl, n_boot, seed),
+                "proportional_ctx_recall": _block(ctx_vals, cl, n_boot, seed),
             }
             out["context"][s] = ctx
 
@@ -307,6 +316,8 @@ def render_markdown(s: Dict[str, Any], k: int) -> str:
         ]
         if ga.get("answers") and "groundedness" in ga["answers"]:
             L.append(f"- **Overall Groundedness**: {_f(ga['answers']['groundedness'])}")
+            L.append(f"- **Overall Completeness**: {_f(ga['answers'].get('completeness'))}")
+            L.append(f"- **Overall Semantic Similarity**: {_f(ga['answers'].get('answer_semantic_similarity'))}")
         L.append("")
 
     # 2. Per-Dataset Retrieval Breakdown
@@ -330,9 +341,16 @@ def render_markdown(s: Dict[str, Any], k: int) -> str:
             ])
         L += [_table(["Stage", "Hit@1", f"Hit@{k}", f"Precision@{k}", f"Recall@{k}", f"All-Hit@{k}", f"MRR@{k}", f"nDCG@{k}"], rows), ""]
 
-    # 3. Breakdown by Language (English vs Tagalog vs Taglish)
+    # 3. Breakdown by Language (Global & Per-Dataset)
     if s.get("by_language"):
-        L += ["## 3. Breakdown by Language (English vs. Tagalog vs. Taglish)", ""]
+        L += [
+            "## 3. Breakdown by Language (English vs. Tagalog vs. Taglish)",
+            "",
+            "*Note: Traditional lexical metrics (Token F1, ROUGE-L, BLEU) are computed strictly on English responses matching the English reference texts (`n/a` for Tagalog/Taglish).* ",
+            "",
+            "### 3a. Combined Ground-Truth Datasets by Language",
+            "",
+        ]
         rows = []
         for lang_name, b in s["by_language"].items():
             rows.append([
@@ -345,8 +363,29 @@ def render_markdown(s: Dict[str, Any], k: int) -> str:
                 _f(b.get("groundedness")),
                 _f(b.get("completeness")),
                 _f(b.get("answer_semantic_similarity")),
+                _f(b.get("token_f1")),
+                _f(b.get("rouge_l")),
+                _f(b.get("bleu")),
             ])
-        L += [_table(["Language", "n", f"Hit@{k}", f"Recall@{k}", f"MRR@{k}", "Ctx Recall", "Groundedness", "Completeness", "Semantic Sim"], rows), ""]
+        L += [_table(["Language", "n", f"Hit@{k}", f"Recall@{k}", f"MRR@{k}", "Ctx Recall", "Groundedness", "Completeness", "Semantic Sim", "Token F1 (EN)", "ROUGE-L (EN)", "BLEU (EN)"], rows), ""]
+
+        for ds_name, lang_map in s.get("by_dataset_and_language", {}).items():
+            L += [f"### 3b. {ds_name} by Language", ""]
+            ds_rows = []
+            for lang_name, b in lang_map.items():
+                ds_rows.append([
+                    lang_name,
+                    str(b["n"]),
+                    _f(b["hit@k"]),
+                    _f(b["recall@k"]),
+                    _f(b["mrr@k"]),
+                    _f(b["ctx_recall"]),
+                    _f(b.get("groundedness")),
+                    _f(b.get("completeness")),
+                    _f(b.get("answer_semantic_similarity")),
+                    _f(b.get("token_f1")),
+                ])
+            L += [_table(["Language", "n", f"Hit@{k}", f"Recall@{k}", f"MRR@{k}", "Ctx Recall", "Groundedness", "Completeness", "Semantic Sim", "Token F1 (EN)"], ds_rows), ""]
 
     # 4. Breakdown by Difficulty Tier
     if s.get("by_difficulty"):
@@ -368,11 +407,23 @@ def render_markdown(s: Dict[str, Any], k: int) -> str:
             ])
         L += [_table(["Tier", "n", f"Hit@{k}", f"Recall@{k}", f"All-Hit@{k}", f"MRR@{k}", "Completeness", "Semantic Sim"], rows), ""]
 
-    # 5. Real-User Queries Telemetry (Untouched block)
+    # 5. Answer Quality Table
+    if s.get("answers"):
+        L += ["## 5. Per-Dataset Answer Quality Summary", ""]
+        hdr = ["Metric"] + list(s["answers"].keys())
+        rows = [
+            ["answered n"] + [str(a["n_answered"]) for a in s["answers"].values()],
+            ["fallback rate"] + [_f(a["fallback_rate"]) for a in s["answers"].values()],
+        ]
+        for mt in ANSWER_METRICS:
+            rows.append([mt] + [_f(a.get(mt)) for a in s["answers"].values()])
+        L += [_table(hdr, rows), ""]
+
+    # 6. Real-User Queries Telemetry (Untouched block)
     if s.get("real_user_telemetry"):
         ru = s["real_user_telemetry"]
         L += [
-            f"## 5. Real-User Queries Telemetry (n = {ru['n']} unlabeled queries, Reference-Free Metrics)",
+            f"## 6. Real-User Queries Telemetry (n = {ru['n']} unlabeled queries, Reference-Free Metrics)",
             "",
             f"- Answered rate: {_f(ru['answered_rate'])}  |  Fallback rate: {_f(ru['fallback_rate'])}  |  Campus filter triggered: {_f(ru['campus_detected_rate'])}",
             f"- Reference-Free Groundedness: {_f(ru.get('groundedness'))}  |  Helpfulness: {_f(ru.get('helpfulness'))}  |  Context Sufficiency: {_f(ru.get('context_sufficiency'))}",
@@ -383,7 +434,7 @@ def render_markdown(s: Dict[str, Any], k: int) -> str:
     lat = s["latency"]
     if lat.get("total_ms", {}).get("n"):
         L += [
-            "## 6. Latency",
+            "## 7. Latency",
             "",
             f"- Total p50/p95: {lat['total_ms']['p50']:.0f} / {lat['total_ms']['p95']:.0f} ms  |  Retrieval-only p50/p95: {lat['retrieval_ms']['p50']:.0f} / {lat['retrieval_ms']['p95']:.0f} ms",
             "",
