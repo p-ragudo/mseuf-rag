@@ -1,6 +1,6 @@
 <script lang="ts">
   import { replace } from "svelte-spa-router";
-  import { authFetch } from "../auth.svelte";
+  import { authFetch, logout } from "../auth.svelte";
 
   let organizationName = $state("");
   let creating = $state(false);
@@ -8,6 +8,11 @@
 
   function checkMembershipAgain() {
     window.dispatchEvent(new Event("organization-membership-changed"));
+  }
+
+  function handleLogout() {
+    logout();
+    replace("/login");
   }
 
   async function createOrganization(event: SubmitEvent) {
@@ -111,6 +116,13 @@
         onclick={checkMembershipAgain}
       >
         I was added; check my access
+      </button>
+      <button
+        type="button"
+        class="mt-3 block w-full text-sm font-semibold text-red-600 hover:underline"
+        onclick={handleLogout}
+      >
+        Log out
       </button>
     </div>
   </section>
