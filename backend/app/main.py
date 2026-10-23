@@ -57,7 +57,8 @@ origins = [
     "https://mseuf-rag.vercel.app",
     "https://mseuf-rag-test.netlify.app",
     "https://mseuf-rag-test-staging.netlify.app",
-    "https://mseuf-chat.netlify.app"
+    "https://mseuf-chat.netlify.app",
+    "https://mseuf-mockup.netlify.app"
 ]
 
 app.add_middleware(
